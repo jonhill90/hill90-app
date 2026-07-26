@@ -4,9 +4,14 @@
 # Stage 1: Build Go CLI
 FROM golang:1.23-alpine AS go-builder
 
+# TARGETARCH is supplied by BuildKit and matches the image being built. It was
+# previously hardcoded to amd64, which produced an x86-64 binary inside arm64
+# images — the akm CLI then failed with "exec format error", including in the
+# agentbox image, which copies it from here.
+ARG TARGETARCH
 WORKDIR /build
 COPY cli/ ./
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o akm .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o akm .
 
 # Stage 2: Build Python dependencies
 FROM python:3.12-slim AS py-builder

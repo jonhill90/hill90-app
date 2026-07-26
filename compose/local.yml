@@ -1,0 +1,355 @@
+# Hill90 — local development stack
+#
+# Self-contained: creates its own networks, no Traefik, no Tailscale, no
+# OpenBao, no VPS. Services are reached on published ports rather than by
+# hostname routing, so none of the 37 traefik.* labels in
+# deploy/compose/prod/ are used or needed here.
+#
+#   ./scripts/local.sh up        # generates .env.local + keys, then starts
+#   docker compose -f compose/local.yml --env-file .env.local up -d
+#
+# Ports are in a 13000/18000 band to avoid colliding with anything already
+# bound on 3000/5432/8054.
+
+name: hill90-local
+
+networks:
+  # The stack's own network. In production this is hill90_internal, created by
+  # docker-compose.infra.yml, which stayed in the Hill90 infrastructure repo.
+  default:
+    name: hill90_local
+
+  # Agent container networks. services/api attaches agentbox containers to
+  # these by name (services/api/src/services/docker.ts:22-23), so they must
+  # exist. Created here rather than declared external — nothing else provides
+  # them locally.
+  agent_sandbox:
+    name: hill90_agent_sandbox
+    driver: bridge
+    internal: true
+  agent_internal:
+    name: hill90_agent_internal
+    driver: bridge
+
+volumes:
+  postgres-data:
+  minio-data:
+  knowledge-data:
+  agentbox-configs:
+
+services:
+  # ---------------------------------------------------------------- data ---
+  postgres:
+    # pgvector, not stock postgres: services/knowledge migration 011 creates
+    # the `vector` extension and boot fails without it.
+    image: pgvector/pgvector:pg16
+    container_name: hill90-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-hill90}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-hill90}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Same bootstrap the production stack uses: creates keycloak, hill90_api,
+      # hill90_akm, hill90_litellm. Idempotent, runs only on an empty volume.
+      - ../platform/data/postgres/init.sh:/docker-entrypoint-initdb.d/10-init.sh:ro
+    ports:
+      - "${PORT_POSTGRES:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-hill90} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: hill90-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-hill90admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-hill90admin}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${PORT_MINIO:-19000}:9000"
+      - "${PORT_MINIO_CONSOLE:-19001}:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------- auth ---
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    container_name: hill90-keycloak
+    command: ["start-dev", "--import-realm", "--http-port=8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${DB_USER:-hill90}
+      KC_DB_PASSWORD: ${DB_PASSWORD:-hill90}
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      # Force the browser-facing URL into issuer and authorization endpoints, so
+      # `iss` is identical whether a token is obtained via localhost:18080 or
+      # via keycloak:8080 on the compose network.
+      KC_HOSTNAME: http://localhost:${PORT_KEYCLOAK:-18080}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    volumes:
+      # Local realm: same clients and roles as platform/auth/keycloak/hill90-realm.json
+      # but with localhost redirect URIs, sslRequired=none, a fixed client
+      # secret, and a seeded dev/dev user. Regenerate with scripts/local.sh realm.
+      - ./local/keycloak/realm-local.json:/opt/keycloak/data/import/realm-local.json:ro
+    ports:
+      - "${PORT_KEYCLOAK:-18080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # Keycloak 26 serves health on the management port 9000, and the image
+      # ships no curl or wget — hence the bash /dev/tcp handshake.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000; printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  # ------------------------------------------------------------ inference ---
+  litellm:
+    # Same pin as deploy/compose/prod/docker-compose.ai.yml:28.
+    image: docker.litellm.ai/berriai/litellm:main-v1.81.12-stable
+    container_name: hill90-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      # Real provider keys are only needed for actual inference. LiteLLM starts
+      # without them; requests to a provider will fail until they are set.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DATABASE_URL: postgresql://${DB_USER:-hill90}:${DB_PASSWORD:-hill90}@postgres:5432/hill90_litellm
+    volumes:
+      - ../platform/ai/litellm_config.yaml:/app/config.yaml:ro
+    ports:
+      - "${PORT_LITELLM:-14000}:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness').status<400 else 1)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ------------------------------------------------------------ services ---
+  api:
+    # The service MUST be named `api`: services/api hardcodes
+    # http://api:3000 for its own chat and workflow callbacks
+    # (src/routes/chat.ts:183, src/routes/workflows.ts:277,499,
+    #  src/services/workflow-scheduler.ts:152).
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    image: hill90/api:local
+    container_name: hill90-api
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${DB_USER:-hill90}:${DB_PASSWORD:-hill90}@postgres:5432/hill90_api
+      # Must match the UI's AUTH_KEYCLOAK_ISSUER exactly or the `iss` claim
+      # fails. This is the browser-facing URL because that is what Keycloak
+      # stamps into tokens.
+      KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/hill90
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      AI_SERVICE_URL: http://ai:8000
+      MODEL_ROUTER_URL: http://ai:8000
+      AKM_SERVICE_URL: http://knowledge:8002
+      API_INTERNAL_URL: http://api:3000
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-hill90admin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-hill90admin}
+      AKM_SIGNING_PRIVATE_KEY: ${AKM_SIGNING_PRIVATE_KEY}
+      AKM_INTERNAL_SERVICE_TOKEN: ${AKM_INTERNAL_SERVICE_TOKEN}
+      MODEL_ROUTER_SIGNING_PRIVATE_KEY: ${MODEL_ROUTER_SIGNING_PRIVATE_KEY}
+      MODEL_ROUTER_INTERNAL_SERVICE_TOKEN: ${MODEL_ROUTER_INTERNAL_SERVICE_TOKEN}
+      PROVIDER_KEY_ENCRYPTION_KEY: ${PROVIDER_KEY_ENCRYPTION_KEY}
+      CHAT_CALLBACK_TOKEN: ${CHAT_CALLBACK_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      SECRETS_SCHEMA_PATH: /data/secrets-schema.yaml
+      # Agent containers: the API drives the Docker daemon directly here. The
+      # production stack puts tecnativa/docker-socket-proxy in between; locally
+      # the socket is mounted read-write because container create/start needs it.
+      AGENTBOX_CONFIG_HOST_PATH: ${AGENTBOX_CONFIG_HOST_PATH:-}
+      AGENTBOX_CONFIG_LOCAL_PATH: /data/agentbox
+      # All three exporters must be "none": OTEL_SDK_DISABLED alone still lets
+      # opentelemetry-instrument resolve metric/log exporters and throw.
+      OTEL_SDK_DISABLED: "true"
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    volumes:
+      - agentbox-configs:/data/agentbox
+      - ../platform/vault/secrets-schema.yaml:/data/secrets-schema.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${PORT_API:-13001}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  ai:
+    build:
+      context: ../services/ai
+      dockerfile: Dockerfile
+    image: hill90/ai:local
+    container_name: hill90-ai
+    environment:
+      ENVIRONMENT: local
+      # Shares the API's database — the AI service runs no migrations of its
+      # own and reads tables created by services/api.
+      DATABASE_URL: postgresql://${DB_USER:-hill90}:${DB_PASSWORD:-hill90}@postgres:5432/hill90_api
+      LITELLM_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      PUBLIC_KEY_PATH: /etc/akm/model-router-public.pem
+      MODEL_ROUTER_INTERNAL_SERVICE_TOKEN: ${MODEL_ROUTER_INTERNAL_SERVICE_TOKEN}
+      PROVIDER_KEY_ENCRYPTION_KEY: ${PROVIDER_KEY_ENCRYPTION_KEY}
+      API_SERVICE_URL: http://api:3000
+      # All three exporters must be "none": OTEL_SDK_DISABLED alone still lets
+      # opentelemetry-instrument resolve metric/log exporters and throw.
+      OTEL_SDK_DISABLED: "true"
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    volumes:
+      - ./local/keys:/etc/akm:ro
+    ports:
+      - "${PORT_AI:-18000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    healthcheck:
+      # /health, not /health/ready: readiness also probes LiteLLM, so the
+      # container would sit unhealthy whenever no provider is configured.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status<400 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  knowledge:
+    build:
+      context: ../services/knowledge
+      dockerfile: Dockerfile
+    image: hill90/knowledge:local
+    container_name: hill90-knowledge
+    environment:
+      # AKM_INTERNAL_SERVICE_TOKEN is the one genuinely mandatory variable in
+      # the whole stack: services/knowledge/app/config.py:20-24 raises if empty.
+      AKM_INTERNAL_SERVICE_TOKEN: ${AKM_INTERNAL_SERVICE_TOKEN}
+      AKM_DATABASE_URL: postgresql://${DB_USER:-hill90}:${DB_PASSWORD:-hill90}@postgres:5432/hill90_akm
+      AKM_PUBLIC_KEY_PATH: /etc/akm/public.pem
+      AKM_DATA_DIR: /data/knowledge
+      AKM_CONTEXT_TOKEN_BUDGET: 2000
+      AI_SERVICE_URL: http://ai:8000
+      MODEL_ROUTER_INTERNAL_SERVICE_TOKEN: ${MODEL_ROUTER_INTERNAL_SERVICE_TOKEN}
+      LITELLM_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      EMBEDDING_MODEL: text-embedding-3-small
+      # All three exporters must be "none": OTEL_SDK_DISABLED alone still lets
+      # opentelemetry-instrument resolve metric/log exporters and throw.
+      OTEL_SDK_DISABLED: "true"
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    volumes:
+      - knowledge-data:/data/knowledge
+      - ./local/keys:/etc/akm:ro
+    ports:
+      - "${PORT_KNOWLEDGE:-18002}:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health').status<400 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  mcp:
+    build:
+      context: ../services/mcp
+      dockerfile: Dockerfile
+    image: hill90/mcp:local
+    container_name: hill90-mcp
+    environment:
+      ENVIRONMENT: local
+      KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/hill90
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      # All three exporters must be "none": OTEL_SDK_DISABLED alone still lets
+      # opentelemetry-instrument resolve metric/log exporters and throw.
+      OTEL_SDK_DISABLED: "true"
+      OTEL_TRACES_EXPORTER: none
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+    ports:
+      - "${PORT_MCP:-18001}:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status<400 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  ui:
+    build:
+      context: ../services/ui
+      dockerfile: Dockerfile
+    image: hill90/ui:local
+    container_name: hill90-ui
+    environment:
+      NODE_ENV: production
+      API_URL: http://api:3000
+      AI_URL: http://ai:8000
+      MCP_URL: http://mcp:8001
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      # Browser-facing, and must match the API's KEYCLOAK_ISSUER exactly.
+      AUTH_KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/hill90
+      # Back-channel URL: the browser reaches Keycloak on a published port,
+      # this container reaches it by service name. Setting this pins the token,
+      # userinfo and JWKS endpoints and skips discovery.
+      KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/hill90
+      AUTH_KEYCLOAK_ID: ${AUTH_KEYCLOAK_ID:-hill90-ui}
+      AUTH_KEYCLOAK_SECRET: ${AUTH_KEYCLOAK_SECRET:-local-dev-secret}
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_URL: http://localhost:${PORT_UI:-13000}
+      AUTH_TRUST_HOST: "true"
+      # Consumed by /api/config and read by the agent terminal at runtime.
+      API_WS_URL: ws://localhost:${PORT_API:-13001}
+    ports:
+      - "${PORT_UI:-13000}:3000"
+    depends_on:
+      api:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/api/health',r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s

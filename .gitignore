@@ -42,3 +42,8 @@ tests/e2e/playwright-report/
 # Editors
 .vscode/
 .idea/
+
+# Local development stack (scripts/local.sh)
+.env.local
+.local/
+compose/local/keys/

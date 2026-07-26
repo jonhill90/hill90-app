@@ -19,7 +19,6 @@ VALUES (
 )
 ON CONFLICT (name) DO UPDATE SET
   description = EXCLUDED.description,
-  scope = EXCLUDED.scope,
   tools_config = EXCLUDED.tools_config,
   instructions_md = EXCLUDED.instructions_md,
   scope = EXCLUDED.scope,
