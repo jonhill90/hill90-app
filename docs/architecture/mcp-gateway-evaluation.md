@@ -156,7 +156,6 @@ MCP Service (:8001)                         [Keycloak JWT, dormant]
 ### Action Items
 
 - [ ] **No implementation needed** — this is an evaluation, not a build
-- [ ] Update AI-114 to Done in Linear
 - [ ] Consider removing the unused `mcp ^0.9.1` dependency from `pyproject.toml` to reduce image size (optional cleanup, separate ticket)
 - [ ] If an external MCP consumer appears in future, open a new ticket for Option C (lightweight tool definitions)
 

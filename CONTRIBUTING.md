@@ -9,6 +9,25 @@ what the 542 commits of history already follow. The deploy rules, secrets
 workflow, and VPS operations from Hill90's `CONTRIBUTING.md` are deliberately
 **not** reproduced — none of that tooling came with the app.
 
+## Issue tracking
+
+Issues for this repository live in **its own GitHub Issues**. Work spanning more
+than one repository is filed in [Hill90](https://github.com/jonhill90/Hill90) and
+links out; see that repository's `CONTRIBUTING.md` for the routing table.
+
+`AI-###` identifiers — and the `**Linear:** AI-114` headers on several documents
+under `docs/` — refer to a Linear workspace that was retired as a tracker on
+2026-07-26. **They are not GitHub issue numbers**: `AI-8` is a Linear identifier
+and has nothing to do with this repository's #8, which is a real and separate
+issue here.
+
+The workspace was kept as a record rather than deleted. It held about 250 issues
+across its two teams and all but two were already closed at the cutover, so only
+those two moved to GitHub — `AI-258` is now
+[#8](https://github.com/jonhill90/hill90-app/issues/8) here, and `JON-55` became
+[Hill90#532](https://github.com/jonhill90/Hill90/issues/532). Every other
+`AI-###` resolves only in Linear.
+
 ## Branch naming
 
 | Type | Prefix |
