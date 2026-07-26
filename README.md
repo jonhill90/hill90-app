@@ -140,6 +140,42 @@ names the missing ones if not.
 Running standalone and `--infra` at the same time is not supported: both create
 `<prefix>_agent_sandbox`. Bring one down before starting the other.
 
+### Verified cold
+
+Both stacks were brought up together from fresh clones of both repos, with no
+reused containers, volumes or images, on 2026-07-26:
+
+| | |
+|---|---|
+| `hill90-app` | `49b2b56` |
+| `Hill90` | `0b40403` |
+
+Hill90's [local-development runbook](https://github.com/jonhill90/Hill90/blob/main/docs/runbooks/local-development.md)
+brought infra up (`bash scripts/local.sh up`, then `health` — all checks green),
+then `./scripts/local.sh up --infra` here reached nine healthy containers and
+served through Traefik by hostname, not by published port:
+
+```
+SERVICE          URL                                            CODE
+UI               http://app.localtest.me:8080/                  200
+API health       http://api.localtest.me:8080/health            200
+Keycloak realm   http://auth.localtest.me:8080/realms/hill90    200
+MCP gateway      http://ai.localtest.me:8080/mcp/health         200
+MinIO console    http://storage.localtest.me:8080/              200
+
+internal-only, correctly unrouted:
+  ai.localtest.me/health         404
+  knowledge.localtest.me/health  404
+```
+
+`api` was attached to `<prefix>_{edge,internal,agent_internal,agent_sandbox}`
+with no `hill90_local`, confirming it used infra's networks rather than its own,
+and a browser login through Traefik reached an authenticated dashboard.
+
+This is worth re-running only after a change to `compose/`, `scripts/local.sh`,
+or the infra repo's local path — it is the check that catches
+works-on-my-machine breakage, and it has caught real breakage twice.
+
 ### Running agents
 
 `services/agentbox` is not a compose service. The API creates one container per
