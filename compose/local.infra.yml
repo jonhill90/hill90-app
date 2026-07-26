@@ -32,7 +32,7 @@
 # Defaults match the infra repo's own defaults, so an unset value here resolves
 # the same way it does there:
 #
-#   NETWORK_PREFIX  hill90        infra sets hill90local locally
+#   NETWORK_PREFIX  hill90        infra sets hill90dev locally
 #   BASE_DOMAIN     localtest.me  resolves to 127.0.0.1 without a hosts entry
 #   HTTP_PORT       8080          the port Traefik publishes locally
 #
