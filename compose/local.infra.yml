@@ -1,0 +1,154 @@
+# Overlay: attach the local app stack to a locally-running Hill90 infra stack.
+#
+# Opt-in. `compose/local.yml` on its own stays fully standalone — this file only
+# matters when the Hill90 infrastructure repo's local path (JON-41) is running.
+#
+#   ./scripts/local.sh up --infra
+#   docker compose -f compose/local.yml -f compose/local.infra.yml \
+#     --env-file .env.local up -d
+#
+# What changes:
+#   * the three shared networks become `external` — infra owns them
+#   * services join the same networks they join in production
+#   * Traefik labels are added, so the app is reachable by hostname
+#   * browser-facing URLs move from localhost:PORT to the Traefik hostnames
+#
+# Published ports stay. Compose cannot remove a port mapping in an overlay, and
+# keeping them is useful: both http://localhost:13000 and the Traefik hostname
+# reach the UI. The exception is postgres — see the note on that service.
+#
+# ---------------------------------------------------------------------------
+# Contract with the infra repo
+#
+# Network ownership, from Hill90 deploy/compose/prod/docker-compose.infra.yml:
+#
+#   infra creates   <prefix>_edge, <prefix>_internal, <prefix>_agent_internal
+#   the app creates <prefix>_agent_sandbox
+#
+# Inherited from production, where docker-compose.api.yml is the sole creator
+# of the sandbox network. Nothing in the infra compose references it.
+#
+# These variables mirror the infra repo's .env.local so the two stacks agree.
+# Defaults match the infra repo's own defaults, so an unset value here resolves
+# the same way it does there:
+#
+#   NETWORK_PREFIX  hill90        infra sets hill90local locally
+#   BASE_DOMAIN     localtest.me  resolves to 127.0.0.1 without a hosts entry
+#   HTTP_PORT       8080          the port Traefik publishes locally
+#
+# Note infra declares <prefix>_internal and <prefix>_agent_internal but no infra
+# service joins them, so Compose prunes them and `up` does not create them.
+# Their scripts/local.sh creates both explicitly; scripts/local.sh --infra here
+# checks all three exist before starting anything.
+# ---------------------------------------------------------------------------
+
+networks:
+  # The shared internal network. infra declares it `internal: true` (no
+  # egress), so anything needing outbound internet must also sit on edge —
+  # which is how production is arranged.
+  default:
+    external: true
+    name: ${NETWORK_PREFIX:-hill90}_internal
+
+  edge:
+    external: true
+    name: ${NETWORK_PREFIX:-hill90}_edge
+
+  agent_internal:
+    external: true
+    name: ${NETWORK_PREFIX:-hill90}_agent_internal
+
+  # Still app-owned; the base file creates it.
+  agent_sandbox:
+    name: ${NETWORK_PREFIX:-hill90}_agent_sandbox
+
+services:
+  postgres:
+    # internal-only, as in production. A container attached solely to an
+    # `internal` network cannot publish ports, so PORT_POSTGRES has no effect
+    # in this mode — reach the database with `docker exec` instead.
+    networks: [default]
+
+  minio:
+    networks: [default, edge]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio-console.rule=Host(`${STORAGE_HOST:-storage}.${BASE_DOMAIN:-localtest.me}`)"
+      - "traefik.http.routers.minio-console.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.routers.minio-console.service=minio-console"
+      - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
+
+  keycloak:
+    networks: [default, edge]
+    environment:
+      # Traefik terminates the connection, so Keycloak has to be told the
+      # browser-facing origin or it stamps the wrong `iss` and builds redirects
+      # against the container hostname.
+      KC_HOSTNAME: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_PROXY_HEADERS: xforwarded
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}`)"
+      - "traefik.http.routers.keycloak.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+
+  litellm:
+    networks: [default, edge]
+
+  api:
+    networks: [default, edge, agent_internal, agent_sandbox]
+    environment:
+      KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      # services/api attaches agent containers to <prefix>_agent_{internal,sandbox}
+      # by name. Under this overlay the prefix is infra's, not the default.
+      AGENT_NETWORK_PREFIX: ${NETWORK_PREFIX:-hill90}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`${API_HOST:-api}.${BASE_DOMAIN:-localtest.me}`)"
+      - "traefik.http.routers.api.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.services.api.loadbalancer.server.port=3000"
+
+  ai:
+    networks: [default, edge, agent_internal, agent_sandbox]
+    labels:
+      # Internal-only in production (traefik.enable=false). Kept that way.
+      - "traefik.enable=false"
+
+  knowledge:
+    networks: [default, edge, agent_internal, agent_sandbox]
+    labels:
+      - "traefik.enable=false"
+
+  mcp:
+    networks: [default, edge]
+    labels:
+      - "traefik.enable=true"
+      # Production routes the MCP gateway on ai.<domain>/mcp, not its own host.
+      - "traefik.http.routers.mcp.rule=Host(`${AI_HOST:-ai}.${BASE_DOMAIN:-localtest.me}`) && PathPrefix(`/mcp`)"
+      - "traefik.http.routers.mcp.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.services.mcp.loadbalancer.server.port=8001"
+      # The service serves /health and /me at the root, so the /mcp prefix has
+      # to come off. Production did this with `mcp-strip@file` from
+      # platform/edge/dynamic/middlewares.yml, but Hill90 removed that
+      # middleware in JON-27 as app-specific — correctly, since only this
+      # service used it. Declared here as a label so the app owns its own
+      # routing concern.
+      - "traefik.http.middlewares.mcp-strip.stripprefix.prefixes=/mcp"
+      - "traefik.http.routers.mcp.middlewares=mcp-strip"
+
+  ui:
+    networks: [default, edge]
+    environment:
+      AUTH_KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      # Still required: the browser resolves the Traefik hostname, but this
+      # container cannot, so the back-channel keeps using the service name.
+      KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/hill90
+      AUTH_URL: http://${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
+      API_WS_URL: ws://${API_HOST:-api}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ui.rule=Host(`${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}`)"
+      - "traefik.http.routers.ui.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.services.ui.loadbalancer.server.port=3000"

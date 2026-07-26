@@ -22,7 +22,12 @@ networks:
   # Agent container networks. services/api attaches agentbox containers to
   # these by name (services/api/src/services/docker.ts:22-23), so they must
   # exist. Created here rather than declared external — nothing else provides
-  # them locally.
+  # them standalone.
+  #
+  # api, ai and knowledge join them explicitly below. That is not decorative:
+  # Compose prunes any network no service joins, so declaring them alone left
+  # them uncreated, and agent startup would have failed with "network
+  # hill90_agent_sandbox not found". It also matches the production topology.
   agent_sandbox:
     name: hill90_agent_sandbox
     driver: bridge
@@ -157,6 +162,7 @@ services:
       dockerfile: Dockerfile
     image: hill90/api:local
     container_name: hill90-api
+    networks: [default, agent_internal, agent_sandbox]
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -215,6 +221,7 @@ services:
       dockerfile: Dockerfile
     image: hill90/ai:local
     container_name: hill90-ai
+    networks: [default, agent_internal, agent_sandbox]
     environment:
       ENVIRONMENT: local
       # Shares the API's database — the AI service runs no migrations of its
@@ -256,6 +263,7 @@ services:
       dockerfile: Dockerfile
     image: hill90/knowledge:local
     container_name: hill90-knowledge
+    networks: [default, agent_internal, agent_sandbox]
     environment:
       # AKM_INTERNAL_SERVICE_TOKEN is the one genuinely mandatory variable in
       # the whole stack: services/knowledge/app/config.py:20-24 raises if empty.
