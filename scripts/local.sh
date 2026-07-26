@@ -152,8 +152,56 @@ print(" ".join(bad))' 2>/dev/null || echo "unknown")
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Port preflight.
+#
+# Every published port is configurable in .env.local, but a clash otherwise
+# surfaces as a bare Docker error part-way through startup, after some
+# containers are already running:
+#
+#   Bind for 0.0.0.0:14000 failed: port is already allocated
+#
+# The chosen band avoids the usual suspects, but nothing can avoid every host.
+# Check up front and say which variable to change.
+# ---------------------------------------------------------------------------
+port_in_use() { (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null; }
+
+check_ports() {
+  # Ports this stack is already publishing are not conflicts — that is just a
+  # re-run of `up` against a running stack.
+  local ours
+  ours=$(docker ps --filter 'name=hill90-' --format '{{.Ports}}' 2>/dev/null \
+         | grep -oE '0\.0\.0\.0:[0-9]+' | cut -d: -f2 | sort -u)
+
+  local conflicts=""
+  while IFS='=' read -r var port; do
+    [ -n "$port" ] || continue
+    grep -qx "$port" <<<"$ours" && continue
+    if port_in_use "$port"; then
+      local holder
+      holder=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null \
+               | grep ":$port->" | cut -f1 | head -1)
+      conflicts+="  $port  ($var)${holder:+  — held by container '$holder'}"$'\n'
+    fi
+  done < <(grep -E '^PORT_[A-Z_]+=[0-9]+' "$ENV_FILE")
+
+  [ -z "$conflicts" ] && return 0
+
+  cat >&2 <<EOF
+
+Port conflict — these are already in use on this host:
+
+$conflicts
+Edit $ENV_FILE, change the listed PORT_* variable(s) to a free port,
+then run this again. Nothing was started.
+
+EOF
+  return 1
+}
+
 cmd_up() {
   [ -f "$ENV_FILE" ] || cmd_init
+  check_ports || exit 1
   mkdir -p "$ROOT/.local/agentbox-configs"
   gen_keys
   compose build

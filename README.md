@@ -82,7 +82,10 @@ by published port instead of the 37 `traefik.*` labels in `deploy/compose/prod/`
 | Postgres | `localhost:15432` |
 
 Ports sit in a 13000/18000 band deliberately, to avoid colliding with anything
-already bound on 3000, 5432, or 8054. Override them in `.env.local`.
+already bound on 3000, 5432, or 8054. No band avoids every host, so
+`local.sh up` checks them before it starts anything and, on a clash, names the
+port, the `PORT_*` variable to change in `.env.local`, and the container holding
+it.
 
 `scripts/local.sh` generates `.env.local` and two Ed25519 keypairs on first run.
 The API signs agent tokens with the private halves; the AI and knowledge
