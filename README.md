@@ -133,7 +133,7 @@ in production, and Docker cannot publish a port from one, so use `docker exec`.
 `<prefix>_agent_internal`; the app creates `<prefix>_agent_sandbox`. That split
 is inherited from production, where `docker-compose.api.yml` is the sole creator
 of the sandbox network. The prefix comes from `NETWORK_PREFIX` in `.env.local`
-and must match the infra repo's value — its local path uses `hill90local`.
+and must match the infra repo's value — its local path uses `hill90dev`.
 `--infra` checks all three infra networks exist before starting anything, and
 names the missing ones if not.
 
