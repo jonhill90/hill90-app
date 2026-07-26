@@ -9,6 +9,13 @@
 #   ./scripts/local.sh init      generate .env.local and keys, then stop
 #   ./scripts/local.sh agentbox  build the agentbox images (needed to run agents)
 #
+# Add --infra to any command to attach to a locally-running Hill90 infra stack
+# (Traefik + observability) instead of running standalone:
+#
+#   ./scripts/local.sh up --infra
+#
+# Standalone is the default and needs nothing outside this repository.
+#
 # Everything is local. This script never touches a VPS, and there is no deploy
 # path in this repository.
 
@@ -16,12 +23,62 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$ROOT/compose/local.yml"
+INFRA_FILE="$ROOT/compose/local.infra.yml"
 ENV_FILE="$ROOT/.env.local"
 KEY_DIR="$ROOT/compose/local/keys"
 
-compose() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+# --infra may appear anywhere in the arguments; strip it out and keep the rest.
+INFRA=0
+ARGS=()
+for a in "$@"; do
+  if [ "$a" = "--infra" ]; then INFRA=1; else ARGS+=("$a"); fi
+done
+set -- ${ARGS+"${ARGS[@]}"}
+
+# Networks the Hill90 infra stack owns. The app owns hill90_agent_sandbox and
+# hill90_docker_proxy, matching production, where docker-compose.api.yml is
+# their sole creator.
+# NETWORK_PREFIX mirrors the infra repo's .env.local (it defaults to hill90
+# there too, and is set to hill90local for its local path).
+NETPFX=$(grep -E '^NETWORK_PREFIX=' "$ROOT/.env.local" 2>/dev/null | cut -d= -f2)
+NETPFX=${NETPFX:-hill90}
+INFRA_NETWORKS=("${NETPFX}_edge" "${NETPFX}_internal" "${NETPFX}_agent_internal")
+
+compose() {
+  if [ "$INFRA" = "1" ]; then
+    docker compose -f "$COMPOSE_FILE" -f "$INFRA_FILE" --env-file "$ENV_FILE" "$@"
+  else
+    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
+  fi
+}
+
+# The overlay declares the shared networks external, so they must already
+# exist. Compose's own error names one network at a time and says nothing about
+# where it should come from.
+check_infra_networks() {
+  local missing=()
+  for n in "${INFRA_NETWORKS[@]}"; do
+    docker network inspect "$n" >/dev/null 2>&1 || missing+=("$n")
+  done
+  [ ${#missing[@]} -eq 0 ] && return 0
+  cat >&2 <<EOF
+
+--infra needs the Hill90 infrastructure stack running locally, but these
+networks do not exist:
+
+$(printf '  %s\n' "${missing[@]}")
+Start the Hill90 local infra stack first, then run this again. To run without
+it, drop --infra: the standalone stack creates its own networks and reaches
+every service on published ports.
+
+EOF
+  return 1
+}
 
 rand() { openssl rand -hex 32; }
+
+# Read a value out of .env.local (last definition wins, as with docker compose).
+ev() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
 # ---------------------------------------------------------------------------
 # Ed25519 keypairs.
@@ -110,6 +167,19 @@ PORT_KNOWLEDGE=18002
 PORT_KEYCLOAK=18080
 PORT_MINIO=19000
 PORT_MINIO_CONSOLE=19001
+
+# --- infra overlay (./scripts/local.sh up --infra) ---------------------------
+# Ignored unless --infra is used. These must match the Hill90 infra repo's own
+# .env.local, since both stacks have to agree on network names and hostnames.
+# The defaults below are the infra repo's local values.
+NETWORK_PREFIX=hill90local
+BASE_DOMAIN=localtest.me
+HTTP_PORT=8080
+UI_HOST=app
+API_HOST=api
+AUTH_HOST=auth
+AI_HOST=ai
+STORAGE_HOST=storage
 EOF
 }
 
@@ -201,6 +271,7 @@ EOF
 
 cmd_up() {
   [ -f "$ENV_FILE" ] || cmd_init
+  [ "$INFRA" = "1" ] && { check_infra_networks || exit 1; }
   check_ports || exit 1
   mkdir -p "$ROOT/.local/agentbox-configs"
   gen_keys
@@ -209,12 +280,26 @@ cmd_up() {
   wait_healthy || true
   echo
   cmd_status
+  local dom port
+  dom=$(ev BASE_DOMAIN); dom=${dom:-localtest.me}
+  port=$(ev HTTP_PORT);  port=${port:-8080}
   cat <<EOF
 
   UI              http://localhost:$(grep -E '^PORT_UI=' "$ENV_FILE" | cut -d= -f2)
   API             http://localhost:$(grep -E '^PORT_API=' "$ENV_FILE" | cut -d= -f2)/health
   Keycloak admin  http://localhost:$(grep -E '^PORT_KEYCLOAK=' "$ENV_FILE" | cut -d= -f2)  (admin/admin)
   MinIO console   http://localhost:$(grep -E '^PORT_MINIO_CONSOLE=' "$ENV_FILE" | cut -d= -f2)
+EOF
+  [ "$INFRA" = "1" ] && cat <<EOF
+
+  Through Traefik (Hill90 infra):
+    UI            http://$(ev UI_HOST).$dom:$port
+    API           http://$(ev API_HOST).$dom:$port/health
+    Keycloak      http://$(ev AUTH_HOST).$dom:$port
+    MCP gateway   http://$(ev AI_HOST).$dom:$port/mcp
+    MinIO console http://$(ev STORAGE_HOST).$dom:$port
+EOF
+  cat <<EOF
 
   Log in to the UI as  dev / dev
 

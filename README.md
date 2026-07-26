@@ -64,6 +64,7 @@ by published port instead of the 37 `traefik.*` labels in `deploy/compose/prod/`
 | Command | |
 |---|---|
 | `./scripts/local.sh up` | generate config if needed, build, start, wait for health |
+| `./scripts/local.sh up --infra` | same, but attach to a local Hill90 infra stack (see below) |
 | `./scripts/local.sh status` | container and health summary |
 | `./scripts/local.sh logs [service]` | follow logs |
 | `./scripts/local.sh down` | stop, keep data |
@@ -100,6 +101,44 @@ Set these in `.env.local` for the features that need them:
 
 - `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` — chat, inference, embeddings
 - `TAVILY_API_KEY` — the agent web-search tool
+
+### Running alongside the Hill90 infra stack
+
+By default the app is self-contained. If you also run the Hill90 infrastructure
+repo's local path (Traefik plus the observability stack), the app can attach to
+it instead of standing alone:
+
+```bash
+./scripts/local.sh up --infra
+```
+
+The overlay `compose/local.infra.yml` changes three things: the shared networks
+become `external` so infra owns them, services join the same networks they join
+in production, and Traefik labels make the app reachable by hostname:
+
+| | |
+|---|---|
+| UI | http://app.localtest.me:8080 |
+| API | http://api.localtest.me:8080/health |
+| Keycloak | http://auth.localtest.me:8080 |
+| MCP gateway | http://ai.localtest.me:8080/mcp |
+| MinIO console | http://storage.localtest.me:8080 |
+
+`localtest.me` resolves to 127.0.0.1, so no hosts file entry is needed. The
+published ports keep working too — both routes reach the same containers. The
+exception is Postgres: in this mode it sits on an `internal` network exactly as
+in production, and Docker cannot publish a port from one, so use `docker exec`.
+
+**Network ownership.** Infra creates `<prefix>_edge`, `<prefix>_internal` and
+`<prefix>_agent_internal`; the app creates `<prefix>_agent_sandbox`. That split
+is inherited from production, where `docker-compose.api.yml` is the sole creator
+of the sandbox network. The prefix comes from `NETWORK_PREFIX` in `.env.local`
+and must match the infra repo's value — its local path uses `hill90local`.
+`--infra` checks all three infra networks exist before starting anything, and
+names the missing ones if not.
+
+Running standalone and `--infra` at the same time is not supported: both create
+`<prefix>_agent_sandbox`. Bring one down before starting the other.
 
 ### Running agents
 
