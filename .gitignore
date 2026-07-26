@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+.DS_Store?
+
+# Node
+node_modules/
+coverage/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# Next.js
+.next/
+out/
+next-env.d.ts
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+.venv/
+venv/
+
+# Environment — never commit real values; .env.example files are tracked
+.env
+.env.local
+.env.*.local
+.envrc
+
+# Playwright
+.playwright-cli/
+.playwright-mcp/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+
+# Editors
+.vscode/
+.idea/

@@ -1,0 +1,140 @@
+# Provenance
+
+How this repository was produced, what came across, and what did not.
+
+## Source
+
+| | |
+|---|---|
+| Repository | `github.com/jonhill90/Hill90` |
+| Branch | `main` |
+| Commit | `f03f12d2b6d05499e2cfff4592b12daf5b2f8705` |
+| Source size | 858 commits, 800 tracked files, 6.76 MiB packfile |
+| Extraction date | 2026-07-26 |
+| Tool | `git-filter-repo` `a40bce548d2c`, git 2.49.0 |
+
+## Result
+
+| | |
+|---|---|
+| Commits | **542** of 858 |
+| Files at `HEAD` | **669** of 800 |
+| Packfile | 5.77 MiB |
+| Oldest commit | 2026-01-11 — `feat: Complete Hill90 VPS project scaffold` |
+| Newest inherited commit | 2026-07-25 — `chore: remove AI agent harness scaffolding (#492)` |
+
+Verification output: [VERIFICATION.md](VERIFICATION.md).
+Old-SHA → new-SHA mapping for all 858 source commits:
+[commit-map.txt](commit-map.txt).
+The exact path manifest passed to `filter-repo`: [app-paths.txt](app-paths.txt).
+
+The command was:
+
+```bash
+git clone --no-local --single-branch --branch main file:///path/to/Hill90 hill90-app
+cd hill90-app
+git filter-repo --paths-from-file app-paths.txt --prune-empty always
+```
+
+`--no-local` prevents object hardlinking back to the source. `--force` was never
+passed. `filter-repo` was never run inside the source repository, which was
+asserted byte-identical (`HEAD` and `git status --porcelain`) before and after.
+
+## What came across
+
+The eight application services, the app-specific `platform/` configuration, the
+app compose files, the app database provisioners, the Playwright suites, the
+Mintlify docs site, and the app-specific architecture and runbook documents. Full
+list in [app-paths.txt](app-paths.txt).
+
+Two documents are copies rather than moves — Hill90 keeps its own:
+`docs/architecture/overview.md` (the only whole-system diagram) and
+`docs/decisions/infra-app-separation.md` (the record of why this split exists).
+
+### Deliberate additions beyond the agreed baseline
+
+`platform/data/postgres/`, `docker-compose.{auth,db,minio}.yml`,
+`.env.example`, and `packages/common` were added on the evidence below, on the
+principle that over-preserving is the safe error:
+
+- The baseline took `platform/auth/keycloak/` but not the two files that make it
+  deployable — `docker-compose.auth.yml` mounts the realm and theme and points
+  Keycloak at its database; `platform/data/postgres/init.sh` creates that
+  database.
+- Postgres has no infrastructure consumer in Hill90: Grafana uses default SQLite,
+  Loki uses `storage: filesystem`, Tempo uses `backend: local`, OpenBao uses
+  `storage "file"`. `postgres-exporter` monitors it, which is not a dependency.
+  `init.sh` creates only app databases.
+- MinIO likewise: Loki and Tempo use local filesystem backends. Its only
+  consumers are `services/api/src/services/s3.ts`,
+  `services/knowledge/app/services/web_page_fetcher.py`, and
+  `services/ui/src/utils/admin-services.ts`.
+
+**Extracting these did not authorize Hill90 to delete them.** In particular,
+Keycloak has a second consumer on the infrastructure side: `scripts/vault.sh
+cmd_setup_oidc` configures OpenBao UI SSO via the `hill90-vault` client in this
+realm. That was relayed to the Hill90 strip lane as its own decision.
+
+## What did not come across, and why
+
+| Excluded | Reason |
+|---|---|
+| `services/dns-manager` | **Infrastructure despite its path.** A Flask DNS-01 ACME webhook that translates Traefik's Lego `httpreq` calls to the Hostinger DNS API. Built by `docker-compose.infra.yml`; running on the live VPS. A blanket `--path services/` would have been wrong |
+| `infra/` | Ansible, SOPS-encrypted secrets, systemd units, DNS automation |
+| `platform/edge/` | Traefik static and dynamic configuration |
+| `platform/observability/` | LGTM stack. Its Prometheus config scrapes **zero** application services — decisively infrastructure |
+| `platform/vault/` | OpenBao. The mechanism is infra; the 8 app-shaped policies would be re-authored on resurrection, not extracted |
+| `.github/` | The app's CI was entangled in a mixed `ci.yml` alongside shellcheck, bats, compose validation, and secrets-schema checks. A fresh minimal workflow was authored instead |
+| `tests/scripts/`, `tests/checks/` | bats suites for the infra shell scripts; `test_deploy_scope.py` validates `deploy.yml` |
+| `scripts/*.sh` except the two DB provisioners | `vps`, `hostinger`, `secrets`, `vault`, `backup`, `rollback`, `ops`, `validate`, `deploy`, `_common` |
+| `scripts/checks/` | Infra guards |
+| `Makefile`, `policy.hujson` | ~70% infra, and Tailscale ACL |
+| `docker-compose.{infra,observability,vault}.yml` | Infra stacks |
+| Infra docs | `docs/reference/*`, most of `docs/runbooks/*`, `docs/architecture/certificates.md` |
+
+Everything above remains in Hill90.
+
+## History: what is preserved, and the honest caveats
+
+History was preserved rather than squashed. The verdict rests on V4 in
+[VERIFICATION.md](VERIFICATION.md), which shows `git log --follow` traversing
+the 2026 restructure into the pre-restructure paths and reaching the project's
+first commit.
+
+`filter-repo` does not follow renames, so both sides of every rename were listed
+in the manifest. The renames in this repo's lifetime:
+
+| Rename | Commit (Hill90 SHA) |
+|---|---|
+| `deployments/` → `deploy/` | `cb4acf7` (#10) |
+| `src/services/*` → `services/*`, `src/libs/common` → `packages/common` | `f0fcbec` (#124), commit 367 of 858 |
+| `docs-site/` → `docs/site/` | `32fef4f` (#130) |
+
+The restructure commit preserved 137 renames, detected at R100 (identical
+content) across the boundary.
+
+Caveats, stated plainly:
+
+1. **316 of 858 commits do not appear.** They touched only infrastructure. This
+   repo's history is the application's history, not the whole project's.
+2. **~72 surviving commits over-describe their own diffs.** They touched both app
+   and infra files; only the app side survives. A message like "add Discord
+   management UI + fix health/detailed proxy" may show only half its changes.
+   Nothing is lost — the other half is in Hill90 — but a commit message can
+   promise more than its diff delivers.
+3. **Every SHA changed.** `commit-map.txt` is the only bridge back to Hill90.
+4. **CI and deploy history did not come across.** The app's CI evolution remains
+   readable in Hill90's `ci.yml` history.
+5. **`main` only.** Hill90's 118 unmerged local branches and 200+ remote branches
+   are squash-merge residue; their content is already on `main`.
+6. **Two retired monolithic compose files carry historical infrastructure
+   content** — `deploy/compose/prod/docker-compose.yml` and
+   `deployments/compose/prod/docker-compose.yml`, which predate the per-service
+   split. They were included to preserve the app compose lineage and do not exist
+   at `HEAD`.
+
+## Related
+
+- `PRD.md` and `SPEC.md` at the repository root — the plan this extraction
+  executed, written before it ran.
+- `docs/decisions/infra-app-separation.md` — the original decision.

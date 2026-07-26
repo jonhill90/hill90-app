@@ -1,0 +1,55 @@
+name: CI
+
+# This repository is shelved. CI is manual-only by design — it must never fire
+# on push or schedule. It has not been run since extraction and is not expected
+# to pass without work; see RESURRECTION.md §7 and §8.
+on:
+  workflow_dispatch:
+
+jobs:
+  api:
+    name: services/api (jest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm test
+
+  ui:
+    name: services/ui (vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm test
+
+  python:
+    name: ${{ matrix.service }} (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [services/mcp, services/agentbox, services/ai, services/knowledge]
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pipx install poetry
+      - run: poetry install --no-interaction
+      - run: poetry run pytest
