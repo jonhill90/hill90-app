@@ -5,9 +5,10 @@ been done about it. Originally a list of things to fix; now mostly a record of
 fixes, kept because several of these were subtle and the reasoning is worth
 having next time someone touches the compose or auth wiring.
 
-**Status: the local stack runs.** `./scripts/local.sh up` brings up nine healthy
-containers and a working login. Items 1–5 and 8 below are resolved; what remains
-open is called out as such.
+**Status: the local stack runs, and the test suites pass.**
+`./scripts/local.sh up` brings up nine healthy containers and a working login;
+CI on `main` is green across all six jobs, 1953 tests, zero failures (§8).
+Items 1–5 and 8 below are resolved; what remains open is called out as such.
 
 There is still no deployment path — see item 2.
 
@@ -201,11 +202,41 @@ that could not execute. It now uses BuildKit's `TARGETARCH`. The agentbox image
 copies that binary out of the knowledge image, so the breakage reached agent
 shells too.
 
-## 8. CI is gated off — STILL GATED, now with a clean stack to test against
+## 8. CI is gated off — STILL GATED, and the suites PASS
 
 `.github/workflows/ci.yml` runs unit tests only and is `workflow_dispatch`-only.
 Deliberately manual — this repo has no deploy target, so nothing should fire on
 push. Now that the local stack runs, it is also testable end-to-end by hand.
+
+**The tests pass.** Run on `main` at `e04aa6a` on 2026-07-26, all six jobs
+green in 2m26s:
+
+| Job | Result |
+|---|---|
+| `services/api` (jest) | 743 passed, 56 suites |
+| `services/ui` (vitest) | 736 passed, 7 skipped, 63 files |
+| `services/agentbox` (pytest) | 187 passed |
+| `services/ai` (pytest) | 177 passed |
+| `services/knowledge` (pytest) | 102 passed |
+| `services/mcp` (pytest) | 8 passed |
+
+**1953 tests, zero failures.** For a codebase shelved for a year that is a
+better result than the state of this document would suggest, and it is worth
+being explicit about what it does and does not mean:
+
+- It covers unit tests only. Nothing here proves the services work *together* —
+  that is what the local stack is for.
+- `services/knowledge/tests/integration` (18 files) is excluded: it needs a live
+  pgvector Postgres. Run it against the local stack.
+- Getting here needed three fixes, none of them test logic:
+  a migration that could never apply to a fresh database (§5), an `app.shell`
+  global leaking between agentbox test files, and `package-mode = false` missing
+  from `services/{ai,mcp}` so Poetry 2.x refused to install. Only the third was
+  a CI-only problem.
+
+Before this run the suites had never been executed on `main` — every earlier run
+was a branch tip. Re-run after any dependency bump; that is where the next
+failure will come from (§7).
 
 The original Hill90 CI also enforced two things this repo no longer checks:
 
