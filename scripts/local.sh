@@ -35,14 +35,24 @@ for a in "$@"; do
 done
 set -- ${ARGS+"${ARGS[@]}"}
 
+# `|| true` matters: a key that is absent, or a missing .env.local, makes grep
+# exit 1, and under `set -euo pipefail` that aborts the caller mid-assignment.
+ev() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+
 # Networks the Hill90 infra stack owns. The app owns hill90_agent_sandbox and
 # hill90_docker_proxy, matching production, where docker-compose.api.yml is
 # their sole creator.
-# NETWORK_PREFIX mirrors the infra repo's .env.local (it defaults to hill90
-# there too, and is set to hill90local for its local path).
-NETPFX=$(grep -E '^NETWORK_PREFIX=' "$ROOT/.env.local" 2>/dev/null | cut -d= -f2)
-NETPFX=${NETPFX:-hill90}
-INFRA_NETWORKS=("${NETPFX}_edge" "${NETPFX}_internal" "${NETPFX}_agent_internal")
+# Networks the infra stack owns, resolved when they are actually needed.
+#
+# Deliberately not computed at the top level: on a fresh clone .env.local does
+# not exist yet, and under `set -euo pipefail` a grep that matches nothing
+# aborts the script before cmd_init can create it — silently, with no output.
+infra_networks() {
+  local pfx
+  pfx=$(ev NETWORK_PREFIX)
+  pfx=${pfx:-hill90}
+  printf '%s_edge %s_internal %s_agent_internal' "$pfx" "$pfx" "$pfx"
+}
 
 compose() {
   if [ "$INFRA" = "1" ]; then
@@ -57,7 +67,7 @@ compose() {
 # where it should come from.
 check_infra_networks() {
   local missing=()
-  for n in "${INFRA_NETWORKS[@]}"; do
+  for n in $(infra_networks); do
     docker network inspect "$n" >/dev/null 2>&1 || missing+=("$n")
   done
   [ ${#missing[@]} -eq 0 ] && return 0
@@ -78,7 +88,6 @@ EOF
 rand() { openssl rand -hex 32; }
 
 # Read a value out of .env.local (last definition wins, as with docker compose).
-ev() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
 # ---------------------------------------------------------------------------
 # Ed25519 keypairs.
@@ -172,7 +181,7 @@ PORT_MINIO_CONSOLE=19001
 # Ignored unless --infra is used. These must match the Hill90 infra repo's own
 # .env.local, since both stacks have to agree on network names and hostnames.
 # The defaults below are the infra repo's local values.
-NETWORK_PREFIX=hill90local
+NETWORK_PREFIX=hill90dev
 BASE_DOMAIN=localtest.me
 HTTP_PORT=8080
 UI_HOST=app
