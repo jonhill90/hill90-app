@@ -3,6 +3,10 @@ name = "hill90-ai"
 version = "0.2.0"
 description = "Hill90 AI Service — Model Router Gateway"
 authors = ["Hill90 Team"]
+# Not an installable package -- this is a service, not a library. Matches
+# services/knowledge and services/agentbox. Poetry <2 only warned about the
+# missing package dir; Poetry 2.x fails the install outright.
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"

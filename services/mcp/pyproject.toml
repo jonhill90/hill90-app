@@ -3,6 +3,10 @@ name = "hill90-mcp"
 version = "0.1.0"
 description = "Hill90 MCP Gateway"
 authors = ["Hill90 Team"]
+# Not an installable package -- this is a service, not a library. Matches
+# services/knowledge and services/agentbox. Poetry <2 only warned about the
+# missing package dir; Poetry 2.x fails the install outright.
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
