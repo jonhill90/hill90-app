@@ -16,6 +16,29 @@ async function getFreshToken(): Promise<string | null> {
   }
 }
 
+/**
+ * Base URL of the API's WebSocket server, resolved at runtime from
+ * /api/config (see API_WS_URL). The API serves the terminal socket on its own
+ * port rather than through the UI, so this cannot be derived from
+ * window.location. Cached after the first call.
+ */
+let wsBaseCache: string | null = null
+async function getWsBase(): Promise<string> {
+  if (wsBaseCache) return wsBaseCache
+  try {
+    const res = await fetch('/api/config')
+    const data = await res.json()
+    wsBaseCache = data?.apiWsUrl || 'wss://api.hill90.com'
+  } catch {
+    wsBaseCache = 'wss://api.hill90.com'
+  }
+  return wsBaseCache as string
+}
+
+function terminalWsUrl(base: string, threadId: string, token: string): string {
+  return `${base.replace(/\/$/, '')}/chat/threads/${threadId}/terminal?token=${encodeURIComponent(token)}`
+}
+
 interface Props {
   threadId: string
 }
@@ -93,7 +116,8 @@ export default function XTerminal({ threadId }: Props) {
       term.write('\x1b[31m No access token — session may have expired. Try refreshing. \x1b[0m\r\n')
       return
     }
-    const wsUrl = `wss://api.hill90.com/chat/threads/${threadId}/terminal?token=${encodeURIComponent(accessToken)}`
+    const wsBase = await getWsBase()
+    const wsUrl = terminalWsUrl(wsBase, threadId, accessToken)
 
     const ws = new WebSocket(wsUrl)
     ws.binaryType = 'arraybuffer'
@@ -142,7 +166,7 @@ export default function XTerminal({ threadId }: Props) {
         setTimeout(async () => {
           const retryToken = await getFreshToken()
           if (!retryToken) return
-          const retryUrl = `wss://api.hill90.com/chat/threads/${threadId}/terminal?token=${encodeURIComponent(retryToken)}`
+          const retryUrl = terminalWsUrl(await getWsBase(), threadId, retryToken)
           const retryWs = new WebSocket(retryUrl)
           retryWs.binaryType = 'arraybuffer'
           wsRef.current = retryWs

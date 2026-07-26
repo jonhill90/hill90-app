@@ -8,6 +8,22 @@ function requireEnv(name: string): string {
   return value
 }
 
+/**
+ * Base URL for server-to-server calls to Keycloak.
+ *
+ * Where the browser and this server reach Keycloak on different URLs — a
+ * containerised local stack, where the browser uses a published localhost port
+ * and this container must use the compose service name — set
+ * KEYCLOAK_INTERNAL_ISSUER to the container-reachable one.
+ *
+ * AUTH_KEYCLOAK_ISSUER stays the browser-facing URL in both cases: it is the
+ * `iss` claim Keycloak stamps into tokens, and the API validates against it.
+ * Unset, this returns AUTH_KEYCLOAK_ISSUER and behaviour is unchanged.
+ */
+function internalIssuer(): string {
+  return process.env.KEYCLOAK_INTERNAL_ISSUER || requireEnv("AUTH_KEYCLOAK_ISSUER")
+}
+
 async function refreshAccessToken(token: JWT): Promise<JWT> {
   const params = new URLSearchParams({
     client_id: requireEnv("AUTH_KEYCLOAK_ID"),
@@ -17,7 +33,7 @@ async function refreshAccessToken(token: JWT): Promise<JWT> {
   })
 
   const response = await fetch(
-    `${requireEnv("AUTH_KEYCLOAK_ISSUER")}/protocol/openid-connect/token`,
+    `${internalIssuer()}/protocol/openid-connect/token`,
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -53,6 +69,22 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       clientId: process.env.AUTH_KEYCLOAK_ID,
       clientSecret: process.env.AUTH_KEYCLOAK_SECRET,
       issuer: process.env.AUTH_KEYCLOAK_ISSUER,
+      // With KEYCLOAK_INTERNAL_ISSUER set, pin every endpoint explicitly. That
+      // disables OIDC discovery, which would otherwise be fetched from the
+      // browser-facing issuer — unreachable from inside a container. The
+      // authorization endpoint stays browser-facing; the back-channel ones do
+      // not. Without it, these are all undefined and discovery runs as before.
+      ...(process.env.KEYCLOAK_INTERNAL_ISSUER
+        ? {
+            authorization: {
+              url: `${process.env.AUTH_KEYCLOAK_ISSUER}/protocol/openid-connect/auth`,
+              params: { scope: "openid email profile" },
+            },
+            token: `${process.env.KEYCLOAK_INTERNAL_ISSUER}/protocol/openid-connect/token`,
+            userinfo: `${process.env.KEYCLOAK_INTERNAL_ISSUER}/protocol/openid-connect/userinfo`,
+            jwks_endpoint: `${process.env.KEYCLOAK_INTERNAL_ISSUER}/protocol/openid-connect/certs`,
+          }
+        : {}),
     }),
   ],
   callbacks: {
