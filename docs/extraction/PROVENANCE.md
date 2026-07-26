@@ -94,6 +94,48 @@ realm. That was relayed to the Hill90 strip lane as its own decision.
 
 Everything above remains in Hill90.
 
+## Reconciliation audit against Hill90's removal list
+
+The extraction manifest and the Hill90 strip lane's removal list were written
+independently. After the extraction was verified, the two were reconciled so that
+nothing Hill90 deletes would survive only in its git history where nobody would
+think to look. The comparison used the strip lane's documented removal set
+(`SPEC.md` §1 verdicts plus §3 Steps 1–2) against the 669 extracted files.
+
+| Set | Count | |
+|---|---|---|
+| Clean matches — deleted there, preserved here | 666 | as intended |
+| Preserved here, kept there | 15 | shared docs and this repo's own new files; expected |
+| **Deleted there, not preserved here** | **19** | assessed individually below |
+
+Of the 19, six were real gaps and were added in a follow-up commit
+(`platform/vault/policies/policy-{api,ai,ui,mcp,knowledge}.hcl` and
+`.github/workflows/smoke-auth.yml`) — copied byte-identical from
+Hill90@`f03f12d`, though as a plain commit rather than with history: re-running
+`filter-repo` for six files would have rewritten every SHA and invalidated the
+verification above.
+
+The remaining thirteen are genuinely disposable:
+
+- **Eight per-service deploy workflows** (`deploy-{api,ai,ui,mcp,knowledge,db,auth,minio}.yml`)
+  — 15-line `workflow_dispatch` shims that pass a service name to
+  `reusable-deploy-service.yml`, which stays in Hill90. Inert without it, and they
+  carry no information beyond "there was a deploy button per service."
+- **Four infra-stack vault policies** (`policy-{db,minio,auth,oidc-admin}.hcl`) —
+  these describe AppRoles for the Postgres, MinIO, Keycloak, and OpenBao-SSO
+  stacks rather than for any application service. `policy-oidc-admin.hcl` in
+  particular is the OpenBao UI SSO binding, which is infrastructure by definition.
+- **`scripts/checks/check_legacy_agentbox.sh`** — a CI gate asserting Hill90 never
+  reintroduces the pre-#113 compose-managed agentbox deploy path. Every path it
+  guards (`scripts/deploy.sh`, `Makefile`, `.github/workflows/deploy.yml`,
+  `CONTRIBUTING.md`) is a Hill90 path that does not exist here.
+
+The audit also re-checked every path cited in `RESURRECTION.md` against the
+extracted tree and corrected two factual errors in it: the count of Traefik
+routing labels (31 → 37) and the external-network list (two → three, with
+`hill90_agent_internal` added and the self-provided `hill90_agent_sandbox` /
+`hill90_docker_proxy` distinguished).
+
 ## History: what is preserved, and the honest caveats
 
 History was preserved rather than squashed. The verdict rests on V4 in

@@ -35,10 +35,15 @@ check that each `Dockerfile.dev` referenced still exists.
 The infrastructure stayed in Hill90. `deploy/compose/prod/*.yml` is preserved as
 a specification, not as something runnable. What it assumes but does not provide:
 
-- **Two external Docker networks** — `hill90_edge` and `hill90_internal`, both
-  declared `external: true`. They were created by the infra stack. Nothing here
-  creates them.
-- **Traefik** — 31 `traefik.*` routing labels across the app compose files
+- **Three external Docker networks** — `hill90_edge`, `hill90_internal`, and
+  `hill90_agent_internal`, all declared `external: true`. All three were created
+  by `docker-compose.infra.yml`, which stayed in Hill90. Nothing here creates
+  them.
+  Two further networks, `hill90_agent_sandbox` and `hill90_docker_proxy`, *are*
+  self-provided — `docker-compose.api.yml` declares them for real, and `ai` and
+  `knowledge` then reference `agent_sandbox` as external. So the api stack must
+  come up before those two.
+- **Traefik** — 37 `traefik.*` routing labels across the app compose files
   (`api`, `ai`, `auth`, `mcp`, `ui`, `minio`). Without Traefik, nothing is
   reachable and no TLS is issued.
 - **`services/dns-manager`** — deliberately not extracted; it is the DNS-01 ACME
@@ -47,8 +52,9 @@ a specification, not as something runnable. What it assumes but does not provide
 - **The deploy tooling** — `scripts/deploy.sh`, the `Makefile` targets, and the
   per-service GitHub Actions deploy workflows all stayed in Hill90.
 
-**To fix:** either bring up a minimal edge (any reverse proxy plus the two
-networks) or rewrite the compose files for a single-host, no-proxy layout.
+**To fix:** either bring up a minimal edge (any reverse proxy plus the three
+external networks) or rewrite the compose files for a single-host, no-proxy
+layout.
 
 ## 3. Secrets have no source
 
@@ -71,6 +77,15 @@ that file to recover them if needed):
 
 Two more are referenced by services but were never in `.env.example`, having been
 injected from the vault: `DISCORD_BOT_TOKEN` and `TAVILY_API_KEY` (web search).
+
+`platform/vault/policies/policy-{api,ai,ui,mcp,knowledge}.hcl` document the KV
+path layout each service expected — which is the part `.env.example` cannot tell
+you. In summary: shared material at `secret/data/shared/{database,jwt,model-router}`,
+per-service material at `secret/data/<service>/*`. Two couplings are only visible
+here: the API also reads `secret/data/knowledge/*`, and the AI service reads
+`secret/data/shared/model-router` in order to verify token-revocation requests
+coming from the API. These were added after the extraction audit — see
+[docs/extraction/PROVENANCE.md](docs/extraction/PROVENANCE.md).
 
 **To fix:** decide on a secrets mechanism, then regenerate the JWT keypair — the
 old one is in a vault this repo cannot reach, and agent tokens signed by it are
@@ -150,12 +165,21 @@ The original Hill90 CI also enforced two things this repo no longer checks:
   They may already have drifted.
 - **Redocly lint** of the OpenAPI spec.
 
+`.github/workflows/smoke-auth.yml` is the original Playwright runner for
+`tests/e2e/`, kept verbatim as the record of how those 12 specs were actually
+invoked (Node 22, `npx playwright install --with-deps chromium`, working
+directory `tests/e2e`). It ran against the live deployment, so it cannot pass
+here; its `repository_dispatch: deploy-auth-success` trigger fires from a Hill90
+workflow that no longer reaches this repo.
+
 ## 9. Things deliberately left behind
 
 Not broken — absent by design. Recorded here so their absence is not mistaken for
 loss. `services/dns-manager`, `infra/`, `platform/edge/`,
-`platform/observability/`, `platform/vault/`, the infra shell scripts, the
-`Makefile`, and the deploy workflows all remain in
+`platform/observability/`, `platform/vault/` (except the five app AppRole
+policies, see §3), the infra shell scripts, the `Makefile`, and the per-service
+deploy workflows all remain in
 [jonhill90/Hill90](https://github.com/jonhill90/Hill90). See
 [docs/extraction/PROVENANCE.md](docs/extraction/PROVENANCE.md) for the full
-exclusion list and the reason for each.
+exclusion list, the reason for each, and the reconciliation audit against
+Hill90's removal list.
