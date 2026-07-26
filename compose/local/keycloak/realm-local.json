@@ -35,10 +35,13 @@
       "publicClient": false,
       "redirectUris": [
         "http://localhost:13000/api/auth/callback/keycloak",
-        "http://localhost:13000/*"
+        "http://localhost:13000/*",
+        "http://app.localtest.me:8080/api/auth/callback/keycloak",
+        "http://app.localtest.me:8080/*"
       ],
       "webOrigins": [
-        "http://localhost:13000"
+        "http://localhost:13000",
+        "http://app.localtest.me:8080"
       ],
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,

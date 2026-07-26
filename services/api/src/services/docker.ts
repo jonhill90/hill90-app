@@ -19,8 +19,16 @@ const docker = createDockerClient();
 const CONTAINER_PREFIX = 'agentbox-';
 const MANAGED_LABEL = 'managed-by';
 const MANAGED_VALUE = 'hill90-api';
-export const AGENT_NETWORK = 'hill90_agent_internal';
-export const AGENT_SANDBOX_NETWORK = 'hill90_agent_sandbox';
+// Agent container networks.
+//
+// The names carry a prefix that has to match whatever created the networks. In
+// production and in the standalone local stack that is `hill90`; when the app
+// is layered onto a local Hill90 infra stack the prefix comes from that repo's
+// NETWORK_PREFIX (`hill90local`), so these have to follow. Unset, they resolve
+// exactly as before.
+const NETWORK_PREFIX = process.env.AGENT_NETWORK_PREFIX || 'hill90';
+export const AGENT_NETWORK = `${NETWORK_PREFIX}_agent_internal`;
+export const AGENT_SANDBOX_NETWORK = `${NETWORK_PREFIX}_agent_sandbox`;
 const VOLUME_SUFFIXES = ['workspace', 'logs', 'data'];
 
 /**
