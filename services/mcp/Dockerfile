@@ -2,7 +2,7 @@ FROM python:3.12-slim as builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml poetry.lock* ./
-RUN pip install --no-cache-dir poetry==1.7.1 && \
+RUN pip install --no-cache-dir poetry==1.8.5 && \
     poetry config virtualenvs.create false && \
     poetry install --only main --no-interaction --no-ansi
 
