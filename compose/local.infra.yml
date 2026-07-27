@@ -126,9 +126,18 @@ services:
     #
     # Compose cannot remove the service-name alias, so instead the app's
     # keycloak gets an alias that only exists on app_internal, and every
-    # app-internal URL below uses that name. `keycloak` stays ambiguous on edge;
-    # nothing internal relies on it any more. Traefik is unaffected because it
+    # app-internal URL below uses that name. Traefik is unaffected because it
     # routes by container IP, not by DNS.
+    #
+    # KNOWN LIMITATION, not a solved problem. `keycloak` stays ambiguous on edge.
+    # No *app* service relies on the bare name any more, but Hill90's containers
+    # are on edge too, and they now resolve `keycloak` to whichever of the two
+    # answers first — measured 18/30 in favour of the app's. It is latent only
+    # because Hill90's own services reach Keycloak via KC_PUBLIC_URL rather than
+    # the bare name, and Hill90's health check cannot detect it (it probes
+    # auth.<domain>/realms/platform). Running this overlay therefore degrades
+    # Hill90's DNS while it is up. The real fix is the deferred naming decision:
+    # prefix the app's container/service names so they never collide at all.
     networks:
       app_internal:
         aliases: [app-keycloak]

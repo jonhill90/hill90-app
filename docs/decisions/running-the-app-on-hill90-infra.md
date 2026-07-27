@@ -1,6 +1,7 @@
 # Running hill90-app on Hill90's Infrastructure
 
-**Status:** in progress — Phase 0 complete, Phase 1 under way
+**Status:** local run proven; prod path and naming scheme still open
+**Audited:** 2026-07-27 by adversarial subagent review; corrections folded in below
 **Recorded:** 2026-07-27
 
 ## Context
@@ -363,9 +364,13 @@ realm hill90    -> HTTP 404
 realm master    -> HTTP 200
 ```
 
-Hill90 declares exactly one realm, `platform`
-(`platform/auth/keycloak/platform-realm.json`), whose sole client is
-`hill90-vault` — that is OpenBao UI SSO, i.e. infra admin SSO. The app requires
+Hill90 declares one realm, `platform`. Its static import
+(`platform/auth/keycloak/platform-realm.json`) contains only the `hill90-vault`
+client, but that is not the whole picture: `Hill90/scripts/keycloak.sh:278-290`
+creates `grafana`, `portainer` and `hill90-vault` at runtime. All three are infra
+admin SSO; none is an app client. An earlier version of this record said the
+`platform` realm's "sole client is hill90-vault", which was read from the static
+JSON and is wrong. The app requires
 realm `hill90` with clients `hill90-ui` and `hill90-api`, plus its own login
 theme. Adding an app realm to Hill90's Keycloak would break the same separation
 boundary that the platform-only database check defends.
@@ -457,7 +462,7 @@ problem.
 
 | Collision | Symptom | Fix |
 |---|---|---|
-| `postgres` alias on `<prefix>_internal` | Keycloak died with `password authentication failed for user "hill90"` — a secrets-looking error | app data plane moved to a new app-owned `<prefix>_app_internal` |
+| `postgres` alias on `<prefix>_internal` | Keycloak died with `password authentication failed for user "hill90"` — a secrets-looking error | the app's **Postgres container** moved to a new app-owned `<prefix>_app_internal`. Its consumers stayed dual-homed — see the correction below |
 | `keycloak` alias on `<prefix>_edge` | app services resolved `keycloak` to `172.18.0.6` = Hill90's Keycloak, so JWKS lookups hit realm `hill90` → 404 | app's Keycloak given an `app-keycloak` alias that exists only on `app_internal`; every app-internal URL uses it |
 | `auth.<domain>` hostname | served Hill90's realm `platform` (200), app's realm `hill90` was 404 | app's Keycloak moved to `${APP_AUTH_HOST:-app-auth}` |
 | Traefik router name `keycloak` | both stacks would register `keycloak@docker` | app's renamed to `app-keycloak` |
@@ -559,13 +564,131 @@ and `knowledge` declare it external while only `api` creates it. Nothing then
 creates it. Per-stack deploys (`make deploy-db` and friends) do not hit this, but
 a single combined `up` would.
 
+## Audit corrections (adversarial review, 2026-07-27)
+
+An adversarial subagent audit was run against both branches. It found real
+problems. They are folded in here rather than summarised away.
+
+### The `postgres` collision is masked, not removed
+
+Only the Postgres *container* moved to `app_internal`. Its eight consumers stayed
+dual-homed on `<prefix>_internal`, so that network still answers to `postgres`
+with Hill90's instance:
+
+```
+hill90-minio: postgres -> 172.21.0.9   (hill90dev-postgres, Hill90's)
+hill90-api  : postgres -> 172.26.0.2   (the app's, 30/30 lookups)
+REACHABLE: hill90-api -> 172.21.0.9:5432
+```
+
+Nothing is broken today, because `hill90-api` resolves to the app's instance
+consistently. But that determinism comes from Docker's resolver preferring one
+network, **not from the ambiguity being gone** — and the app can still open a TCP
+session to Hill90's Postgres. `compose/local.infra.yml` states the correct
+principle ("the only way ... is to keep them off `<prefix>_internal` entirely")
+and then applies it to one of nine services. The earlier wording here, "app data
+plane moved", was wrong: one container moved.
+
+Properly fixing this means taking the app's services off `<prefix>_internal`
+altogether, which is part of the deferred naming decision.
+
+### The app now poisons `keycloak` for Hill90's own containers
+
+The overlay comment says "`keycloak` stays ambiguous on edge; nothing internal
+relies on it any more." That was checked for the app and is true of the app. **It
+was never checked for Hill90.** From Hill90's containers:
+
+```
+hill90dev-openbao : keycloak -> 172.18.0.12   (the APP's Keycloak)
+hill90dev-grafana : keycloak -> 172.18.0.12   (the APP's Keycloak)
+hill90dev-traefik : keycloak -> 172.18.0.6    (Hill90's)
+hill90-api, 30 lookups: 18x 172.18.0.12, 12x 172.18.0.6
+```
+
+It is latent only because Hill90's services reach Keycloak via `KC_PUBLIC_URL`
+rather than the bare name. This record earlier leaned on "Hill90 stayed green
+throughout ... so the boundary held" — that is not evidence for this, because
+Hill90's health check probes `auth.localtest.me/realms/platform` and is
+structurally incapable of detecting a poisoned `keycloak` alias. The same
+skepticism applied to Postgres ("the exposure is on restart") was not applied
+here, and should have been.
+
+**So running the app alongside Hill90 locally degrades Hill90's DNS, today.**
+Not fatally, and not detectably by Hill90's own checks.
+
+### The Keycloak dedup conclusion is weaker than the Postgres one
+
+Postgres has an enforced boundary: `✓ Platform-only databases` is a real check
+that really fires. There is no realm equivalent — nothing in Hill90's
+`scripts/local.sh`, `scripts/checks/` or `tests/` asserts anything about realms.
+Its import is `start --import-realm` over `/opt/keycloak/data/import/`, one bind
+mount per file, so **adding an app realm to Hill90's Keycloak is one volume
+line.**
+
+"Cannot serve this app as provisioned" is true. "Would break the same separation
+boundary that the platform-only database check defends" is an argument about
+intent presented with the same force as the Postgres evidence, and it should not
+have been. The conclusion may still be right; its stated basis was overstated.
+
+### "MinIO — nothing to dedup" is already false
+
+Hill90 has an in-flight branch, `feat/restore-minio`, checked out as a worktree,
+which restores MinIO to Hill90 with `container_name: ${CONTAINER_PREFIX:-}minio`
+on both `<prefix>_edge` and `<prefix>_internal`, a `minio-console` Traefik router,
+and `Host(${MINIO_HOST:-storage}.${BASE_DOMAIN})`. That is the same three
+collision shapes again — alias, router name, hostname — against the one service
+this record called conflict-free. The app's MinIO sits on both those networks
+today.
+
+**And that branch edits the identical line of `platform/edge/traefik.local.yml`**
+that the fix branch here edits, appending `hill90-local-storage` where this
+appends `hill90-local`. Those two branches will conflict on line 90.
+
+### This branch carries an unrelated commit
+
+`bbcc0dd chore: move issue tracking from Linear to GitHub Issues` is not on
+`main` and is not part of this work; it also exists on its own unmerged branch
+`chore/github-issues-tracking`. So this branch is **6 commits ahead, not 5**, and
+cannot be merged without dragging that chore with it. It should be rebased off
+before review.
+
+### `NETWORK_PREFIX` is now a live variable in production compose
+
+Before the parameterisation, prod network names could not be perturbed by the
+environment. Now a shell `NETWORK_PREFIX` takes precedence over `--env-file`, and
+both repos share a deploy user on the VPS where Hill90's tooling does set that
+variable. This is a **risk flagged, not a defect proven** — confirming it needs
+VPS inspection, which was out of scope for this phase.
+
+### What the audit confirmed, including one thing understated here
+
+- "Production is unaffected" **holds**, and is the most strongly verified claim on
+  the branch. All ten prod files were resolved under both `main` and `HEAD` with
+  `NETWORK_PREFIX` unset and the full output diffed: the only differences are
+  worktree paths in `build.context` and bind-mount `source`. No `container_name`,
+  no `prod_postgres-data`, no existing `traefik.docker.network` value was touched.
+- The Hill90 change **is** local-only. `docker-compose.infra.yml:61` mounts
+  `${TRAEFIK_STATIC_CONFIG:-traefik.generated.yml}`; only `.env.local.example:59`
+  points it at `traefik.local.yml`; `traefik.yml.tmpl` has no `constraints:` key.
+- `app_internal` with `internal: true` is correct — nothing on it needs egress.
+- **The browser login flow works, and this record understated it.** The audit ran
+  the full authorization-code redirect flow: `/api/auth/csrf` → `POST
+  /api/auth/signin/keycloak` → Keycloak form at `app-auth.localtest.me` → credentials
+  → `302` callback → `302 /dashboard` → `authjs.session-token` set →
+  `/api/auth/session` returns `{"user":{"name":"Local Developer","roles":["admin","user"]}}`.
+  With `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`, a token fetched over the internal
+  `app-keycloak:8080` back-channel still stamps
+  `iss = http://app-auth.localtest.me:8080/realms/hill90`, so Auth.js's issuer
+  check passes. Only true browser specifics — JavaScript execution, SameSite under
+  HTTPS — remain untested.
+
 ## Known-unverified
 
-- No browser was used. The Mac is locked, so headed Playwright is unavailable.
-  The UI was verified as an HTTP 200 and the login was proven via the OIDC
-  password grant plus authenticated API reads — **the interactive
-  browser-redirect login flow is unverified**, and Auth.js's cookie/session
-  handling with it.
+- No real browser was used. The Mac is locked, so headed Playwright is
+  unavailable. The redirect flow *was* exercised with curl end to end, including
+  the session cookie and `/api/auth/session` (see the audit section), so this is
+  considerably better than "unverified" — but JavaScript execution and SameSite
+  cookie behaviour under HTTPS are still untested.
 - `/agents` returned `[]`. Nothing has been created through the app, so agent
   creation, the agentbox runtime and the model router are unexercised.
 - The prod compose files remain hardcoded and unexercised. Everything proven

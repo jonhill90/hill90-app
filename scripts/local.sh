@@ -47,6 +47,16 @@ ev() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true; 
 # Deliberately not computed at the top level: on a fresh clone .env.local does
 # not exist yet, and under `set -euo pipefail` a grep that matches nothing
 # aborts the script before cmd_init can create it — silently, with no output.
+# The app's Keycloak hostname under --infra. Deliberately NOT AUTH_HOST: Hill90's
+# own Keycloak owns auth.<domain> and serves realm `platform`, so printing
+# AUTH_HOST here sent people to the wrong Keycloak, where the app's realm 404s.
+# Default matches compose/local.infra.yml's ${APP_AUTH_HOST:-app-auth}.
+app_auth_host() {
+  local h
+  h=$(ev APP_AUTH_HOST)
+  printf '%s' "${h:-app-auth}"
+}
+
 infra_networks() {
   local pfx
   pfx=$(ev NETWORK_PREFIX)
@@ -304,7 +314,7 @@ EOF
   Through Traefik (Hill90 infra):
     UI            http://$(ev UI_HOST).$dom:$port
     API           http://$(ev API_HOST).$dom:$port/health
-    Keycloak      http://$(ev AUTH_HOST).$dom:$port
+    Keycloak      http://$(app_auth_host).$dom:$port
     MCP gateway   http://$(ev AI_HOST).$dom:$port/mcp
     MinIO console http://$(ev STORAGE_HOST).$dom:$port
 EOF
