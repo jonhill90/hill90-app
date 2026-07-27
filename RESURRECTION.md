@@ -52,9 +52,11 @@ a specification, not as something runnable. What it assumes but does not provide
 - **Traefik** — 37 `traefik.*` routing labels across the app compose files
   (`api`, `ai`, `auth`, `mcp`, `ui`, `minio`). Without Traefik, nothing is
   reachable and no TLS is issued.
-- **`services/dns-manager`** — deliberately not extracted; it is the DNS-01 ACME
-  webhook and remains in Hill90 as infrastructure. Certificates for
-  Tailscale-only hostnames depended on it.
+- **`services/dns-manager`** — deliberately not extracted; it was the DNS-01 ACME
+  webhook, and certificates for Tailscale-only hostnames depended on it. **It no longer
+  exists in Hill90 either.** DNS moved to Cloudflare on 2026-07-27 and the service was
+  deleted; Traefik now solves DNS-01 with lego's built-in `cloudflare` provider. The
+  capability survives as configuration, so this is no longer a missing dependency.
 - **The deploy tooling** — `scripts/deploy.sh`, the `Makefile` targets, and the
   per-service GitHub Actions deploy workflows all stayed in Hill90.
 
@@ -241,8 +243,11 @@ failure will come from (§7).
 The original Hill90 CI also enforced two things this repo no longer checks:
 
 - **OpenAPI drift** — `services/api/src/openapi/openapi.yaml` was diffed against
-  `docs/site/openapi.yaml` on every PR. Both files came across; the check did not.
-  They may already have drifted.
+  `docs/site/openapi.yaml` on every PR. The check did not come across, and `docs/site/`
+  has since been deleted from this repo as a duplicate of the published pages. The
+  published copy now lives in
+  [hill90-docs](https://github.com/jonhill90/hill90-docs) as `ai-app/openapi.yaml`, so
+  the drift risk is now cross-repo and nothing checks it.
 - **Redocly lint** of the OpenAPI spec.
 
 `.github/workflows/smoke-auth.yml` is the original Playwright runner for
@@ -255,7 +260,8 @@ workflow that no longer reaches this repo.
 ## 9. Things deliberately left behind
 
 Not broken — absent by design. Recorded here so their absence is not mistaken for
-loss. `services/dns-manager`, `infra/`, `platform/edge/`,
+loss. `services/dns-manager` (since deleted from Hill90 too — see §2), `infra/`,
+`platform/edge/`,
 `platform/observability/`, `platform/vault/` (except the five app AppRole
 policies, see §3), the infra shell scripts, the `Makefile`, and the per-service
 deploy workflows all remain in
