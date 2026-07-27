@@ -53,7 +53,10 @@ Architecture, in the depth it was actually written:
 - [docs/architecture/ui-components.md](docs/architecture/ui-components.md)
 - [docs/architecture/overview.md](docs/architecture/overview.md) — whole-system
   view; retains infrastructure context that now lives in Hill90
-- [docs/site/](docs/site/) — the Mintlify public docs source
+- The published pages live in
+  [jonhill90/hill90-docs](https://github.com/jonhill90/hill90-docs) and are served at
+  [docs.hill90.com/ai-app](https://docs.hill90.com/ai-app/overview). This repo no longer
+  carries a copy — it was a duplicate that had already drifted.
 
 ## Running locally
 
@@ -188,8 +191,11 @@ Node, Playwright and a shell environment.
 The infrastructure stayed in Hill90 and is **not** reproduced: Ansible VPS
 bootstrap, Traefik and its ACME configuration, the LGTM observability stack,
 OpenBao/SOPS secrets tooling, Tailscale, the deploy scripts and per-service
-deploy workflows, and `services/dns-manager` (which despite its path is
-infrastructure — a DNS-01 ACME webhook that Traefik depends on).
+deploy workflows, and `services/dns-manager` (which despite its path was
+infrastructure — a DNS-01 ACME webhook Traefik depended on). That service no longer
+exists anywhere: Hill90 moved DNS to Cloudflare on 2026-07-27 and deleted it, and Traefik
+now solves DNS-01 with lego's built-in `cloudflare` provider. The capability is unchanged;
+the component is gone.
 
 So there is no deployment path in this repo. `deploy/compose/prod/*.yml`
 describes how the services *were* wired on the VPS and is preserved as a
@@ -210,15 +216,29 @@ platform/ai/        LiteLLM model-router config
 platform/auth/      Keycloak realm, clients, and the hill90 theme
 platform/data/      Postgres database bootstrap
 deploy/compose/     prod and dev compose definitions (prod is spec-only)
-scripts/            the two app database provisioners
+scripts/            local stack driver; two database provisioners that cannot
+                    currently run (see below)
 tests/e2e/          Playwright suites
-docs/               architecture, app runbooks, Mintlify site
+docs/               architecture, decisions, app runbooks
 docs/extraction/    provenance, verification output, Hill90 commit map
 PRD.md / SPEC.md    why and how this extraction was done
 ```
 
+`scripts/provision-akm-db.sh` and `scripts/provision-litellm-db.sh` **cannot run as
+extracted.** Both source `scripts/_common.sh`, which was never extracted and does not
+exist in this repo, so under `set -e` they die at line 7. Both also hardcode
+`--username postgres`, and the Postgres they were written against has `hill90` as its only
+role. The local stack does not use them — `platform/data/postgres/init.sh` runs as a
+Postgres entrypoint script instead — so this blocks nothing today, but the scripts are
+not usable in their current form.
+
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs unit tests only and
-is gated to `workflow_dispatch` — it never fires on its own. It has not been run
-since extraction and is not expected to pass without work.
+is gated to `workflow_dispatch` — it never fires on its own, because this repo has no
+deploy target.
+
+**The suites pass.** Run on `main` at `e04aa6a` on 2026-07-26: all six jobs green in
+2m26s, **1953 tests, zero failures**. See [`RESURRECTION.md`](RESURRECTION.md#8-ci-is-gated-off--still-gated-and-the-suites-pass)
+for the breakdown and for what that does and does not prove — it is unit tests only, and
+nothing there demonstrates the services work together.
