@@ -18,7 +18,7 @@ services:
       context: ../../../services/ui
       dockerfile: Dockerfile
     image: hill90/ui:${VERSION:-latest}
-    container_name: ui
+    container_name: ${CONTAINER_PREFIX:-}app-ui
     restart: unless-stopped
     networks:
       - edge
@@ -27,7 +27,7 @@ services:
       - NODE_ENV=production
       - API_URL=http://api:3000
       - AI_URL=http://ai:8000
-      - KEYCLOAK_INTERNAL_URL=http://keycloak:8080
+      - KEYCLOAK_INTERNAL_URL=http://app-keycloak:8080
       - MCP_URL=http://mcp:8001
       - AUTH_KEYCLOAK_ID=${AUTH_KEYCLOAK_ID}
       - AUTH_KEYCLOAK_SECRET=${AUTH_KEYCLOAK_SECRET}
@@ -41,8 +41,8 @@ services:
       retries: 3
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.ui.rule=Host(`hill90.com`) || Host(`www.hill90.com`)"
-      - "traefik.http.routers.ui.entrypoints=websecure"
-      - "traefik.http.routers.ui.tls.certresolver=letsencrypt"
-      - "traefik.http.services.ui.loadbalancer.server.port=3000"
-      - "traefik.http.routers.ui.middlewares=rate-limit@file"
+      - "traefik.http.routers.app-ui.rule=Host(`${BASE_DOMAIN:-hill90.com}`) || Host(`www.${BASE_DOMAIN:-hill90.com}`)"
+      - "traefik.http.routers.app-ui.entrypoints=websecure"
+      - "traefik.http.routers.app-ui.tls.certresolver=letsencrypt"
+      - "traefik.http.services.app-ui.loadbalancer.server.port=3000"
+      - "traefik.http.routers.app-ui.middlewares=rate-limit@file"

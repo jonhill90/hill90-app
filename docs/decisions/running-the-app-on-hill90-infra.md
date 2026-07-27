@@ -682,6 +682,81 @@ VPS inspection, which was out of scope for this phase.
   check passes. Only true browser specifics — JavaScript execution, SameSite under
   HTTPS — remain untested.
 
+## Decision: the naming scheme (reversible — overrule freely)
+
+Taken 2026-07-27 without Jon, on instruction not to block on it. Recorded with
+the alternatives so it can be overruled rather than archaeologically reconstructed.
+
+**Chosen: adopt Hill90's prefix mechanism verbatim, and add an `app-` tenant
+component to the names that collide.**
+
+```yaml
+container_name: ${CONTAINER_PREFIX:-}app-<service>   # Hill90's exact convention
+```
+
+Concretely:
+
+| Layer | Rule | Why |
+|---|---|---|
+| `container_name` | `${CONTAINER_PREFIX:-}app-<name>`, **all** services | Hill90 applies `${CONTAINER_PREFIX:-}` uniformly to all of its own; costs nothing and survives Hill90 later claiming a name |
+| Service keys (= DNS aliases) | `app-` only where they collide: `app-postgres`, `app-keycloak`, `app-minio`, `app-postgres-exporter` | renaming a service key rewrites every internal URL, so blast radius is kept to the four that actually collide |
+| Traefik router/service names | `app-<name>`, all | zero cost, and `keycloak` genuinely collided |
+| Hostnames | app's Keycloak → `${APP_AUTH_HOST:-app-auth}`; others parameterised as `${X_HOST:-x}.${BASE_DOMAIN:-hill90.com}` | `auth.hill90.com` is Hill90's; the rest were hardcoded, which is its own bug |
+
+Verified against the live VPS: **zero overlap** between the app's resolved
+container names *and* service keys and Hill90's 13 running containers. Before
+this, `keycloak`, `postgres` and `postgres-exporter` all collided outright.
+
+`postgres-exporter` mattered more than expected. Hill90's Prometheus scrapes
+`postgres-exporter:9187` **by name**
+(`platform/observability/prometheus/prometheus.yml:24`), so with both stacks up
+that target was ambiguous and Hill90's own database metrics could have come from
+the app's exporter under Hill90's job label.
+
+### Why not the alternatives
+
+- **Uniform `app-` on every service key.** More robust — MinIO just proved Hill90
+  can retroactively claim a name the app thought safe. Rejected because it
+  rewrites roughly twenty internal URLs (`http://api:3000`, `http://ai:8000`,
+  `http://mcp:8001`, …) across both repos' expectations for no present benefit.
+  If Hill90 later claims one of those names, promote that single service; the
+  mechanism is already in place.
+- **Drop `container_name` entirely** and let the compose project namespace
+  everything (`hill90-local-api-1`). Genuinely the most collision-proof option
+  and needs no prefix at all. Rejected because it diverges from Hill90, and every
+  runbook, `docker exec` and `docker logs` invocation in both repos assumes stable
+  names.
+- **Give the app its own prefix variable** (`APP_CONTAINER_PREFIX`). Rejected as
+  a second mechanism for a job Hill90's existing one already does; two prefix
+  variables that must agree is a new drift surface.
+- **Consume Hill90's Keycloak and Postgres** so there is nothing to name. Ruled
+  out earlier on evidence, though note the audit correction above: the Keycloak
+  half of that is weaker than the Postgres half.
+
+### Consequence that must be handled before the VPS phase
+
+The app's Keycloak moves off `auth.hill90.com` to `app-auth.hill90.com`. There
+are A records for `ai`, `api` and `auth` but **not** for `app-auth`, so that
+hostname needs a new A record and its own HTTP-01 certificate. It is a public
+host, so HTTP-01 applies and the unextracted `services/dns-manager` is not
+involved. **This is a blocker for deploying the auth stack, and it is new work
+created by this decision** — the alternative was leaving a collision that Docker
+would refuse to start.
+
+## What the app needs from the Hill90 lane
+
+Not edited here. Both are in the Hill90 repo:
+
+1. **`platform/edge/traefik.local.yml:90`** — the Docker provider constraint must
+   include the app's compose project `hill90-local`. The currently running config
+   already contains it alongside `hill90-local-storage`; the PR must keep **both**.
+   Taking one side resolves the conflict silently and 404s the other stack.
+   Traefik needs a **restart**, not a reload — it is static config.
+2. **`platform/observability/prometheus/prometheus.yml`** — a scrape job for
+   `app-postgres-exporter:9187`. Hill90's existing job targets
+   `postgres-exporter`, which the app no longer answers to by design, so the
+   app's database is currently unmonitored.
+
 ## Known-unverified
 
 - No real browser was used. The Mac is locked, so headed Playwright is

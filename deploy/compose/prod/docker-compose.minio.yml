@@ -13,9 +13,9 @@ volumes:
     name: minio-data
 
 services:
-  minio:
+  app-minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    container_name: minio
+    container_name: ${CONTAINER_PREFIX:-}app-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     networks:
@@ -34,8 +34,8 @@ services:
       retries: 3
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.minio-console.rule=Host(`storage.hill90.com`)"
-      - "traefik.http.routers.minio-console.entrypoints=websecure"
-      - "traefik.http.routers.minio-console.tls.certresolver=letsencrypt-dns"
-      - "traefik.http.routers.minio-console.middlewares=tailscale-only@file"
-      - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
+      - "traefik.http.routers.app-minio-console.rule=Host(`${STORAGE_HOST:-storage}.${BASE_DOMAIN:-hill90.com}`)"
+      - "traefik.http.routers.app-minio-console.entrypoints=websecure"
+      - "traefik.http.routers.app-minio-console.tls.certresolver=letsencrypt-dns"
+      - "traefik.http.routers.app-minio-console.middlewares=tailscale-only@file"
+      - "traefik.http.services.app-minio-console.loadbalancer.server.port=9001"

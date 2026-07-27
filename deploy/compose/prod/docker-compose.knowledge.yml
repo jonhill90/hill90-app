@@ -29,7 +29,7 @@ services:
       context: ../../../services/knowledge
       dockerfile: Dockerfile
     image: hill90/knowledge:${VERSION:-latest}
-    container_name: knowledge
+    container_name: ${CONTAINER_PREFIX:-}app-knowledge
     restart: unless-stopped
     networks:
       - edge
@@ -41,7 +41,7 @@ services:
       - akm-keys:/etc/akm:ro
     environment:
       - AKM_PORT=8002
-      - AKM_DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/hill90_akm
+      - AKM_DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_akm
       - AKM_PUBLIC_KEY_PATH=/etc/akm/public.pem
       - AKM_DATA_DIR=/data/knowledge
       - AKM_CONTEXT_TOKEN_BUDGET=2000

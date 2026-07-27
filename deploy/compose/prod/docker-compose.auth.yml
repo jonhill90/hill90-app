@@ -12,9 +12,9 @@ networks:
     name: ${NETWORK_PREFIX:-hill90}_internal
 
 services:
-  keycloak:
+  app-keycloak:
     image: quay.io/keycloak/keycloak:26.4.0
-    container_name: keycloak
+    container_name: ${CONTAINER_PREFIX:-}app-keycloak
     restart: unless-stopped
     networks:
       - edge
@@ -26,7 +26,7 @@ services:
       - /opt/keycloak/data/tmp:size=100m
     environment:
       - KC_DB=postgres
-      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+      - KC_DB_URL=jdbc:postgresql://app-postgres:5432/keycloak
       - KC_DB_USERNAME=${DB_USER}
       - KC_DB_PASSWORD=${DB_PASSWORD}
       - KC_HOSTNAME=https://auth.hill90.com
@@ -51,9 +51,9 @@ services:
       start_period: 90s
     labels:
       - "traefik.enable=true"
-      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+      - "traefik.http.services.app-keycloak.loadbalancer.server.port=8080"
       # All Keycloak traffic on auth.hill90.com (admin protected by KC credentials + MFA)
-      - "traefik.http.routers.keycloak.rule=Host(`auth.hill90.com`)"
-      - "traefik.http.routers.keycloak.entrypoints=websecure"
-      - "traefik.http.routers.keycloak.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.keycloak.service=keycloak"
+      - "traefik.http.routers.app-keycloak.rule=Host(`${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}`)"
+      - "traefik.http.routers.app-keycloak.entrypoints=websecure"
+      - "traefik.http.routers.app-keycloak.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.app-keycloak.service=app-keycloak"

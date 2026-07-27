@@ -26,7 +26,7 @@ services:
   # Docker Socket Proxy — limits API surface for agentbox container management
   docker-proxy:
     image: tecnativa/docker-socket-proxy:0.3
-    container_name: docker-proxy
+    container_name: ${CONTAINER_PREFIX:-}app-docker-proxy
     restart: unless-stopped
     networks:
       - docker_proxy
@@ -79,7 +79,7 @@ services:
       context: ../../../services/api
       dockerfile: Dockerfile
     image: hill90/api:${VERSION:-latest}
-    container_name: api
+    container_name: ${CONTAINER_PREFIX:-}app-api
     restart: unless-stopped
     networks:
       - edge
@@ -100,7 +100,7 @@ services:
       - AI_SERVICE_URL=http://ai:8000
       - KEYCLOAK_ISSUER=https://auth.hill90.com/realms/hill90
       - KEYCLOAK_JWKS_URI=https://auth.hill90.com/realms/hill90/protocol/openid-connect/certs
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/hill90_api
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_api
       - DOCKER_HOST=tcp://docker-proxy:2375
       - AGENTBOX_CONFIG_HOST_PATH=/opt/hill90/agentbox-configs
       - ENVIRONMENT=production
@@ -110,7 +110,7 @@ services:
       - OTEL_TRACES_EXPORTER=otlp
       - OTEL_METRICS_EXPORTER=none
       - OTEL_LOGS_EXPORTER=none
-      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ENDPOINT=http://app-minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
       - AKM_SIGNING_PRIVATE_KEY=${AKM_SIGNING_PRIVATE_KEY}
@@ -130,7 +130,7 @@ services:
       retries: 3
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.api.rule=Host(`api.hill90.com`)"
-      - "traefik.http.routers.api.entrypoints=websecure"
-      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
-      - "traefik.http.services.api.loadbalancer.server.port=3000"
+      - "traefik.http.routers.app-api.rule=Host(`${API_HOST:-api}.${BASE_DOMAIN:-hill90.com}`)"
+      - "traefik.http.routers.app-api.entrypoints=websecure"
+      - "traefik.http.routers.app-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.app-api.loadbalancer.server.port=3000"

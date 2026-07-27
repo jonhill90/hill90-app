@@ -196,9 +196,21 @@ BASE_DOMAIN=localtest.me
 HTTP_PORT=8080
 UI_HOST=app
 API_HOST=api
-AUTH_HOST=auth
 AI_HOST=ai
 STORAGE_HOST=storage
+
+# The app's Keycloak hostname. Deliberately NOT `auth`: Hill90's own Keycloak
+# owns auth.<domain> and serves realm `platform`, so asking for `auth` reaches
+# the wrong Keycloak and the app's realm 404s.
+APP_AUTH_HOST=app-auth
+
+# Hill90's Keycloak hostname. Kept so a value copied from Hill90's .env.local
+# does not read as missing; the app does not route on it.
+AUTH_HOST=auth
+
+# Container name prefix, matching Hill90's convention: empty in production, set
+# locally so two environments can coexist on one machine.
+CONTAINER_PREFIX=hill90dev-
 EOF
 }
 
