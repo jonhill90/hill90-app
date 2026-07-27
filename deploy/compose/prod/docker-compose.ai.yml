@@ -6,16 +6,16 @@ version: '3.9'
 networks:
   edge:
     external: true
-    name: hill90_edge
+    name: ${NETWORK_PREFIX:-hill90}_edge
   internal:
     external: true
-    name: hill90_internal
+    name: ${NETWORK_PREFIX:-hill90}_internal
   agent_internal:
     external: true
-    name: hill90_agent_internal
+    name: ${NETWORK_PREFIX:-hill90}_agent_internal
   agent_sandbox:
     external: true
-    name: hill90_agent_sandbox
+    name: ${NETWORK_PREFIX:-hill90}_agent_sandbox
 
 volumes:
   akm-keys:

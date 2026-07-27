@@ -514,6 +514,51 @@ Whether the app's services should be prefixed (`app-*`), moved to a separate
 namespace, or something else is a call worth making deliberately rather than
 inferring from what made local go green.
 
+## Retarget onto the prod files: networks done, override layer blocked
+
+All 23 network literals across the nine prod compose files now use
+`${NETWORK_PREFIX:-hill90}_*`, covering all five networks — including the two the
+app owns (`agent_sandbox`, `docker_proxy`), which the original plan missed.
+
+Verified to resolve correctly in both environments:
+
+```
+NETWORK_PREFIX unset (production)     NETWORK_PREFIX=hill90dev (local)
+  edge   -> hill90_edge   [external]    edge   -> hill90dev_edge   [external]
+  internal -> hill90_internal [ext]     internal -> hill90dev_internal [ext]
+  agent_internal -> hill90_...  [ext]   agent_internal -> hill90dev_... [ext]
+  agent_sandbox  -> hill90_...          agent_sandbox  -> hill90dev_...
+  docker_proxy   -> hill90_...          docker_proxy   -> hill90dev_...
+```
+
+Production is unaffected: with the variable unset every name resolves exactly as
+before.
+
+And a prod compose file will now actually run locally. `docker-compose.minio.yml`
+was brought up against Hill90's local networks — the one prod stack whose
+`container_name` collides with nothing — and reached `healthy` attached to
+`hill90dev_edge` and `hill90dev_internal`. The test stack was then removed with
+its volume. So the retarget is feasible, not just plausible.
+
+**The override layer itself is blocked, and deliberately so.** An override that
+layers on the prod files has to say something about `container_name`, because
+that is where the VPS collision lives — `keycloak`, `postgres` and
+`postgres-exporter` are all names Hill90 already occupies there. Any override
+written now would bake in an answer to the naming question that is explicitly
+reserved for Jon. Writing it would mean choosing by default, which is exactly
+what the local work was careful not to do.
+
+What is not blocked, and is the next work once the naming scheme is settled:
+`deploy/compose/overrides/local.*.yml` layering on the prod files, collapsing
+`compose/` into that structure, committing `.env.local.example`, porting the
+drift check, and bringing `local.sh` to parity with Hill90's (`health`, `urls`).
+
+One merge subtlety found while verifying, not introduced here: with all nine prod
+files merged at once, `agent_sandbox` resolves to `external: true`, because `ai`
+and `knowledge` declare it external while only `api` creates it. Nothing then
+creates it. Per-stack deploys (`make deploy-db` and friends) do not hit this, but
+a single combined `up` would.
+
 ## Known-unverified
 
 - No browser was used. The Mac is locked, so headed Playwright is unavailable.

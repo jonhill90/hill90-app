@@ -6,21 +6,21 @@ version: '3.9'
 networks:
   edge:
     external: true
-    name: hill90_edge
+    name: ${NETWORK_PREFIX:-hill90}_edge
   internal:
     external: true
-    name: hill90_internal
+    name: ${NETWORK_PREFIX:-hill90}_internal
   agent_internal:
     external: true
-    name: hill90_agent_internal
+    name: ${NETWORK_PREFIX:-hill90}_agent_internal
   agent_sandbox:
     driver: bridge
     internal: true
-    name: hill90_agent_sandbox
+    name: ${NETWORK_PREFIX:-hill90}_agent_sandbox
   docker_proxy:
     driver: bridge
     internal: true
-    name: hill90_docker_proxy
+    name: ${NETWORK_PREFIX:-hill90}_docker_proxy
 
 services:
   # Docker Socket Proxy — limits API surface for agentbox container management

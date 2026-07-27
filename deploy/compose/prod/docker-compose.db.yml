@@ -6,7 +6,7 @@ version: '3.9'
 networks:
   internal:
     external: true
-    name: hill90_internal
+    name: ${NETWORK_PREFIX:-hill90}_internal
 
 volumes:
   postgres-data:
