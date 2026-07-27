@@ -1,6 +1,6 @@
 # Running hill90-app on Hill90's Infrastructure
 
-**Status:** in progress — Phase 0 (verification) complete, Phase 1 not started
+**Status:** in progress — Phase 0 complete, Phase 1 under way
 **Recorded:** 2026-07-27
 
 ## Context
@@ -173,10 +173,118 @@ the intent. It is not.
    copy is a legitimate outcome. Hill90's realm was provisioned for infra admin
    SSO, not for this app.
 
+## Phase 1 findings
+
+### The missing-network failure, reproduced
+
+Against the prod compose files, with no override:
+
+```
+$ docker compose -f docker-compose.api.yml --env-file .env.example create --dry-run
+...
+network hill90_edge declared as external, but could not be found
+```
+
+Confirmed as predicted, including that the error names the network rather than
+the naming mismatch that caused it.
+
+Two things to note about that command. `--dry-run` exited **0** despite
+printing the failure, so any scripted check built on it would report success —
+do not gate on its exit code. And the dry run built the api image, so it is not
+as cheap as the name suggests.
+
+### Five networks need parameterising, not two
+
+The prior understanding named `hill90_edge` and `hill90_internal`. There are
+**five distinct network names across 23 literals** in nine prod compose files:
+
+| Network | Owner | Files |
+|---|---|---|
+| `hill90_edge` | Hill90 infra (external) | ai, api, auth, knowledge, mcp, minio, ui |
+| `hill90_internal` | Hill90 infra (external) | ai, api, auth, db, discord-bot, knowledge, mcp, minio, ui |
+| `hill90_agent_internal` | Hill90 infra (external) | ai, api, knowledge |
+| `hill90_agent_sandbox` | **the app** — created by api (`driver: bridge`, `internal: true`), consumed as external by ai and knowledge | ai, api, knowledge |
+| `hill90_docker_proxy` | **the app** — created by api only | api |
+
+The two app-owned networks need parameterising as well as the three external
+ones. Left hardcoded, a local run creates `hill90_agent_sandbox` alongside
+Hill90's `hill90dev_*` naming, and `services/api` attaches agent containers by
+name — so agents would land on the wrong network. That the api stack is the
+sole creator of the sandbox network also means api must start before ai and
+knowledge, as [RESURRECTION.md](../../RESURRECTION.md) §2 states.
+
+### Correction: a working override layer already exists
+
+The prior understanding was that the app has no local overrides, only a
+`compose/local*.yml` fork. That is wrong. **`compose/local.infra.yml` is an
+opt-in overlay that already attaches the app to a locally-running Hill90 infra
+stack**, added in `e881873` (#4) and fixed in `49b2b56` (#5). It already:
+
+- parameterises all four networks it touches as `${NETWORK_PREFIX:-hill90}_*`
+- adds Traefik labels for minio, keycloak, api, mcp and ui, and keeps `ai` and
+  `knowledge` internal-only as production has them
+- handles the no-egress `internal` network by also attaching to `edge`
+- handles the browser-vs-container issuer split via `KEYCLOAK_INTERNAL_ISSUER`
+- passes `AGENT_NETWORK_PREFIX` so `services/api` attaches agent containers
+  under the infra prefix
+- declares the `mcp-strip` middleware as a label, because Hill90 removed the
+  file-based `mcp-strip@file` middleware as app-specific
+
+`scripts/local.sh` supports `--infra` on any command, with a
+`check_infra_networks` preflight.
+
+So the local half is substantially further along than assumed, and the plan to
+"build the minimal override layer" is wrong as stated — the layer exists.
+
+**The structural criticism still stands, though, and is the real gap:** the
+overlay layers on `compose/local.yml`, which is the fork, not on
+`deploy/compose/prod/*.yml`. The prod files remain hardcoded and unexercised by
+anything. Retargeting the existing overlay onto the prod files is the work, not
+writing a new overlay.
+
+### Stale `.env.local` breaks existing working directories, not fresh clones
+
+`./scripts/local.sh up --infra` failed its preflight:
+
+```
+--infra needs the Hill90 infrastructure stack running locally, but these
+networks do not exist:
+
+  hill90local_edge
+  hill90local_internal
+  hill90local_agent_internal
+```
+
+Exit code 1, correctly. The preflight behaved well: it named the mismatch
+rather than letting Docker emit a confusing one-network-at-a-time error.
+
+Cause: `.env.local:57` said `NETWORK_PREFIX=hill90local`. Hill90 renamed its
+local prefix to `hill90dev`, and `49b2b56` updated the generated template
+accordingly — but that file's mtime is 72 minutes *before* that commit, and
+`local.sh` only writes `.env.local` when it is absent. **So the fix reached
+fresh clones and no existing working directory, with no warning.** This is the
+inverse of the usual failure mode, and a concrete instance of the missing drift
+check: Hill90's `local.sh status` catches exactly this with "structural
+prefixes match the example".
+
+Two follow-ups this implies, beyond the prefix itself:
+
+- The app needs the drift check ported, and it needs to compare *values* of
+  structural prefixes, not just presence of keys.
+- `ev()` reads `.env.local` only, so a shell `NETWORK_PREFIX=...` does not
+  affect the preflight, while `docker compose` *would* honour it over
+  `--env-file`. Those two disagree. Not currently harmful because the preflight
+  blocks first, but it is a trap.
+
 ## Known-unverified
 
-- The missing-network error has not been reproduced by running. It is inferred
-  from reading nine compose files and `docker network ls`.
+- Whether the app actually comes up and serves traffic under
+  `./scripts/local.sh up --infra` with the prefix corrected. The preflight now
+  passes; nothing beyond that is proven yet.
+- Whether the existing overlay can be retargeted onto the prod compose files
+  without a rewrite. `compose/local.yml` and `deploy/compose/prod/*.yml` differ
+  in service naming and volumes, not just networks, so this is asserted from
+  reading, not tested.
 - Whether Hill90's Keycloak realm exposes the clients the app needs
   (`hill90-ui`, `hill90-api`) is not yet checked. OIDC discovery returns 200;
   that says the realm exists, not that it fits.
