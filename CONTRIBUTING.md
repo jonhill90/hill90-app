@@ -51,9 +51,10 @@ those two moved to GitHub — `AI-258` is now
 
 - Work through `RESURRECTION.md` item by item; each is a self-contained change.
 - Update `services/api/src/openapi/openapi.yaml` when adding or changing API
-  routes. Hill90's CI enforced spec-vs-route drift and also diffed that file
-  against `docs/site/openapi.yaml`; neither check came across, so the two may
-  already disagree.
+  routes. Hill90's CI enforced spec-vs-route drift and also diffed that file against
+  the published spec; neither check came across. The published copy now lives in
+  [hill90-docs](https://github.com/jonhill90/hill90-docs) as `ai-app/openapi.yaml`, so
+  the two may already disagree and nothing checks it.
 - Tests live next to their services: `services/api` (jest), `services/ui`
   (vitest), `services/mcp` and `services/agentbox` (pytest). End-to-end
   Playwright suites are in `tests/e2e/` and require a running stack.
