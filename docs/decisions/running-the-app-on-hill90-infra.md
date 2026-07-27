@@ -276,19 +276,138 @@ Two follow-ups this implies, beyond the prefix itself:
   `--env-file`. Those two disagree. Not currently harmful because the preflight
   blocks first, but it is a trap.
 
+## The name collision, which is the real form of the platform conflict
+
+With the prefix corrected, `./scripts/local.sh up --infra` brought up eight of
+nine containers. It created `hill90dev_agent_sandbox` with the correct prefix,
+confirming the overlay's parameterisation works. Then:
+
+```
+Container hill90-keycloak  Error
+dependency failed to start: container hill90-keycloak exited (1)
+```
+
+Keycloak's log:
+
+```
+FATAL: password authentication failed for user "hill90"
+ERROR: Failed to obtain JDBC connection
+```
+
+That reads as a secrets problem. It is not. **Two containers answer to
+`postgres` on the shared network:**
+
+```
+hill90-postgres     aliases=[hill90-postgres postgres]     ip=172.21.0.14
+hill90dev-postgres  aliases=[hill90dev-postgres postgres]  ip=172.21.0.9
+
+$ nslookup postgres      (from a peer on hill90dev_internal)
+Name: postgres  Address: 172.21.0.9
+Name: postgres  Address: 172.21.0.14
+```
+
+Both instances use role `hill90`; only the password differs. Keycloak resolved
+to Hill90's instance and failed authentication. Because DNS returns **both**
+addresses, this is non-deterministic — it will intermittently succeed, which is
+the worst available failure mode.
+
+This is the predicted "two Postgres instances fighting over names, ports and
+networks, presenting as a dozen unrelated bugs", observed rather than predicted.
+
+### It is worse in production, and it fails safe there
+
+The app's prod compose sets `container_name:` on every service. Compared against
+the 13 containers live on the VPS:
+
+| App `container_name` | Collides with Hill90 on the VPS? |
+|---|---|
+| `keycloak` (auth) | **yes** |
+| `postgres` (db) | **yes** |
+| `postgres-exporter` (db) | **yes** |
+| `litellm`, `ai`, `api`, `ui`, `mcp`, `minio`, `knowledge`, `docker-proxy`, `discord-bot` | no |
+
+Docker refuses to start a second container with an existing name, so deploying
+the app's `auth` or `db` stack to the VPS **cannot start at all**. That is a
+blocker, but it fails safe: it cannot corrupt the running infra. Locally the
+same conflict is *not* safe, because Compose only aliases rather than refusing,
+and the ambiguity is silent.
+
+Hill90's local stack stayed green throughout (`local.sh health` all passing),
+because its services already held established connections. The exposure is on
+restart. The app stack was taken down with `down` (volumes preserved) to stop
+polluting the shared network, and `postgres` now resolves to `172.21.0.9` only.
+
+## Decision: the app keeps its own platform services, renamed
+
+The starting expectation was that the app should consume Hill90's platform
+services and delete its copies. **The evidence points the other way for every
+one of them.**
+
+### Postgres — app keeps its own
+
+- Hill90's Postgres has one role, `hill90`, with a different password; the app's
+  `--username postgres` fails outright.
+- Hill90's health check asserts *platform-only databases*. It is written to fail
+  if app databases appear there. That is a designed boundary.
+- `container_name: postgres` collides on the VPS; the network alias collides
+  locally.
+
+### Keycloak — app keeps its own
+
+Hill90's Keycloak cannot serve this app as provisioned. Probed live from a
+network peer:
+
+```
+realm platform  -> HTTP 200
+realm hill90    -> HTTP 404
+realm master    -> HTTP 200
+```
+
+Hill90 declares exactly one realm, `platform`
+(`platform/auth/keycloak/platform-realm.json`), whose sole client is
+`hill90-vault` — that is OpenBao UI SSO, i.e. infra admin SSO. The app requires
+realm `hill90` with clients `hill90-ui` and `hill90-api`, plus its own login
+theme. Adding an app realm to Hill90's Keycloak would break the same separation
+boundary that the platform-only database check defends.
+
+### MinIO — app keeps its own
+
+No conflict at all: Hill90 runs no MinIO. Nothing to dedup.
+
+### `postgres-exporter` — the app should drop its copy
+
+This is the one genuine deletion. Hill90 owns observability
+([RESURRECTION.md](../../RESURRECTION.md) §9) and already runs
+`postgres-exporter`. The app's copy in `docker-compose.db.yml` is a pure
+duplicate of an infra concern.
+
+### LiteLLM — stays
+
+Unchanged from the original reasoning: it is the model router, an app concern.
+No collision.
+
+### What this decision requires
+
+Keeping its own services is not sufficient on its own — the app must stop
+claiming Hill90's names. Both `container_name` and the network alias have to be
+distinct, in prod as well as locally, because the VPS collision is on the prod
+files. The naming scheme and whether the app's data plane should sit on its own
+network rather than `<prefix>_internal` are the open design questions; they are
+deliberately not settled here, because that choice affects the prod files and
+should be reviewed rather than decided at 3am.
+
 ## Known-unverified
 
-- Whether the app actually comes up and serves traffic under
-  `./scripts/local.sh up --infra` with the prefix corrected. The preflight now
-  passes; nothing beyond that is proven yet.
+- Whether the app serves traffic end to end. Eight of nine containers started;
+  the UI never started because Keycloak blocked it. **No routed surface of the
+  app has been reached, no login has been performed.** Nothing about the app
+  working is proven yet.
 - Whether the existing overlay can be retargeted onto the prod compose files
   without a rewrite. `compose/local.yml` and `deploy/compose/prod/*.yml` differ
   in service naming and volumes, not just networks, so this is asserted from
   reading, not tested.
-- Whether Hill90's Keycloak realm exposes the clients the app needs
-  (`hill90-ui`, `hill90-api`) is not yet checked. OIDC discovery returns 200;
-  that says the realm exists, not that it fits.
-- Whether MinIO has the app's buckets is not yet checked.
+- Whether MinIO has the app's buckets is not yet checked. Moot for the dedup
+  decision, since the app keeps its own MinIO.
 - `traefik.docker.network` is expected to need setting explicitly, because it
   does not follow `NETWORK_PREFIX` — Hill90's own
   `deploy/compose/overrides/local.observability.yml:21,45` sets it for exactly
