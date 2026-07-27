@@ -1,6 +1,6 @@
 # Running hill90-app on Hill90's Infrastructure
 
-**Status:** local run proven; prod path and naming scheme still open
+**Status:** local run proven; naming scheme decided (reversible); prod override layer open
 **Audited:** 2026-07-27 by adversarial subagent review; corrections folded in below
 **Recorded:** 2026-07-27
 
@@ -379,12 +379,31 @@ boundary that the platform-only database check defends.
 
 No conflict at all: Hill90 runs no MinIO. Nothing to dedup.
 
-### `postgres-exporter` — the app should drop its copy
+### `postgres-exporter` — app keeps its own (this reverses an earlier call)
 
-This is the one genuine deletion. Hill90 owns observability
-([RESURRECTION.md](../../RESURRECTION.md) §9) and already runs
-`postgres-exporter`. The app's copy in `docker-compose.db.yml` is a pure
-duplicate of an infra concern.
+An earlier version of this record called this "the one genuine deletion", on the
+grounds that Hill90 owns observability ([RESURRECTION.md](../../RESURRECTION.md)
+§9) and already runs `postgres-exporter`.
+
+**That was wrong,** and looking at the file before deleting it is what caught it.
+Hill90's exporter is configured against Hill90's database. It cannot scrape the
+app's. Deleting the app's copy would have silently ended all monitoring of the
+app's Postgres — the failure would have been an absence of metrics, which nothing
+alerts on.
+
+It is kept and renamed. Two real bugs surfaced in the process, in opposite
+directions:
+
+- its `DATA_SOURCE_URI` was `postgres:5432/hill90`, the bare name, which is
+  Hill90's instance on the shared network — so it was scraping the wrong database
+- Hill90's Prometheus targets `postgres-exporter:9187` **by name**
+  (`platform/observability/prometheus/prometheus.yml:24`), so with both stacks up
+  that target was ambiguous and Hill90's own metrics could have been served by the
+  app's exporter
+
+The observability *stack* is Hill90's; an exporter for the app's own database is
+the app's. Those are different things, and conflating them is what produced the
+wrong call.
 
 ### LiteLLM — stays
 
