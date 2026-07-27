@@ -91,7 +91,7 @@ services:
       docker-proxy:
         condition: service_healthy
     volumes:
-      - /opt/hill90/agentbox-configs:/data/agentbox
+      - ${AGENTBOX_CONFIG_HOST_PATH:-/opt/hill90/agentbox-configs}:/data/agentbox
       - ../../../platform/vault/secrets-schema.yaml:/data/secrets-schema.yaml:ro
     environment:
       - NODE_ENV=production
@@ -102,7 +102,7 @@ services:
       - KEYCLOAK_JWKS_URI=https://auth.hill90.com/realms/hill90/protocol/openid-connect/certs
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_api
       - DOCKER_HOST=tcp://docker-proxy:2375
-      - AGENTBOX_CONFIG_HOST_PATH=/opt/hill90/agentbox-configs
+      - AGENTBOX_CONFIG_HOST_PATH=${AGENTBOX_CONFIG_HOST_PATH:-/opt/hill90/agentbox-configs}
       - ENVIRONMENT=production
       - OTEL_SERVICE_NAME=api
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318

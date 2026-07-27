@@ -29,7 +29,7 @@ services:
       - KC_DB_URL=jdbc:postgresql://app-postgres:5432/keycloak
       - KC_DB_USERNAME=${DB_USER}
       - KC_DB_PASSWORD=${DB_PASSWORD}
-      - KC_HOSTNAME=https://auth.hill90.com
+      - KC_HOSTNAME=${KC_HOSTNAME:-https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}}
       - KC_PROXY_HEADERS=xforwarded
       - KC_HTTP_ENABLED=true
       - KC_HEALTH_ENABLED=true
