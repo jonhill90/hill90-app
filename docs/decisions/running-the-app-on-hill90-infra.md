@@ -396,12 +396,136 @@ network rather than `<prefix>_internal` are the open design questions; they are
 deliberately not settled here, because that choice affects the prod files and
 should be reviewed rather than decided at 3am.
 
+## The app runs locally on Hill90's infra, and a login works
+
+Nine containers healthy, the UI and API reachable through Hill90's Traefik, a
+real login against the app's own Keycloak, and authenticated reads out of the
+app's own Postgres.
+
+```
+$ docker ps --format '{{.Names}}\t{{.Status}}' | grep '^hill90-'
+hill90-ai         Up (healthy)     hill90-mcp        Up (healthy)
+hill90-api        Up (healthy)     hill90-minio      Up (healthy)
+hill90-keycloak   Up (healthy)     hill90-postgres   Up (healthy)
+hill90-knowledge  Up (healthy)     hill90-ui         Up (healthy)
+hill90-litellm    Up (healthy)
+```
+
+Routed through Hill90's Traefik:
+
+```
+app.localtest.me:8080/          -> HTTP 200
+storage.localtest.me:8080/      -> HTTP 200
+app-auth.localtest.me:8080/     -> HTTP 302
+api.localtest.me:8080/health    -> HTTP 200
+```
+
+Login, via the password grant against the browser-facing issuer:
+
+```
+token acquired, expires_in: 300
+iss  : http://app-auth.localtest.me:8080/realms/hill90
+user : dev
+roles: ['admin', 'user']
+```
+
+And behind the login — a page rendering is not a login, and a login is not a
+working app until something behind it does work:
+
+```
+GET /me               -> 200   validated claims, iss matches
+GET /agents           -> 200   []
+GET /agents/templates -> 200   [{"id":"code-assistant","name":"Code Assistant",...
+GET /health/detailed  -> 200   "database":{"status":"connected","latency_ms":1}
+
+GET /me      (no token) -> 401
+GET /agents  (no token) -> 401
+```
+
+`/agents/templates` is real seeded data out of the app's own Postgres, so
+migrations applied and reads work. The 401s confirm auth is enforced rather than
+bypassed.
+
+Hill90 stayed green throughout, including its platform-only-databases check, so
+the boundary held. The VPS was not touched in this phase and rechecked at 13
+containers, 0 unhealthy.
+
+## What it took: four naming collisions, not one
+
+Each was found by running, and each presented as something other than a naming
+problem.
+
+| Collision | Symptom | Fix |
+|---|---|---|
+| `postgres` alias on `<prefix>_internal` | Keycloak died with `password authentication failed for user "hill90"` — a secrets-looking error | app data plane moved to a new app-owned `<prefix>_app_internal` |
+| `keycloak` alias on `<prefix>_edge` | app services resolved `keycloak` to `172.18.0.6` = Hill90's Keycloak, so JWKS lookups hit realm `hill90` → 404 | app's Keycloak given an `app-keycloak` alias that exists only on `app_internal`; every app-internal URL uses it |
+| `auth.<domain>` hostname | served Hill90's realm `platform` (200), app's realm `hill90` was 404 | app's Keycloak moved to `${APP_AUTH_HOST:-app-auth}` |
+| Traefik router name `keycloak` | both stacks would register `keycloak@docker` | app's renamed to `app-keycloak` |
+
+The `keycloak` edge collision is worth dwelling on: keeping the app's Keycloak
+off the shared *internal* network was not sufficient, because Traefik lives on
+edge and the app's Keycloak must be on edge to be routed at all. Compose cannot
+remove a service-name alias, so the only fix is to stop relying on that name
+internally.
+
+`traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge` was added to every routed
+app service, mirroring Hill90's
+`deploy/compose/overrides/local.observability.yml`. Its reasoning applies here:
+the provider-wide default lives in Traefik's static config, which v2.11 cannot
+interpolate, so it cannot follow `NETWORK_PREFIX`; the label can, and defaults to
+`hill90_edge`, which is what production already pins.
+
+## A fifth bug, in Hill90 rather than the app
+
+Every app hostname returned 404 even with correct labels. Traefik's router table
+held only Hill90's five routers — the app's were never registered.
+
+`platform/edge/traefik.local.yml` constrains the Docker provider to an explicit
+list of compose projects, and its own comment says:
+
+> `hill90-local` is the app stack ... Without this clause its routers are
+> dropped and every app hostname returns 404.
+
+But the list contained `hill90-local-edge`, `hill90-local-observability`,
+`hill90-local-identity`, `hill90-local-platform` and `hill90-local-db` — all
+Hill90's own projects. The app's project is `hill90-local`, which was **not in
+the list**. The comment asserted the app was covered; the constraint did not
+cover it.
+
+Fixed in the Hill90 repo on branch `fix/local-traefik-accept-app-routers` by
+adding `hill90-local` to the constraint, which makes the code match the comment.
+**That is a second repository and needs its own review** — the local stack here
+depends on it, and without it every app hostname 404s again.
+
+## Still open, for Jon
+
+The naming scheme is a real decision and it was deliberately not settled alone.
+The local overlay now uses `app_internal`, the `app-keycloak` alias and
+`APP_AUTH_HOST`, which works, but:
+
+- Production has the same collisions and they are *harder* there: `container_name`
+  is set to `keycloak`, `postgres` and `postgres-exporter`, all of which exist on
+  the VPS, and Docker refuses duplicate container names outright.
+- `auth.hill90.com` is already Hill90's Keycloak in production, so the app needs
+  its own public auth hostname there too — which affects the certificate work,
+  since that hostname will need an HTTP-01 certificate of its own.
+
+Whether the app's services should be prefixed (`app-*`), moved to a separate
+namespace, or something else is a call worth making deliberately rather than
+inferring from what made local go green.
+
 ## Known-unverified
 
-- Whether the app serves traffic end to end. Eight of nine containers started;
-  the UI never started because Keycloak blocked it. **No routed surface of the
-  app has been reached, no login has been performed.** Nothing about the app
-  working is proven yet.
+- No browser was used. The Mac is locked, so headed Playwright is unavailable.
+  The UI was verified as an HTTP 200 and the login was proven via the OIDC
+  password grant plus authenticated API reads — **the interactive
+  browser-redirect login flow is unverified**, and Auth.js's cookie/session
+  handling with it.
+- `/agents` returned `[]`. Nothing has been created through the app, so agent
+  creation, the agentbox runtime and the model router are unexercised.
+- The prod compose files remain hardcoded and unexercised. Everything proven
+  above was proven through `compose/local.yml` plus the overlay — the fork, not
+  the path production uses.
 - Whether the existing overlay can be retargeted onto the prod compose files
   without a rewrite. `compose/local.yml` and `deploy/compose/prod/*.yml` differ
   in service naming and volumes, not just networks, so this is asserted from

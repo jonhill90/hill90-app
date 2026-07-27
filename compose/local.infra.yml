@@ -23,10 +23,13 @@
 # Network ownership, from Hill90 deploy/compose/prod/docker-compose.infra.yml:
 #
 #   infra creates   <prefix>_edge, <prefix>_internal, <prefix>_agent_internal
-#   the app creates <prefix>_agent_sandbox
+#   the app creates <prefix>_agent_sandbox, <prefix>_app_internal
 #
 # Inherited from production, where docker-compose.api.yml is the sole creator
 # of the sandbox network. Nothing in the infra compose references it.
+#
+# <prefix>_app_internal is not inherited from production — it exists because
+# service names collide on the shared internal network. See its note below.
 #
 # These variables mirror the infra repo's .env.local so the two stacks agree.
 # Defaults match the infra repo's own defaults, so an unset value here resolves
@@ -62,69 +65,125 @@ networks:
   agent_sandbox:
     name: ${NETWORK_PREFIX:-hill90}_agent_sandbox
 
+  # The app's own data plane. App-owned, like agent_sandbox.
+  #
+  # This exists because service names collide on the shared internal network.
+  # Compose always aliases a service by its own name and an overlay cannot
+  # remove that alias, so the only way for the app's `postgres` and `keycloak`
+  # not to answer to those names alongside Hill90's is to keep them off
+  # <prefix>_internal entirely.
+  #
+  # Observed before this network existed: `nslookup postgres` on
+  # <prefix>_internal returned two addresses — Hill90's instance and the app's.
+  # Both use role `hill90` with different passwords, so Keycloak reached the
+  # wrong one and died with "password authentication failed for user hill90",
+  # which reads as a secrets problem and is not one. Being DNS round-robin it
+  # would also have succeeded intermittently.
+  #
+  # `internal: true` matches how Hill90 declares its own internal network: the
+  # database needs no egress, and Keycloak reaches the internet over edge.
+  app_internal:
+    driver: bridge
+    internal: true
+    name: ${NETWORK_PREFIX:-hill90}_app_internal
+
 services:
   postgres:
     # internal-only, as in production. A container attached solely to an
     # `internal` network cannot publish ports, so PORT_POSTGRES has no effect
     # in this mode — reach the database with `docker exec` instead.
-    networks: [default]
+    #
+    # app_internal rather than default: Hill90's own postgres already answers to
+    # `postgres` on <prefix>_internal. See the app_internal note above.
+    networks: [app_internal]
 
   minio:
     networks: [default, edge]
     labels:
       - "traefik.enable=true"
+      # Traefik reaches this container over edge. The provider-wide default is
+      # in Traefik's static config, which v2 cannot interpolate, so it cannot
+      # follow NETWORK_PREFIX; this label can, and takes precedence. Defaults to
+      # hill90_edge, which is what production's own config pins, so production
+      # resolves identically. Same pattern as Hill90's
+      # deploy/compose/overrides/local.observability.yml.
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"
       - "traefik.http.routers.minio-console.rule=Host(`${STORAGE_HOST:-storage}.${BASE_DOMAIN:-localtest.me}`)"
       - "traefik.http.routers.minio-console.entrypoints=${APP_ENTRYPOINT:-web}"
       - "traefik.http.routers.minio-console.service=minio-console"
       - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
 
   keycloak:
-    networks: [default, edge]
+    # Not on default: Hill90's own keycloak already answers to `keycloak` on
+    # <prefix>_internal *and* on <prefix>_edge.
+    #
+    # Keeping it off the shared internal network is not enough. Traefik lives on
+    # edge, so the app's keycloak must be on edge to be routed at all — and
+    # Hill90's keycloak is aliased `keycloak` there too. Measured from
+    # hill90-api: `keycloak` resolved to 172.18.0.6, which is hill90dev-keycloak
+    # on <prefix>_edge, so every app service asking for `keycloak:8080` reached
+    # the wrong Keycloak and got a 404 for realm `hill90`.
+    #
+    # Compose cannot remove the service-name alias, so instead the app's
+    # keycloak gets an alias that only exists on app_internal, and every
+    # app-internal URL below uses that name. `keycloak` stays ambiguous on edge;
+    # nothing internal relies on it any more. Traefik is unaffected because it
+    # routes by container IP, not by DNS.
+    networks:
+      app_internal:
+        aliases: [app-keycloak]
+      edge:
     environment:
       # Traefik terminates the connection, so Keycloak has to be told the
       # browser-facing origin or it stamps the wrong `iss` and builds redirects
       # against the container hostname.
-      KC_HOSTNAME: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
+      KC_HOSTNAME: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_PROXY_HEADERS: xforwarded
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.keycloak.rule=Host(`${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}`)"
-      - "traefik.http.routers.keycloak.entrypoints=${APP_ENTRYPOINT:-web}"
-      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"
+      - "traefik.http.routers.app-keycloak.rule=Host(`${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}`)"
+      - "traefik.http.routers.app-keycloak.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.services.app-keycloak.loadbalancer.server.port=8080"
 
   litellm:
-    networks: [default, edge]
+    networks: [default, edge, app_internal]
 
   api:
-    networks: [default, edge, agent_internal, agent_sandbox]
+    networks: [default, edge, agent_internal, agent_sandbox, app_internal]
     environment:
-      KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
-      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/hill90/protocol/openid-connect/certs
       # services/api attaches agent containers to <prefix>_agent_{internal,sandbox}
       # by name. Under this overlay the prefix is infra's, not the default.
       AGENT_NETWORK_PREFIX: ${NETWORK_PREFIX:-hill90}
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"
       - "traefik.http.routers.api.rule=Host(`${API_HOST:-api}.${BASE_DOMAIN:-localtest.me}`)"
       - "traefik.http.routers.api.entrypoints=${APP_ENTRYPOINT:-web}"
       - "traefik.http.services.api.loadbalancer.server.port=3000"
 
   ai:
-    networks: [default, edge, agent_internal, agent_sandbox]
+    networks: [default, edge, agent_internal, agent_sandbox, app_internal]
     labels:
       # Internal-only in production (traefik.enable=false). Kept that way.
       - "traefik.enable=false"
 
   knowledge:
-    networks: [default, edge, agent_internal, agent_sandbox]
+    networks: [default, edge, agent_internal, agent_sandbox, app_internal]
     labels:
       - "traefik.enable=false"
 
   mcp:
-    networks: [default, edge]
+    networks: [default, edge, app_internal]
+    environment:
+      # Base file uses the ambiguous `keycloak`; see the keycloak note above.
+      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/hill90/protocol/openid-connect/certs
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"
       # Production routes the MCP gateway on ai.<domain>/mcp, not its own host.
       - "traefik.http.routers.mcp.rule=Host(`${AI_HOST:-ai}.${BASE_DOMAIN:-localtest.me}`) && PathPrefix(`/mcp`)"
       - "traefik.http.routers.mcp.entrypoints=${APP_ENTRYPOINT:-web}"
@@ -139,16 +198,18 @@ services:
       - "traefik.http.routers.mcp.middlewares=mcp-strip"
 
   ui:
-    networks: [default, edge]
+    networks: [default, edge, app_internal]
     environment:
-      AUTH_KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      AUTH_KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
       # Still required: the browser resolves the Traefik hostname, but this
       # container cannot, so the back-channel keeps using the service name.
-      KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/hill90
+      KEYCLOAK_INTERNAL_URL: http://app-keycloak:8080
+      KEYCLOAK_INTERNAL_ISSUER: http://app-keycloak:8080/realms/hill90
       AUTH_URL: http://${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
       API_WS_URL: ws://${API_HOST:-api}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"
       - "traefik.http.routers.ui.rule=Host(`${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}`)"
       - "traefik.http.routers.ui.entrypoints=${APP_ENTRYPOINT:-web}"
       - "traefik.http.services.ui.loadbalancer.server.port=3000"
