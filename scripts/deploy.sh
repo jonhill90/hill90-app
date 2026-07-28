@@ -227,7 +227,15 @@ would have passed here. Check DB_USER/DB_PASSWORD in the secrets store."
 # Preflight — the tenancy contract, checked before anything is changed
 # ---------------------------------------------------------------------------
 
+# Idempotent: cmd_deploy calls this so no deploy path can skip it, and cmd_all
+# also calls it up front so a contract violation fails before the first stack is
+# touched rather than after. Running it twice is harmless — every check is
+# read-only — but printing it twice is noise, so it runs once per invocation.
+PREFLIGHT_DONE=0
+
 cmd_preflight() {
+    [ "$PREFLIGHT_DONE" = "1" ] && return 0
+    PREFLIGHT_DONE=1
     banner "Preflight — tenancy contract"
     require_command docker
     require_infra_networks
@@ -267,7 +275,21 @@ cmd_deploy() {
     echo
 
     require_file "$compose_file" "Compose file"
-    require_infra_networks
+
+    # The FULL tenancy contract, on every deploy path.
+    #
+    # This used to be require_infra_networks alone, with the other three checks
+    # — Traefik running, the @file middlewares, and the agentbox host path —
+    # living only in cmd_preflight, which only cmd_all called. So the checks
+    # existed on the bulk verb the runbook tells us NOT to use, and were missing
+    # from the single-stack path the pipeline actually runs
+    # (`bash scripts/deploy.sh <service> prod`).
+    #
+    # The agentbox one mattered most: a missing host path is auto-created
+    # root-owned by Docker, so api starts, reports healthy and passes
+    # verification, and the failure surfaces later as agent config writes failing
+    # in a different component.
+    cmd_preflight
 
     # Ordering is a hard dependency, not a preference. Refuse rather than start
     # into a crash loop, which is what Hill90's deploy.sh does for auth->db.
