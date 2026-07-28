@@ -102,6 +102,14 @@ services:
       - KEYCLOAK_JWKS_URI=https://auth.hill90.com/realms/hill90/protocol/openid-connect/certs
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_api
       - DOCKER_HOST=tcp://docker-proxy:2375
+      # services/api attaches agent containers to <prefix>_agent_internal and
+      # <prefix>_agent_sandbox BY NAME (services/api/src/services/docker.ts:29,
+      # which defaults to 'hill90'). The compose side was parameterised and the
+      # container side was not, so the two agreed only while NETWORK_PREFIX was
+      # unset. That is true on the VPS today and stops being true the moment a
+      # second environment exists — at which point agents attach to another
+      # environment's networks, or to none.
+      - AGENT_NETWORK_PREFIX=${NETWORK_PREFIX:-hill90}
       - AGENTBOX_CONFIG_HOST_PATH=${AGENTBOX_CONFIG_HOST_PATH:-/opt/hill90/agentbox-configs}
       - ENVIRONMENT=production
       - OTEL_SERVICE_NAME=api
