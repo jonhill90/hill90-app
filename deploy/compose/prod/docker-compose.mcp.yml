@@ -26,8 +26,9 @@ services:
     environment:
       - ENVIRONMENT=production
       - PORT=8001
-      - KEYCLOAK_ISSUER=https://auth.hill90.com/realms/hill90
-      - KEYCLOAK_JWKS_URI=https://auth.hill90.com/realms/hill90/protocol/openid-connect/certs
+      # See docker-compose.api.yml: front-channel issuer, back-channel JWKS.
+      - KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
+      - KEYCLOAK_JWKS_URI=http://app-keycloak:8080/realms/${KC_REALM:-hill90}/protocol/openid-connect/certs
       - OTEL_SERVICE_NAME=mcp
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf

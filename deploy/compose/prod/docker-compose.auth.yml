@@ -52,7 +52,9 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.services.app-keycloak.loadbalancer.server.port=8080"
-      # All Keycloak traffic on auth.hill90.com (admin protected by KC credentials + MFA)
+      # All Keycloak traffic on ${APP_AUTH_HOST:-app-auth}.<domain> (admin
+      # protected by KC credentials + MFA). NOT auth.<domain> — that is
+      # Hill90's Keycloak and its OpenBao/Grafana/Portainer SSO.
       - "traefik.http.routers.app-keycloak.rule=Host(`${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}`)"
       - "traefik.http.routers.app-keycloak.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.app-keycloak.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}"
