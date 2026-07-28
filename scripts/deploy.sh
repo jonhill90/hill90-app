@@ -54,7 +54,9 @@ Stacks (deploy order matters — see 'all'):
   ui          Next.js frontend
 
 Commands:
-  all         Deploy every stack in dependency order, verifying each
+  all         Runbook steps 12-13: deploy ui alone, STOP for confirmation in
+              prod, then the rest in dependency order. Continue with
+              CONFIRM_PUBLIC_DEPLOY=1.
   verify      Run the readiness check for one stack
   teardown    Stop and remove one stack (volumes KEPT)
   preflight   Check the tenancy contract only, change nothing
@@ -78,7 +80,14 @@ EOF
 # repeating the allowlist in three functions.
 # ---------------------------------------------------------------------------
 
-DEPLOY_ORDER="db auth api ai knowledge mcp minio ui"
+# Runbook §3 steps 12-13. `ui` is deployed ALONE and FIRST: it is the certificate
+# experiment and the first live routing test, it has no dependency on the
+# contested Keycloak, and hill90.com is currently unrouted so there is nothing to
+# displace. Everything else follows in dependency order, api before ai and
+# knowledge because it is the sole creator of agent_sandbox and docker_proxy.
+DEPLOY_FIRST="ui"
+DEPLOY_REST="db auth api ai knowledge mcp minio"
+DEPLOY_ORDER="$DEPLOY_FIRST $DEPLOY_REST"
 
 stack_compose()  { printf 'deploy/compose/%s/docker-compose.%s.yml' "${2:-prod}" "$1"; }
 stack_override() { printf 'deploy/compose/overrides/local.%s.yml' "$1"; }
@@ -321,10 +330,50 @@ or, if it came from the local tenant path:
     success "${stack} deployed"
 }
 
+# `all` implements runbook §3 steps 12-13, including the stop between them.
+#
+# It previously brought up all eight stacks in one invocation with `ui` LAST,
+# which inverted the one ordering decision the runbook argues for at length and
+# published eight services with no gate. Production Traefik sets no provider
+# constraints (§4.2), so every container with traefik.enable and a Host rule is
+# live on the public internet the moment it starts -- there is no dry-run and no
+# disabled state. §4.4 adds that a crash-looping stack during a bulk bring-up is
+# the realistic way the 5-failed-validations-per-hostname-per-hour ACME budget
+# gets consumed.
+#
+# A convenience verb that contradicts the document it implements is worse than no
+# verb, so this now follows the document.
 cmd_all() {
     local env="${1:-prod}"
     cmd_preflight
-    for stack in $DEPLOY_ORDER; do
+
+    banner "Step 12 — ${DEPLOY_FIRST} alone"
+    echo "  The certificate experiment and the first live routing test."
+    echo
+    cmd_deploy "$DEPLOY_FIRST" "$env"
+
+    if [ "$env" = "prod" ] && [ "${CONFIRM_PUBLIC_DEPLOY:-0}" != "1" ]; then
+        banner "Stopped, as the runbook requires"
+        cat <<EOF
+  ${DEPLOY_FIRST} is deployed. Confirm it before continuing — this single step
+  answers the only genuinely unproven question in the plan:
+
+    curl -sI https://\${BASE_DOMAIN:-hill90.com}
+      expect a real certificate, NOT CN=TRAEFIK DEFAULT CERT
+    the four existing DNS-01 certificates must be untouched
+    Hill90 baseline: 13 containers, 0 unhealthy
+
+  Then deploy the rest:
+    CONFIRM_PUBLIC_DEPLOY=1 bash scripts/deploy.sh all ${env}
+
+  Each remaining stack becomes public the moment it starts. To go one at a time
+  instead:  bash scripts/deploy.sh <stack> ${env}
+EOF
+        return 0
+    fi
+
+    banner "Step 13 — the remainder, in dependency order"
+    for stack in $DEPLOY_REST; do
         cmd_deploy "$stack" "$env"
     done
     banner "All stacks deployed"
