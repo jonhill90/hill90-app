@@ -1,6 +1,11 @@
-name: Deploy (Prod)
+name: Manual Deploy App (Prod)
 
 # Manual-only, deliberately.
+#
+# Named "Manual Deploy App (Prod)" to Hill90's convention: it reserves the
+# unprefixed "Deploy ..." for its automatic push-triggered path and prefixes
+# every manually dispatched one with "Manual". If this ever gains a push trigger,
+# the name should lose the prefix at the same time.
 #
 # Hill90's deploy.yml also triggers on push to main behind path filters. This one
 # does not, for two reasons:
