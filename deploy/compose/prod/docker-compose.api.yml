@@ -98,8 +98,13 @@ services:
       - SECRETS_SCHEMA_PATH=/data/secrets-schema.yaml
       - PORT=3000
       - AI_SERVICE_URL=http://ai:8000
-      - KEYCLOAK_ISSUER=https://auth.hill90.com/realms/hill90
-      - KEYCLOAK_JWKS_URI=https://auth.hill90.com/realms/hill90/protocol/openid-connect/certs
+      # Front-channel: must match the `iss` claim Keycloak stamps, so it is
+      # the browser-facing host. auth.<domain> is HILL90's Keycloak, serving
+      # realm `platform`; the app's is app-auth serving realm `hill90`.
+      - KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
+      # Back-channel: resolved inside the network, so it uses the app's own
+      # service name rather than going out through Traefik and back.
+      - KEYCLOAK_JWKS_URI=http://app-keycloak:8080/realms/${KC_REALM:-hill90}/protocol/openid-connect/certs
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_api
       - DOCKER_HOST=tcp://docker-proxy:2375
       # services/api attaches agent containers to <prefix>_agent_internal and
