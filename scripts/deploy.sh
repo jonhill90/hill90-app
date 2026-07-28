@@ -165,8 +165,17 @@ cmd_verify() {
         status=""
         while [ "$attempt" -lt "$max_attempts" ]; do
             status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$c" 2>/dev/null || true)"
-            if [ "$status" = "healthy" ] || [ "$status" = "running" ]; then
-                success "${c}: ${status}"
+            if [ "$status" = "healthy" ]; then
+                success "${c}: healthy"
+                break
+            fi
+            # A container with no healthcheck can only ever report "running", so
+            # without this it would poll until timeout. Accept it, but say so --
+            # it is a weaker claim than healthy, and a service added later
+            # without a healthcheck would otherwise silently downgrade
+            # verification to "the process started" while still printing a tick.
+            if [ "$status" = "running" ] && [ -z "$(docker inspect --format '{{if .State.Health}}yes{{end}}' "$c" 2>/dev/null)" ]; then
+                warn "${c}: running, but it declares NO healthcheck — verified only that the process started"
                 break
             fi
             attempt=$((attempt + 1))
@@ -227,6 +236,8 @@ cmd_preflight() {
     docker inspect "${TRAEFIK_CONTAINER:-traefik}" >/dev/null 2>&1 \
         && success "Traefik is running" \
         || warn "Traefik container '${TRAEFIK_CONTAINER:-traefik}' not found — routes will not serve"
+
+    require_agentbox_path
 
     # The app references these and does not define them. mcp-strip is NOT in this
     # list on purpose: it is declared as a label in docker-compose.mcp.yml,

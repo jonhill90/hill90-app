@@ -111,17 +111,55 @@ load_secrets() {
 }
 
 # Read KEY=VALUE lines on stdin and export them, quoting each value so that
-# spaces, quotes and newlines survive. A naive `source` of an env file mangles
-# all three, and the Ed25519 PEMs contain the first two.
+# spaces and quotes survive. A naive `source` mangles both, and the Ed25519 PEMs
+# contain them.
+#
+# VALUES MUST BE SINGLE-LINE. An earlier version of this comment claimed newlines
+# survived too. They do not: the KEY= filter below drops every continuation line
+# of a multi-line value before the quoting ever sees it, so a pasted real PEM
+# became just its "-----BEGIN PRIVATE KEY-----" header with no warning and no
+# non-zero exit. That produces a truncated signing key, a deploy that completes
+# and passes readiness, and token signing that fails later under an unrelated
+# symptom.
+#
+# Rather than silently drop them, unparsable lines are now an error. Inline PEMs
+# with \n escapes, as infra/secrets/prod.enc.env.example shows.
 _export_env_pairs() {
-    local temp_file
+    local temp_file rejected
     temp_file=$(mktemp)
-    # shellcheck disable=SC2064  # early expansion of $temp_file is intentional
-    trap "rm -f '$temp_file'" RETURN
+    rejected=$(mktemp)
+    # shellcheck disable=SC2064  # early expansion is intentional
+    trap "rm -f '$temp_file' '$rejected'" RETURN
 
-    grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+    # Split the stream: assignments through, everything else (excluding blanks
+    # and comments) into the reject pile so it can be reported rather than lost.
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) continue ;;
+            *)
+                if printf '%s' "$line" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*='; then
+                    printf '%s\n' "$line" >> "$temp_file.raw"
+                else
+                    printf '%s\n' "$line" >> "$rejected"
+                fi
+                ;;
+        esac
+    done
+
+    if [ -s "$rejected" ]; then
+        warn "These lines are not KEY=VALUE assignments and were NOT loaded:"
+        sed 's/^/    /' "$rejected" >&2
+        die "Refusing to continue with a partially loaded secrets set.
+This is almost always a multi-line value -- a PEM pasted across several lines.
+Inline it with backslash-n escapes so the whole key is on one line; see
+infra/secrets/prod.enc.env.example. Silently dropping the body would give you a
+truncated signing key and a deploy that looks entirely successful."
+    fi
+
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$temp_file.raw" 2>/dev/null \
         | while IFS='=' read -r key value; do printf '%s=%q\n' "$key" "$value"; done \
         > "$temp_file"
+    rm -f "$temp_file.raw"
 
     set -a
     # shellcheck disable=SC1090  # dynamic source of quoted pairs
@@ -159,6 +197,41 @@ These are created by the Hill90 infrastructure repo, not by this one. The app is
 a tenant and cannot start until the platform is up. Deploy Hill90's infra stack
 first, or if NETWORK_PREFIX is wrong here, correct it — it is currently
 '${pfx}'."
+}
+
+# services/api bind-mounts this host directory into itself AND passes the same
+# path to every agent container it creates, so it is a contract term with the
+# host in the same way the shared networks are.
+#
+# If it is missing, Docker does NOT fail. It auto-creates the bind-mount source
+# as a root-owned directory and carries on, so api starts, reports healthy and
+# passes cmd_verify -- the deploy succeeds by every signal the script has. The
+# failure surfaces later, elsewhere, as agent config writes failing: a different
+# symptom in a different component from the cause. This estate has already been
+# bitten by an agentbox-configs permissions problem, so it is a known shape.
+#
+# Locally the override points this somewhere that exists, so the production
+# default has never been exercised.
+require_agentbox_path() {
+    local p="${AGENTBOX_CONFIG_HOST_PATH:-/opt/hill90/agentbox-configs}"
+
+    [ -e "$p" ] || die "AGENTBOX_CONFIG_HOST_PATH does not exist: ${p}
+
+Docker would not fail on this. It would create the path as a root-owned
+directory, api would start and report healthy, and the deploy would look
+entirely successful -- then agent config writes would fail later, in a different
+component. Create it with the right ownership first:
+
+  sudo mkdir -p ${p} && sudo chown \$(id -u):\$(id -g) ${p}"
+
+    [ -d "$p" ] || die "AGENTBOX_CONFIG_HOST_PATH exists but is not a directory: ${p}"
+
+    [ -w "$p" ] || die "AGENTBOX_CONFIG_HOST_PATH is not writable by $(id -un): ${p}
+
+Owned by $(stat -f '%Su:%Sg' "$p" 2>/dev/null || stat -c '%U:%G' "$p" 2>/dev/null).
+api and every agent container write here. Fix ownership before deploying."
+
+    success "agentbox config path writable: ${p}"
 }
 
 # Traefik middlewares the app's routers reference but does not define. A router

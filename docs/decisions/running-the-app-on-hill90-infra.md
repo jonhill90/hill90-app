@@ -1194,3 +1194,28 @@ add the app's eight project names to Hill90's local allowlist (Traefik v2.11
 cannot do `LabelRegexp`, so each must be listed), or keep `scripts/local.sh` as
 the local path — which already works and routes correctly — and treat `deploy.sh`
 as the production path exercised locally for its logic only.
+
+## What the deploy path has and has not exercised
+
+`deploy.sh` has been run end to end locally, but **only in its override
+configuration** — every local exercise set `USE_LOCAL_OVERRIDE=1`. The default is
+`0`, and that default path has never run.
+
+Specifically unobserved, and all of it exists only in production:
+
+- the `websecure` entrypoint
+- the `letsencrypt` and `letsencrypt-dns` cert resolvers
+- `tailscale-only@file` on `minio` and `litellm` — which the local overrides
+  deliberately swap for `compress@file`, because the real middleware is an IP
+  allowlist that denies local traffic
+
+`cmd_preflight` verifies that `tailscale-only` is **defined** by Traefik's file
+provider, and that check was proven live. But "the middleware is defined" and
+"the routers behind it serve" are different claims and only the first is tested.
+The same holds for the ACME resolvers: every precondition for HTTP-01 was
+measured, and no certificate has been issued, because issuance requires a router,
+which requires a deploy.
+
+So the earlier statement that the `up`/`verify` path has never run against a real
+host is true but incomplete. **The production configuration itself is also
+untested**, not merely the host it would run on.
