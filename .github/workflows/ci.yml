@@ -1,4 +1,4 @@
-name: CI
+name: Validate Repository
 
 # Manual-only by design: this repo has no deploy target, so nothing should fire
 # on push. All jobs below were verified green locally on 2026-07-26.
