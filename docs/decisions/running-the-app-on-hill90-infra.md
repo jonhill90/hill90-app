@@ -1326,3 +1326,70 @@ taken from Hill90's committed `age-prod.pub`.
 `/opt/hill90-app`, owned by `deploy`, on `main` at `4a09320`, with a read-only
 deploy key generated on the host so the private half never left it. `git fetch`
 works and push is rejected, which is correct for a deploy target.
+
+## The secrets store
+
+`infra/secrets/prod.enc.env` now exists — the last blocker on the deploy path.
+Only `.sops.yaml` and the example were committed before, so the workflow stopped
+correctly at "Get Tailscale IP".
+
+28 keys, matching the template exactly: no key missing, none extra, verified by
+decrypting and diffing the key sets rather than counting by eye.
+
+Encrypted to `age1p30vk...qg9qd5v` — the key `.sops.yaml` already specified, the
+one Hill90 uses, and the one at `/opt/hill90/secrets/keys/keys.txt` on the VPS.
+One key per host, as recorded above.
+
+### How each value was produced
+
+| Category | Keys | Method |
+|---|---|---|
+| Confirmed config | `TAILSCALE_IP`, `NETWORK_PREFIX`, `BASE_DOMAIN`, `APP_AUTH_HOST`, `CONTAINER_PREFIX`, `AUTH_KEYCLOAK_ISSUER`, `AUTH_URL`, `DB_USER`, `DB_NAME`, `KC_ADMIN_USERNAME`, `MINIO_ROOT_USER`, `AUTH_KEYCLOAK_ID` | set to what the prod compose files resolve against |
+| Generated | 9 passwords and tokens | `openssl rand`, 48–64 chars, all URL-safe so they survive `DATABASE_URL` |
+| Generated, constrained | `PROVIDER_KEY_ENCRYPTION_KEY` | exactly 64 hex, asserted |
+| Generated, real keypairs | `AKM_SIGNING_PRIVATE_KEY`, `MODEL_ROUTER_SIGNING_PRIVATE_KEY` | `openssl genpkey -algorithm ed25519`, inlined as single-line PEM with `\n` escapes. Verified by parsing them back: both report `ED25519 Private-Key` |
+| Carried across | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | decrypted from Hill90's store and confirmed byte-identical |
+| **Deliberately empty** | `TAVILY_API_KEY`, `DISCORD_BOT_TOKEN` | not present in Hill90 and not invented — see below |
+
+URL-safety is not cosmetic: `DATABASE_URL` is assembled as
+`postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/...`, and a `+` or `/`
+from base64 would corrupt it in a way that reads as an authentication failure.
+
+### Verified by running, not by inspection
+
+All eight prod stacks were rendered against the decrypted store:
+
+```
+db auth api ai knowledge mcp minio ui   -> all resolve, 0 unset-variable warnings
+placeholders remaining (=REPLACE)       -> 0
+empty values                            -> TAVILY_API_KEY, DISCORD_BOT_TOKEN,
+                                           CONTAINER_PREFIX (empty in prod by design)
+```
+
+And the committed file is genuinely encrypted — probed for `sk-ant`, `sk-proj`,
+the Tailscale IP, `BEGIN PRIVATE KEY` and `hill90.com`; none appear. The
+plaintext was written with `umask 077`, never left the working tree, and was
+shredded.
+
+### The public key halves
+
+`infra/secrets/public.pem` and `infra/secrets/model-router-public.pem` are
+committed. They are public halves and safe to commit, but they are **not yet
+where the services need them**: production mounts the `akm-keys` volume at
+`/etc/akm`, and `knowledge` reads `/etc/akm/public.pem` while `ai` reads
+`/etc/akm/model-router-public.pem`. **That volume is empty and nothing populates
+it** — the local override bind-mounts the keys instead, so this path has never
+been exercised. `ai` and `knowledge` will crash-loop on
+`FileNotFoundError: /etc/akm/public.pem` until it is seeded.
+
+This does not block a `ui`-only first deploy. It blocks `ai` and `knowledge`.
+
+### Still required before those services work
+
+- `TAVILY_API_KEY` — the agent web-search tool
+- `DISCORD_BOT_TOKEN` — `services/discord-bot`, which has never been in any
+  automated deploy
+
+Both are empty rather than plausible-looking placeholders, deliberately: a fake
+value that looks real fails at runtime with an authentication error from a third
+party, which is harder to diagnose than an obviously absent one.
