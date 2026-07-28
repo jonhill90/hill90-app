@@ -1219,3 +1219,67 @@ which requires a deploy.
 So the earlier statement that the `up`/`verify` path has never run against a real
 host is true but incomplete. **The production configuration itself is also
 untested**, not merely the host it would run on.
+
+## The deploy pipeline
+
+The tooling had nothing invoking it. `hill90-app` had `ci.yml` and
+`smoke-auth.yml`, neither of which deploys, so the only way to run
+`scripts/deploy.sh` was a human SSHing to the box.
+
+`.github/workflows/reusable-deploy-service.yml` mirrors Hill90's file of the same
+name step for step — checkout, join the tailnet with `tag:github-actions`, write
+the SSH key, install sops and write the age key, extract `TAILSCALE_IP` from SOPS
+with `add-mask`, verify SSH connectivity as its own step so a network failure is
+distinguishable from a deploy failure, then ssh in and run the deploy against a
+checkout on the VPS. Secret names are Hill90's exactly.
+
+Four steps are added, each because this app has never deployed:
+
+| Step | Why |
+|---|---|
+| Secret preflight | fails before any key is written or connection opened. Without it a missing secret surfaces as an empty SSH key and an auth failure several steps later, which reads as a network problem |
+| `all` confirmation gate | `deploy.sh` implements the runbook's staging rule; the workflow must not be a way around it |
+| VPS checkout check | `/opt/hill90/app` is Hill90's clone despite the name, and this app has no checkout at all |
+| Hill90 baseline check | the tenancy contract runs both ways — a tenant deploy must not degrade the platform |
+
+`deploy.yml` is `workflow_dispatch`-only. Hill90's equivalent also fires on push
+to `main` behind path filters, and its own runbook records that as a risk (§4.5):
+a merge touching a filtered path triggers a production deploy unattended, which
+already caused one Hill90 PR to be held. `ci.yml` here is manual-only on the same
+reasoning, so this matches the repository's existing posture. A push trigger can
+be added once the path has actually run and the deploy is boring. It is not
+boring yet.
+
+### Prerequisites — none of these exist yet
+
+**Secrets, on a `production` environment of this repository.** GitHub secrets are
+write-only, so they cannot be read out of Hill90 and must be re-entered:
+
+| Secret | What |
+|---|---|
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client, `tag:github-actions` |
+| `TS_OAUTH_SECRET` | its secret |
+| `VPS_SSH_PRIVATE_KEY` | private key for `deploy@<vps>` |
+| `SOPS_AGE_KEY` | age private key for **this app's** store, not Hill90's |
+
+`TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` are not in SOPS and cannot be
+recovered from Hill90, so that pair is blocked on Jon.
+
+**A checkout on the VPS.** There is none. `/opt/hill90` holds `app` (Hill90's
+clone), `agentbox-configs`, `backups` and `secrets`. The workflow defaults to
+`/opt/hill90-app`, overridable with the `VPS_APP_PATH` repository variable.
+
+**The app's age key on the VPS**, default
+`/opt/hill90-app/infra/secrets/keys/age-prod.key`, readable by `deploy` and
+separate from Hill90's — a tenant must not be able to decrypt platform secrets.
+
+**`TAILSCALE_IP` in the app's encrypted store.** Added to
+`infra/secrets/prod.enc.env.example`; the store itself does not exist yet.
+
+### Not run
+
+**No part of this workflow has executed.** The YAML parses, every `run` block
+passes `bash -n`, and the secret preflight was exercised directly — it fails
+naming the missing secrets with no secrets set, names the single missing one when
+three of four are present, and passes when all four are. Nothing beyond that is
+proven, and nothing was created on the VPS.

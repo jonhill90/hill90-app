@@ -1,0 +1,245 @@
+name: Reusable Deploy Service
+
+# Deploy one hill90-app stack to the VPS.
+#
+# Mirrors Hill90's .github/workflows/reusable-deploy-service.yml step for step —
+# checkout, join the tailnet, write the SSH key, install sops and write the age
+# key, extract TAILSCALE_IP from SOPS with add-mask, verify SSH connectivity as
+# its own step, then ssh in and run the deploy against a checkout on the VPS.
+# Secret names are Hill90's exactly, so an operator configuring both repos sets
+# the same names in both places.
+#
+# Two additions, both because this app has never deployed and its prerequisites
+# do not exist yet:
+#
+#   1. A preflight that fails on a missing secret BEFORE anything is written or
+#      any connection is attempted. Without it a missing secret surfaces as an
+#      empty SSH key and an authentication failure several steps later, which
+#      reads as a network or permissions problem.
+#   2. A check that the VPS checkout exists at all. /opt/hill90/app is HILL90's
+#      clone despite the name; this app has no checkout on the box.
+#
+# NOTHING HERE HAS EVER RUN. See the PR body for the secrets that must be set
+# and the checkout that must be created first.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: 'Stack to deploy'
+        required: true
+        type: string
+      confirm_public_deploy:
+        description: >-
+          Required for "all". Every stack becomes publicly reachable the moment
+          it starts, because production Traefik sets no provider constraints.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.service }}
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      # Where this app's clone lives on the VPS. Deliberately NOT /opt/hill90/app,
+      # which is Hill90's checkout despite the name. Override with the
+      # VPS_APP_PATH repository variable if the box is laid out differently.
+      VPS_APP_PATH: ${{ vars.VPS_APP_PATH || '/opt/hill90-app' }}
+      # The app's own age key, on the VPS. Separate from Hill90's by design: a
+      # tenant must not be able to decrypt platform secrets.
+      VPS_AGE_KEY: ${{ vars.VPS_AGE_KEY || '/opt/hill90-app/infra/secrets/keys/age-prod.key' }}
+
+    steps:
+      # ---------------------------------------------------------------------
+      # Fail early and loudly, before writing keys or opening connections.
+      # ---------------------------------------------------------------------
+      - name: Preflight — required secrets are present
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          missing=()
+          for name in TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET VPS_SSH_PRIVATE_KEY SOPS_AGE_KEY; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing required secret(s): ${missing[*]}"
+            cat <<'EOF'
+          This repository has no deploy secrets configured. They must be set on the
+          `production` environment of THIS repository — GitHub secrets are
+          write-only, so they cannot be copied out of Hill90 and must be re-entered.
+
+            TS_OAUTH_CLIENT_ID    Tailscale OAuth client, tag:github-actions
+            TS_OAUTH_SECRET       its secret
+            VPS_SSH_PRIVATE_KEY   private key for deploy@<vps>
+            SOPS_AGE_KEY          age private key for THIS app's secrets store,
+                                  not Hill90's
+
+          Stopping before writing any key material or opening any connection.
+          EOF
+            exit 1
+          fi
+          echo "All required secrets are present."
+
+      - name: Preflight — "all" requires explicit confirmation
+        if: inputs.service == 'all' && inputs.confirm_public_deploy != true
+        run: |
+          echo "::error::Deploying 'all' requires confirm_public_deploy."
+          cat <<'EOF'
+          scripts/deploy.sh implements the runbook's staging rule: deploy `ui`
+          alone first, confirm the certificate, then the rest. Production Traefik
+          sets no provider constraints, so every container with a Host rule is
+          live on the public internet the moment it starts.
+
+          Deploy `ui` on its own first, confirm it, then re-run with
+          confirm_public_deploy enabled.
+          EOF
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:github-actions
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+
+      - name: Setup SOPS/age for secrets
+        env:
+          SOPS_VERSION: "3.9.4"
+        run: |
+          SOPS_URL="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64"
+          curl -fsSL -o /tmp/sops "$SOPS_URL"
+          # Verify we got a binary, not an HTML error page
+          if file /tmp/sops | grep -q "HTML"; then
+            echo "::error::SOPS download returned HTML instead of binary — check URL: $SOPS_URL"
+            exit 1
+          fi
+          chmod +x /tmp/sops
+          sudo mv /tmp/sops /usr/local/bin/sops
+          sops --version
+
+          mkdir -p ~/.config/sops/age
+          echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
+          chmod 600 ~/.config/sops/age/keys.txt
+
+      - name: Get Tailscale IP from secrets
+        id: get-ip
+        run: |
+          if [ ! -f infra/secrets/prod.enc.env ]; then
+            echo "::error::infra/secrets/prod.enc.env does not exist in this repository."
+            cat <<'EOF'
+          The encrypted secrets store has not been created yet. See
+          infra/secrets/prod.enc.env.example for the required keys, then:
+
+            sops -e infra/secrets/prod.env > infra/secrets/prod.enc.env
+            rm infra/secrets/prod.env
+
+          It must contain TAILSCALE_IP, which is how this workflow reaches the VPS.
+          EOF
+            exit 1
+          fi
+
+          TAILSCALE_IP=$(sops -d --extract '["TAILSCALE_IP"]' infra/secrets/prod.enc.env)
+          if [ -z "$TAILSCALE_IP" ]; then
+            echo "::error::TAILSCALE_IP is empty or absent in infra/secrets/prod.enc.env"
+            exit 1
+          fi
+          echo "::add-mask::$TAILSCALE_IP"
+          echo "tailscale_ip=$TAILSCALE_IP" >> $GITHUB_OUTPUT
+
+      # Its own step, so a tailnet or key problem is distinguishable from a
+      # deploy problem. Hill90 does the same and for the same reason.
+      - name: Verify SSH connectivity
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} 'echo "SSH connection successful"'
+
+      # This app has no checkout on the VPS. Fail with the reason rather than
+      # letting `cd` fail inside a compound command, where the error is a bare
+      # "No such file or directory" attributed to the deploy.
+      - name: Verify the app checkout exists on the VPS
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "test -d '${VPS_APP_PATH}/.git'" && exit 0
+
+          echo "::error::No hill90-app checkout at ${VPS_APP_PATH} on the VPS."
+          cat <<EOF
+          /opt/hill90/app is HILL90's clone despite the name — do not deploy into it.
+          This app needs its own checkout:
+
+            sudo git clone https://github.com/jonhill90/hill90-app ${VPS_APP_PATH}
+            sudo chown -R deploy:deploy ${VPS_APP_PATH}
+
+          The app's age key must also be present at ${VPS_AGE_KEY}, readable by
+          deploy and separate from Hill90's.
+          EOF
+          exit 1
+
+      - name: Verify the app age key exists on the VPS
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "test -r '${VPS_AGE_KEY}'" && exit 0
+
+          echo "::error::No readable age key at ${VPS_AGE_KEY} on the VPS."
+          echo "scripts/deploy.sh decrypts the app's secrets store with it. It is"
+          echo "deliberately NOT Hill90's key: a tenant must not be able to decrypt"
+          echo "platform secrets."
+          exit 1
+
+      - name: Deploy ${{ inputs.service }}
+        env:
+          CONFIRM: ${{ inputs.confirm_public_deploy && '1' || '0' }}
+        run: |
+          echo "Deploying ${{ inputs.service }} to ${VPS_APP_PATH}..."
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && \
+             git fetch origin && \
+             git diff --stat HEAD origin/main && \
+             git reset --hard origin/main && \
+             export SOPS_AGE_KEY_FILE=${VPS_AGE_KEY} && \
+             export CONFIRM_PUBLIC_DEPLOY=${CONFIRM} && \
+             bash scripts/deploy.sh ${{ inputs.service }} prod"
+
+      # deploy.sh already verifies as part of its own run. This re-checks after
+      # the SSH session closes, which is what catches a container that came up
+      # and then died.
+      - name: Verify readiness
+        if: inputs.service != 'all'
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && bash scripts/deploy.sh verify ${{ inputs.service }} prod"
+
+      # The tenancy contract runs the other way too: a tenant deploy must not
+      # degrade the platform. Hill90's baseline is 13 containers, 0 unhealthy.
+      - name: Verify the Hill90 baseline is unchanged
+        if: always()
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            'unhealthy=$(docker ps --filter health=unhealthy --format "{{.Names}}"); \
+             if [ -n "$unhealthy" ]; then \
+               echo "::error::Unhealthy containers after deploy: $unhealthy"; exit 1; \
+             fi; \
+             echo "No unhealthy containers on the host."'
