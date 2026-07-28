@@ -805,3 +805,81 @@ Not edited here. Both are in the Hill90 repo:
   `api` and `auth` hostnames; these have A records pointing at the VPS but no
   certificates. They are public hosts, so HTTP-01 applies rather than the DNS-01
   path that depended on the unextracted `services/dns-manager`.
+
+---
+
+# Phase A of the tenant deployment runbook
+
+Executing `Hill90/docs/runbooks/tenant-app-deployment.md` §3 Phase A. No VPS
+contact in this phase. Numbered to match the runbook.
+
+## Step 1 — name collisions resolved, and the data-plane network decided
+
+The naming scheme itself was settled earlier in this record. Verified against
+Hill90's repository across **four** namespaces — the runbook names three, but the
+fourth is where the dangerous one actually lives:
+
+```
+container names : app-ai app-api app-discord-bot app-docker-proxy app-keycloak
+                  app-knowledge app-litellm app-mcp app-minio app-postgres app-ui
+                  overlap with Hill90: none
+traefik routers : app-api app-keycloak app-litellm app-mcp app-minio-console app-ui
+                  overlap with Hill90: none
+hostnames       : app's Keycloak on ${APP_AUTH_HOST:-app-auth}; Hill90 keeps auth
+                  overlap with Hill90: none
+service keys    : ai api app-keycloak app-minio app-postgres discord-bot
+                  docker-proxy knowledge litellm mcp ui agentbox*
+                  overlap with Hill90: none
+```
+
+**Service keys are the namespace that matters most and the runbook does not list
+it.** Compose derives a network alias from the service key, not from
+`container_name`, so renaming only the container would have left `postgres` and
+`keycloak` ambiguous on the shared network — which is exactly risk §4.3.
+
+### Decision: the app's data plane stays on `hill90_internal`
+
+The runbook makes this an explicit open question. Decided: **keep it on the
+shared internal network, do not give the app a private data network.**
+
+Reasoning. Risk §4.3 is entirely a *name* collision — two containers answering to
+`postgres` on one network, DNS returning both, Keycloak reaching the wrong one.
+Renaming the service key to `app-postgres` removes that at the root: the alias is
+now unique, so there is nothing to resolve ambiguously. A private network would be
+a second, independent fix for a cause already eliminated.
+
+Rejected alternative: a dedicated `${NETWORK_PREFIX:-hill90}_app_internal` with
+`internal: true`, which is what the *local overlay* on `compose/local.yml` does.
+It was necessary there because that path never renamed its service keys, so the
+alias really was ambiguous. It is not necessary here, and it would cost a fourth
+network to maintain, an extra attachment on five services, and a divergence
+between the local overlay and the production topology — the divergence this whole
+effort exists to remove.
+
+Residual risk, stated: if Hill90 ever introduces a service named `app-postgres`,
+the collision returns. That is implausible, because `app-` is the tenant's
+namespace by construction — but it is the assumption this decision rests on, and
+MinIO already demonstrated that Hill90 can retroactively claim a name the app
+believed was safe.
+
+### `postgres-exporter` deleted — and what that costs
+
+Deleted per the runbook, reversing an earlier decision in this record. Hill90 owns
+observability and already runs an exporter.
+
+**The cost is real and is not hypothetical.** Hill90's exporter is single-target:
+
+```
+DATA_SOURCE_URI=postgres:5432/hill90?sslmode=disable
+```
+
+It scrapes Hill90's database and cannot reach the app's. So **the app's database
+now has no metrics at all.** Hill90's Prometheus has one `postgres-exporter` job
+targeting `postgres-exporter:9187`.
+
+The fix, when someone wants app database metrics back, is on Hill90's side and is
+small: `postgres-exporter` v0.17.1 supports multi-target scraping via
+`/probe?target=`, so one exporter can cover both databases with a scrape config
+change and no second container. That is the right shape and it keeps observability
+in the repo that owns it. Recorded here so the gap is a known trade rather than a
+discovery.
