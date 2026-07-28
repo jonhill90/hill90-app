@@ -883,3 +883,28 @@ small: `postgres-exporter` v0.17.1 supports multi-target scraping via
 change and no second container. That is the right shape and it keeps observability
 in the repo that owns it. Recorded here so the gap is a known trade rather than a
 discovery.
+
+## Step 2 — `mcp-strip` fixed
+
+`docker-compose.mcp.yml` referenced `mcp-strip@file`, which Hill90 does not
+define — it removed the middleware in JON-27 as app-specific, correctly, since
+only this service used it.
+
+This does not degrade. A router naming an undefined middleware is **errored by
+Traefik and serves nothing**, so this would have been a total outage of the MCP
+gateway with no obvious cause. It is declared as a label instead, which is also
+the right ownership boundary: prefix-stripping for `/mcp` is an app routing
+concern.
+
+Runbook verify criterion — "the prod compose has no `@file` reference Hill90 does
+not define":
+
+```
+app references : rate-limit@file  tailscale-only@file
+Hill90 defines : auth@file compress@file cors@file rate-limit@file
+                 security-headers@file tailscale-only@file
+undefined      : none
+```
+
+The runbook said the app referenced three and two existed. That is now two and
+two.
