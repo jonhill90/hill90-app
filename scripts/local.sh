@@ -9,12 +9,20 @@
 #   ./scripts/local.sh init      generate .env.local and keys, then stop
 #   ./scripts/local.sh agentbox  build the agentbox images (needed to run agents)
 #
-# Add --infra to any command to attach to a locally-running Hill90 infra stack
-# (Traefik + observability) instead of running standalone:
+# Add --infra to any command to run the app as a TENANT of a locally-running
+# Hill90 infra stack (Traefik + observability) instead of standalone:
 #
 #   ./scripts/local.sh up --infra
 #
-# Standalone is the default and needs nothing outside this repository.
+# The two paths use different compose files on purpose:
+#
+#   standalone  compose/local.yml                     self-contained fork
+#   --infra     deploy/compose/prod/*.yml             the files production uses,
+#               + deploy/compose/overrides/local.*    layered, not forked
+#
+# --infra is the path that exercises production's own compose files. Standalone
+# cannot: the production files declare Hill90's networks external, so they need
+# the platform running.
 #
 # Everything is local. This script never touches a VPS, and there is no deploy
 # path in this repository.
@@ -22,8 +30,28 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Standalone path: the self-contained fork. It creates its own networks and
+# publishes ports, so it needs nothing outside this repository.
 COMPOSE_FILE="$ROOT/compose/local.yml"
-INFRA_FILE="$ROOT/compose/local.infra.yml"
+
+# Tenant path (--infra): the PRODUCTION compose files plus the local override
+# layer. Not compose/local.infra.yml, which overlays the fork.
+#
+# This is the point of the override layer. Before, --infra layered on the fork,
+# so the only way to exercise the files production actually uses was to hand-type
+# a sixteen-flag docker compose command from an override's header comment. Nobody
+# does that, so every local run kept exercising the fork and the drift the
+# override layer exists to stop carried on through the default path.
+PROD_DIR="$ROOT/deploy/compose/prod"
+OVERRIDE_DIR="$ROOT/deploy/compose/overrides"
+STACKS="db auth api ai knowledge mcp minio ui"
+
+# One Compose project for the whole app under --infra, not one per stack.
+# Hill90's local Traefik constrains its Docker provider to an allowlist of
+# project names and cannot pattern-match (v2.11 has no LabelRegexp), so a project
+# per stack would need eight entries added there and every app router is dropped
+# until they are. `hill90-local` is already on that list.
+INFRA_PROJECT="hill90-local"
 ENV_FILE="$ROOT/.env.local"
 KEY_DIR="$ROOT/compose/local/keys"
 
@@ -50,7 +78,7 @@ ev() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true; 
 # The app's Keycloak hostname under --infra. Deliberately NOT AUTH_HOST: Hill90's
 # own Keycloak owns auth.<domain> and serves realm `platform`, so printing
 # AUTH_HOST here sent people to the wrong Keycloak, where the app's realm 404s.
-# Default matches compose/local.infra.yml's ${APP_AUTH_HOST:-app-auth}.
+# Default matches deploy/compose/overrides/local.auth.yml.
 app_auth_host() {
   local h
   h=$(ev APP_AUTH_HOST)
@@ -64,9 +92,22 @@ infra_networks() {
   printf '%s_edge %s_internal %s_agent_internal' "$pfx" "$pfx" "$pfx"
 }
 
+# Build the -f list for the tenant path: each production compose file followed by
+# its local override, then the networks override that makes agent_sandbox
+# creatable in a single merged invocation (see that file for why).
+infra_files() {
+  local st
+  for st in $STACKS; do
+    printf -- '-f\n%s\n-f\n%s\n' "$PROD_DIR/docker-compose.$st.yml" "$OVERRIDE_DIR/local.$st.yml"
+  done
+  printf -- '-f\n%s\n' "$OVERRIDE_DIR/local.networks.yml"
+}
+
 compose() {
   if [ "$INFRA" = "1" ]; then
-    docker compose -f "$COMPOSE_FILE" -f "$INFRA_FILE" --env-file "$ENV_FILE" "$@"
+    local files=()
+    while IFS= read -r line; do files+=("$line"); done < <(infra_files)
+    docker compose -p "$INFRA_PROJECT" "${files[@]}" --env-file "$ENV_FILE" "$@"
   else
     docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
   fi
