@@ -997,3 +997,61 @@ the deploying host and nowhere else.
 - **Never executed against the VPS.** Phase A forbids it. The dispatcher,
   preflight, ordering guards and secrets loader were exercised locally; the
   `up`/`verify` path against a real host has not been.
+
+## Step 5 — the two dead provision scripts
+
+The runbook says to fix the missing file first because it masks the other. It
+masked **two** others, both only reachable once `scripts/_common.sh` existed
+(created in step 4).
+
+| # | Bug | Script | Visibility |
+|---|---|---|---|
+| 1 | `source _common.sh` for a file never extracted | both | fatal, loud, exit 1 at line 7 |
+| 2 | `docker exec` without `-i` | akm only | **silent** — psql reads EOF, runs nothing, exits 0 |
+| 3 | `--username postgres` | akm only | fatal: `role "postgres" does not exist` |
+| 4 | `docker exec postgres` | both | wrong container — that is Hill90's instance, not the app's |
+
+Bug 4 was not in the runbook and is a consequence of step 1's rename: the app's
+container is `app-postgres`. Both scripts now resolve
+`${PG_CONTAINER:-${CONTAINER_PREFIX:-}app-postgres}` and fail with a usable
+message if it is absent.
+
+### Proving the `-i` fix, given exit 0 was the bug's own signature
+
+Both scripts now exit 0 — but so did the broken one. Exit status is not evidence
+here. The A/B, against the app's live Postgres:
+
+```
+$ docker exec    app-postgres psql ... <<< "SELECT 'STDIN_REACHED_PSQL';"
+  exit: 0  output: ''            <- ran nothing, reported success
+
+$ docker exec -i app-postgres psql ... <<< "SELECT 'STDIN_REACHED_PSQL';"
+  exit: 0
+         marker
+  --------------------
+   STDIN_REACHED_PSQL
+```
+
+And the real script's output is now psql's own (`NOTICE: extension "uuid-ossp"
+already exists, skipping` / `CREATE EXTENSION` / `GRANT`), which the broken
+version could never produce.
+
+One structural fix beyond the four: the original used `\c` to switch database
+inside a single non-interactive `psql` run, which does not behave as it assumed.
+It is now one invocation per target database.
+
+Databases present in the app's Postgres afterwards: `hill90`, `hill90_akm`,
+`hill90_api`, `hill90_litellm`.
+
+## Phase A status
+
+| Step | State |
+|---|---|
+| 1 — name collisions, data-plane decision, delete exporter | done, verified across four namespaces |
+| 2 — `mcp-strip` | done, no undefined `@file` references remain |
+| 3 — parameterise networks | done earlier (PR #11), re-verified: 23 literals, 0 remaining |
+| 4 — deploy script and secrets store | built, exercised locally, **never run against the VPS** |
+| 5 — provision scripts | done, proven against the live app database |
+
+Phase A is complete. **No VPS contact occurred.** Phases B and C remain, and the
+deploy path has still never run against a real host.
