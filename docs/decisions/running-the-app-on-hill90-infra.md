@@ -908,3 +908,92 @@ undefined      : none
 
 The runbook said the app referenced three and two existed. That is now two and
 two.
+
+## Step 4 — the deploy script and secrets store
+
+Built in **hill90-app**, per the runbook's own reasoning: Hill90's `deploy.sh` is
+closed over its own stacks by construction, and a `tenant` verb there would need
+a second compose root, a second secrets source, a second backup inventory and a
+second project-name map — a second script inside the first, sharing only the
+parts that make it dangerous.
+
+Followed Hill90's `scripts/deploy.sh` in **shape**, not reinvented:
+
+| Hill90 | hill90-app | Same? |
+|---|---|---|
+| verb dispatcher with closed allowlist | same, `db auth api ai knowledge mcp minio ui all verify teardown preflight` | yes |
+| `cmd_verify` polling loop, dumps logs on timeout | same loop, same log dump | yes |
+| refuses `auth` if postgres is not queryable | same, plus refuses `ai`/`knowledge` if `agent_sandbox` is absent | extended |
+| project-scoped `down`, volumes kept, `--remove-orphans` banned | same, and the ban is kept even though every app stack has its own project | yes |
+| SOPS + age, temp file with `%q` quoting | same mechanism, own key | yes |
+| OpenBao first, SOPS fallback | SOPS only — the app has no AppRole yet | diverges, noted |
+
+Three deliberate divergences:
+
+1. **Every stack gets its own Compose project** (`hill90-app-<env>-<stack>`).
+   Hill90 groups several stacks into shared projects. A shared project is exactly
+   what lets a `down` reach a neighbour, and the app has no reason to group.
+2. **The stack table is data, not a case statement repeated per function.**
+   Hill90 repeats its allowlist independently in `cmd_service`, `cmd_teardown`
+   and `cmd_verify`, which is a drift surface it guards by hand.
+3. **The app has its own age key.** Reusing Hill90's would let the app decrypt
+   platform secrets it has no business reading, and rotating one would force
+   rotating the other. Tenancy is a trust boundary, not only a naming one.
+
+### The preflight is the tenancy contract, checked before anything changes
+
+`require_infra_networks` turns Compose's
+
+```
+network hill90_edge declared as external, but could not be found
+```
+
+into a statement of which contract term is unmet and who owns it. Exercised both
+ways:
+
+```
+$ NETWORK_PREFIX=hill90 deploy.sh preflight        # production default, absent locally
+✗ Hill90's shared networks are missing:
+    hill90_edge  hill90_internal  hill90_agent_internal
+  These are created by the Hill90 infrastructure repo, not by this one...
+  ...it is currently 'hill90'.
+
+$ NETWORK_PREFIX=hill90dev deploy.sh preflight
+✓ shared networks present: hill90dev_{edge,internal,agent_internal}
+✓ Traefik is running
+✓ preflight complete
+```
+
+`require_file_middlewares` checks that middlewares the app references are
+actually defined by Traefik's file provider. **Verified to be a live check rather
+than a no-op**, which matters — a check that never fires is worse than none:
+
+```
+$ require_file_middlewares rate-limit tailscale-only     -> 0, both found
+$ require_file_middlewares mcp-strip definitely-not-real -> 1
+  ! Traefik does not appear to define: mcp-strip definitely-not-real
+```
+
+It independently rediscovers the step 2 finding.
+
+### Secrets store
+
+`infra/secrets/` with `.sops.yaml`, a fully documented `prod.enc.env.example`,
+and `keys/` gitignored. **No real secret and no key is committed**, and the
+gitignore is written so `*.enc.env` stays committable while `*.env` and `keys/`
+cannot be — verified by `git check-ignore` in both directions.
+
+`.sops.yaml` carries a placeholder public key rather than a real one, because
+generating the app's key is an operator action: the private half must exist on
+the deploying host and nowhere else.
+
+### What this does not do
+
+- **No backup.** Hill90's `deploy.sh` calls `backup.sh` before teardown; the app
+  has no backup inventory. Teardown keeps volumes, so nothing is destroyed, but
+  there is no restore path either. The runbook lists tenant rollback as unbuilt
+  and it remains so.
+- **No CI workflow.** Deploys are manual.
+- **Never executed against the VPS.** Phase A forbids it. The dispatcher,
+  preflight, ordering guards and secrets loader were exercised locally; the
+  `up`/`verify` path against a real host has not been.
