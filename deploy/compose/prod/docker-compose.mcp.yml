@@ -42,8 +42,8 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app-mcp.rule=Host(`${AI_HOST:-ai}.${BASE_DOMAIN:-hill90.com}`) && PathPrefix(`/mcp`)"
-      - "traefik.http.routers.app-mcp.entrypoints=websecure"
-      - "traefik.http.routers.app-mcp.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.app-mcp.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.app-mcp.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}"
       - "traefik.http.services.app-mcp.loadbalancer.server.port=8001"
       # mcp-strip is declared HERE as a label, not referenced as @file.
       #

@@ -816,8 +816,18 @@ contact in this phase. Numbered to match the runbook.
 ## Step 1 — name collisions resolved, and the data-plane network decided
 
 The naming scheme itself was settled earlier in this record. Verified against
-Hill90's repository across **four** namespaces — the runbook names three, but the
-fourth is where the dangerous one actually lives:
+Hill90's repository across these namespaces, **named rather than counted** — a
+count cannot be audited and a list can:
+
+- `container_name`
+- Traefik router (and service) name
+- hostname
+- Compose **service key**
+- **volume name**
+
+The runbook lists the first three. The fourth and fifth were both missed, and
+**the fifth was missed here too, in this very section, while it claimed to be
+complete.** See the volume correction below.
 
 ```
 container names : app-ai app-api app-discord-bot app-docker-proxy app-keycloak
@@ -1047,11 +1057,140 @@ Databases present in the app's Postgres afterwards: `hill90`, `hill90_akm`,
 
 | Step | State |
 |---|---|
-| 1 — name collisions, data-plane decision, delete exporter | done, verified across four namespaces |
-| 2 — `mcp-strip` | done, no undefined `@file` references remain |
+| 1 — name collisions, data-plane decision, delete exporter | done for `container_name`, router name, hostname, service key. **Volumes were NOT checked and were wrong — see step 6** |
+| 2 — `mcp-strip` | done, no undefined `@file` reference remains |
 | 3 — parameterise networks | done earlier (PR #11), re-verified: 23 literals, 0 remaining |
-| 4 — deploy script and secrets store | built, exercised locally, **never run against the VPS** |
+| 4 — deploy script and secrets store | built and exercised locally, **never run against the VPS** |
 | 5 — provision scripts | done, proven against the live app database |
+| 6 — volume names (not in the runbook) | done, and it was a latent data-loss bug |
 
-Phase A is complete. **No VPS contact occurred.** Phases B and C remain, and the
-deploy path has still never run against a real host.
+**Phase A is complete for the five steps the runbook enumerates, plus volumes as
+a sixth.** That sentence is deliberately narrower than the one it replaces.
+
+### Correction: this section previously said "Phase A is complete" while a data-loss bug sat in the same commit range
+
+The earlier wording was "done, verified across four namespaces" and "Phase A is
+complete." Both were false at the time they were written.
+`docker-compose.db.yml` still hardcoded `name: prod_postgres-data`, which is the
+**exact string Hill90's own volume resolves to** on the VPS with `VOLUME_PREFIX`
+unset. Deploying would have mounted Hill90's live production database directory
+into a second Postgres. Not a name clash anyone notices at startup — two
+databases writing the same files.
+
+The wording is the smaller problem. **A status table asserting "done" is what
+stops the next person looking**, and that is precisely the mechanism by which
+this would have reached the VPS. The lesson is not "be careful with the word
+complete"; it is that a completeness claim must enumerate what was checked so a
+reader can see what was not.
+
+It is also the same bug class already fixed one layer up: network names were
+parameterised and volume names were left literal, in the same files, in the same
+sitting.
+
+## Step 6 — volume names (not in the runbook; a latent data-loss bug)
+
+Reported by review, verified independently before fixing.
+
+```
+Hill90  docker-compose.db.yml:  name: ${VOLUME_PREFIX:-prod}_postgres-data
+app     docker-compose.db.yml:  name: prod_postgres-data          <- hardcoded
+
+resolved on the VPS, VOLUME_PREFIX unset:
+  Hill90 -> prod_postgres-data
+  app    -> prod_postgres-data          IDENTICAL
+```
+
+Deploying would have mounted **Hill90's live production database directory** into
+a second Postgres. Nothing errors at startup. Two databases writing the same
+files.
+
+**Parameterising alone would not have fixed it.** `${VOLUME_PREFIX:-prod}_postgres-data`
+in the app resolves to the same string Hill90 resolves to. The fix is
+parameterise **and** namespace, exactly as containers and service keys were:
+
+| Volume | Before | After | Resolves to |
+|---|---|---|---|
+| postgres | `prod_postgres-data` | `${VOLUME_PREFIX:-prod}_app-postgres-data` | `prod_app-postgres-data` |
+| minio | `minio-data` | `${VOLUME_PREFIX:-prod}_app-minio-data` | `prod_app-minio-data` |
+| akm keys | `akm-keys` | `${VOLUME_PREFIX:-prod}_app-akm-keys` | `prod_app-akm-keys` |
+| akm data | `akm-data` | `${VOLUME_PREFIX:-prod}_app-akm-data` | `prod_app-akm-data` |
+
+Swept rather than fixing only what was reported. `minio-data` matters: Hill90's
+in-flight `feat/restore-minio` declares `${VOLUME_PREFIX:-prod}_minio-data`, so a
+naive parameterisation of the app's would have recreated the identical collision
+against a branch that has not merged yet. Zero overlap now against Hill90 `main`
+**and** `feat/restore-minio`.
+
+### The other knob family the app hardcoded
+
+The sweep asked the broader question — what else does the app hardcode that
+Hill90 parameterises — and found entrypoints and cert resolvers:
+
+```
+before:  routers.app-api.entrypoints=websecure
+         routers.app-api.tls.certresolver=letsencrypt
+after:   routers.app-api.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}
+         routers.app-api.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}
+```
+
+Same knob names and defaults Hill90 uses, so production resolves identically.
+Admin-facing surfaces (litellm, minio console) use `${ADMIN_CERT_RESOLVER:-letsencrypt-dns}`,
+matching Hill90's split. This is why the local override had to fight the prod
+files with `tls=false`.
+
+## `deploy.sh`, exercised end to end — and three bugs of my own it found
+
+`deploy.sh all` now runs the full dependency-ordered bring-up locally:
+
+```
+✓ preflight complete
+✓ hill90dev-app-postgres: healthy    ✓ db ready
+✓ hill90dev-app-keycloak: healthy    ✓ auth ready
+✓ hill90dev-app-api, -docker-proxy   ✓ api ready
+✓ hill90dev-app-ai, -litellm         ✓ ai ready
+✓ hill90dev-app-knowledge            ✓ knowledge ready
+✓ hill90dev-app-mcp                  ✓ mcp ready
+✓ hill90dev-app-minio                ✓ minio ready
+✓ hill90dev-app-ui                   ✓ ui ready
+All stacks deployed
+```
+
+Running it found three defects that reading it did not:
+
+1. **The local escape hatch mangled the PEMs.** `APP_ENV_FILE` naively `source`d
+   the env file, so `AKM_SIGNING_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----...`
+   split on spaces and bash reported `PRIVATE: command not found`. That is
+   exactly what the `%q` indirection in `load_secrets` exists to prevent, and I
+   had bypassed it while documenting why it mattered. Both paths now share one
+   `_export_env_pairs`.
+2. **Every readiness check ignored `CONTAINER_PREFIX`.** They ran
+   `docker exec app-postgres` against a container called
+   `hill90dev-app-postgres`. All container references now resolve through
+   `cname()`.
+3. **Readiness probed paths I guessed.** `ai` was reported as a failed deploy
+   while up, connected to its database, and answering 200 — because the check
+   polled `/health` and the service serves `/health/ready`. This is the same
+   error as calling `api`'s 404 at bare `/` a routing bug. `cmd_verify` now uses
+   each container's **own declared healthcheck** via `docker inspect`, which
+   removes the guess: every service in `deploy/compose/prod` defines one.
+
+Teardown verified project-scoped: `teardown mcp` removed exactly one container,
+25 → 24 running.
+
+### Routes 404 locally, and that is local-only — verified, not assumed
+
+With the app deployed under `deploy.sh`'s per-stack project names
+(`hill90-app-prod-<stack>`), every app hostname 404s locally. The cause is
+Hill90's **local-only** Traefik constraint, whose allowlist contains
+`hill90-local` and `hill90-local-*` and not the app's project names.
+
+**Production is unaffected.** `platform/edge/traefik.yml.tmpl` has no
+`constraints:` key at all — the Docker provider there picks up every container,
+which is what runbook §4.2 describes. So this is a local development gap, not a
+deploy defect.
+
+Two ways to close it locally, and it needs a decision rather than a default:
+add the app's eight project names to Hill90's local allowlist (Traefik v2.11
+cannot do `LabelRegexp`, so each must be listed), or keep `scripts/local.sh` as
+the local path — which already works and routes correctly — and treat `deploy.sh`
+as the production path exercised locally for its logic only.

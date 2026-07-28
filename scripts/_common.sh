@@ -80,6 +80,24 @@ load_secrets() {
     local env="${1:-prod}"
     local secrets_file="${2:-$PROJECT_ROOT/infra/secrets/${env}.enc.env}"
 
+    # Escape hatch for the local path, and the only way this script is testable
+    # before a secrets store exists. Hill90's loader has no equivalent because it
+    # has always had one. Without this, deploy.sh could not be exercised at all
+    # outside a host that already holds the age key — which would mean the first
+    # run of the deploy path is also its first test, on the VPS.
+    if [ -n "${APP_ENV_FILE:-}" ]; then
+        require_file "$APP_ENV_FILE" "Env file"
+        warn "using plaintext ${APP_ENV_FILE} instead of the encrypted store (APP_ENV_FILE is set)"
+        # Goes through the SAME %q pipeline as the encrypted path, not a naive
+        # `source`. Sourcing this file directly fails on the very values the %q
+        # indirection exists for: AKM_SIGNING_PRIVATE_KEY is an unquoted PEM
+        # containing spaces, so bash splits it and reports
+        #   .env.local: line 29: PRIVATE: command not found
+        # then `set -e` kills the deploy. Found by running it.
+        _export_env_pairs < "$APP_ENV_FILE"
+        return 0
+    fi
+
     require_command sops
     ensure_age_key "$env"
     require_file "$secrets_file" "Secrets file"
@@ -89,13 +107,24 @@ load_secrets() {
     # shellcheck disable=SC2064  # early expansion of $temp_file is intentional
     trap "rm -f '$temp_file'" RETURN
 
-    sops -d "$secrets_file" \
-        | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+    sops -d "$secrets_file" | _export_env_pairs
+}
+
+# Read KEY=VALUE lines on stdin and export them, quoting each value so that
+# spaces, quotes and newlines survive. A naive `source` of an env file mangles
+# all three, and the Ed25519 PEMs contain the first two.
+_export_env_pairs() {
+    local temp_file
+    temp_file=$(mktemp)
+    # shellcheck disable=SC2064  # early expansion of $temp_file is intentional
+    trap "rm -f '$temp_file'" RETURN
+
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
         | while IFS='=' read -r key value; do printf '%s=%q\n' "$key" "$value"; done \
         > "$temp_file"
 
     set -a
-    # shellcheck disable=SC1090  # dynamic source of decrypted secrets
+    # shellcheck disable=SC1090  # dynamic source of quoted pairs
     source "$temp_file"
     set +a
 

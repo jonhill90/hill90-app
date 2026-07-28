@@ -20,7 +20,7 @@ networks:
 
 volumes:
   postgres-data:
-    name: prod_postgres-data
+    name: ${VOLUME_PREFIX:-prod}_app-postgres-data
 
 services:
   app-postgres:
