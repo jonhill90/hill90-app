@@ -19,9 +19,9 @@ networks:
 
 volumes:
   akm-data:
-    name: akm-data
+    name: ${VOLUME_PREFIX:-prod}_app-akm-data
   akm-keys:
-    name: akm-keys
+    name: ${VOLUME_PREFIX:-prod}_app-akm-keys
 
 services:
   knowledge:

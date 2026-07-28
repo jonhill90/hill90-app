@@ -10,7 +10,7 @@ networks:
 
 volumes:
   minio-data:
-    name: minio-data
+    name: ${VOLUME_PREFIX:-prod}_app-minio-data
 
 services:
   app-minio:
@@ -35,7 +35,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app-minio-console.rule=Host(`${STORAGE_HOST:-storage}.${BASE_DOMAIN:-hill90.com}`)"
-      - "traefik.http.routers.app-minio-console.entrypoints=websecure"
-      - "traefik.http.routers.app-minio-console.tls.certresolver=letsencrypt-dns"
+      - "traefik.http.routers.app-minio-console.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.app-minio-console.tls.certresolver=${ADMIN_CERT_RESOLVER:-letsencrypt-dns}"
       - "traefik.http.routers.app-minio-console.middlewares=tailscale-only@file"
       - "traefik.http.services.app-minio-console.loadbalancer.server.port=9001"

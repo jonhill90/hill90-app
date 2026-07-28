@@ -103,6 +103,13 @@ stack_containers() {
 # reason to group.
 stack_project() { printf 'hill90-app-%s-%s' "${2:-prod}" "$1"; }
 
+# Resolve a service's actual container name. The compose files set
+# container_name: ${CONTAINER_PREFIX:-}app-<name>, so anything in this script
+# that runs `docker exec` or `docker inspect` must apply the same prefix.
+# Hardcoding the bare name made every readiness check fail against a prefixed
+# environment with "No such container" — found by running it, not by reading.
+cname() { printf '%s%s' "${CONTAINER_PREFIX:-}" "$1"; }
+
 stack_summary() {
     case "$1" in
         db)        printf 'app-postgres — the app'"'"'s own database. Hill90'"'"'s asserts platform-only databases.' ;;
@@ -127,33 +134,42 @@ stack_summary() {
 cmd_verify() {
     local stack="${1:?stack required}"
     local env="${2:-prod}"
-    local attempt=0 max_attempts=30 check_cmd diag_container
+    local max_attempts=45
 
-    case "$stack" in
-        db)        check_cmd='docker exec app-postgres pg_isready -U "${DB_USER:-hill90}"'; diag_container='app-postgres' ;;
-        auth)      check_cmd='[ "$(docker inspect --format="{{if .State.Health}}{{.State.Health.Status}}{{end}}" app-keycloak 2>/dev/null)" = "healthy" ]'; diag_container='app-keycloak' ;;
-        api)       check_cmd='docker exec app-api wget -qO- http://localhost:3000/health'; diag_container='app-api' ;;
-        ai)        check_cmd='docker exec app-ai wget -qO- http://localhost:8000/health'; diag_container='app-ai' ;;
-        knowledge) check_cmd='docker exec app-knowledge wget -qO- http://localhost:8002/health'; diag_container='app-knowledge' ;;
-        mcp)       check_cmd='docker exec app-mcp wget -qO- http://localhost:8001/health'; diag_container='app-mcp' ;;
-        minio)     check_cmd='[ "$(docker inspect --format="{{if .State.Health}}{{.State.Health.Status}}{{end}}" app-minio 2>/dev/null)" = "healthy" ]'; diag_container='app-minio' ;;
-        ui)        check_cmd='docker exec app-ui wget -qO- http://localhost:3000/'; diag_container='app-ui' ;;
-        *)         die "Unknown stack for verify: $stack" ;;
-    esac
+    # Readiness is each container's OWN healthcheck, not a URL this script
+    # guesses. Every service in deploy/compose/prod defines one, written by
+    # whoever knows the service.
+    #
+    # The first version probed hardcoded paths and got `ai` wrong: it polled
+    # /health while the service serves /health/ready, so a container that was up,
+    # connected to its database and answering 200 was reported as a failed
+    # deploy. That is the same mistake as calling `api`'s 404 at bare `/` a
+    # routing bug -- probing a path that was never mounted. Asking Docker for the
+    # status the service itself declares removes the guess entirely.
+    local containers c status attempt
+    containers="$(stack_containers "$stack")"
 
-    info "Waiting for ${stack} to become ready (up to $((max_attempts * 2))s)..."
-    while [ "$attempt" -lt "$max_attempts" ]; do
-        if eval "$check_cmd" >/dev/null 2>&1; then
-            success "${stack} ready"
-            return 0
+    info "Waiting for ${stack} to become healthy (up to $((max_attempts * 2))s)..."
+    for name in $containers; do
+        c="$(cname "$name")"
+        attempt=0
+        status=""
+        while [ "$attempt" -lt "$max_attempts" ]; do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$c" 2>/dev/null || true)"
+            if [ "$status" = "healthy" ] || [ "$status" = "running" ]; then
+                success "${c}: ${status}"
+                break
+            fi
+            attempt=$((attempt + 1))
+            sleep 2
+        done
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            warn "${stack} did not become healthy. Recent logs from ${c}:"
+            docker logs --tail 40 "$c" 2>&1 | sed 's/^/    /' || true
+            die "${stack} failed its readiness check (last status: ${status:-unknown})"
         fi
-        attempt=$((attempt + 1))
-        sleep 2
     done
-
-    warn "${stack} did not become ready. Recent logs from ${diag_container}:"
-    docker logs --tail 40 "$diag_container" 2>&1 | sed 's/^/    /' || true
-    die "${stack} failed its readiness check"
+    success "${stack} ready"
 }
 
 # ---------------------------------------------------------------------------
@@ -204,7 +220,7 @@ cmd_deploy() {
     # into a crash loop, which is what Hill90's deploy.sh does for auth->db.
     case "$stack" in
         auth)
-            docker exec app-postgres pg_isready -U "${DB_USER:-hill90}" >/dev/null 2>&1 \
+            docker exec "$(cname app-postgres)" pg_isready -U "${DB_USER:-hill90}" >/dev/null 2>&1 \
                 || die "Cannot deploy auth: the app's postgres is not accepting connections.
 Keycloak stores its realm there. Deploy it first:  bash scripts/deploy.sh db ${env}"
             ;;

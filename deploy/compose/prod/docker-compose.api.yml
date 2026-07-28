@@ -131,6 +131,6 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app-api.rule=Host(`${API_HOST:-api}.${BASE_DOMAIN:-hill90.com}`)"
-      - "traefik.http.routers.app-api.entrypoints=websecure"
-      - "traefik.http.routers.app-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.app-api.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.app-api.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}"
       - "traefik.http.services.app-api.loadbalancer.server.port=3000"
