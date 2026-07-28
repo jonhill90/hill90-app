@@ -1291,6 +1291,11 @@ proven, and nothing was created on the VPS.
 
 ## The age key is shared, deliberately
 
+> Decided and recorded in full in
+> [shared-age-key.md](shared-age-key.md), including the rotation consequence:
+> rotating Hill90's age key breaks this app's secrets, and whoever rotates must
+> re-encrypt both stores.
+
 The deploy workflow originally defaulted `VPS_AGE_KEY` to
 `/opt/hill90-app/infra/secrets/keys/age-prod.key`. **That file could never
 exist.** Age private keys are not committed, and Hill90's own checkout on the VPS
