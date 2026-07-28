@@ -57,18 +57,14 @@ ensure_age_key() {
     [ -f "$SOPS_AGE_KEY_FILE" ] || die \
 "Age key not found: $SOPS_AGE_KEY_FILE
 
-The app's secrets store is encrypted with its own age key, separate from
-Hill90's. To create one:
+On the VPS the key is the HOST's, shared with Hill90 deliberately, and lives at
+/opt/hill90/secrets/keys/keys.txt. The deploy user's .bashrc exports
+SOPS_AGE_KEY_FILE to it and the deploy workflow exports it inline as well. If you
+are on the VPS and seeing this, that file is missing or unreadable — it is not
+something to regenerate here.
 
-  mkdir -p infra/secrets/keys
-  age-keygen -o infra/secrets/keys/age-${env}.key
-
-then put its public key in infra/secrets/.sops.yaml and encrypt the store:
-
-  sops -e infra/secrets/${env}.env > infra/secrets/${env}.enc.env
-  rm infra/secrets/${env}.env
-
-The key file is gitignored and must never be committed."
+Locally, point SOPS_AGE_KEY_FILE at a key whose public half matches
+infra/secrets/.sops.yaml, or use APP_ENV_FILE to bypass SOPS entirely."
 }
 
 # Decrypt the store and export every variable in it.

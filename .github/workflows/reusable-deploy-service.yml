@@ -9,18 +9,20 @@ name: Reusable Deploy Service
 # Secret names are Hill90's exactly, so an operator configuring both repos sets
 # the same names in both places.
 #
-# Two additions, both because this app has never deployed and its prerequisites
-# do not exist yet:
+# Four additions, each because this app has never deployed:
 #
 #   1. A preflight that fails on a missing secret BEFORE anything is written or
 #      any connection is attempted. Without it a missing secret surfaces as an
 #      empty SSH key and an authentication failure several steps later, which
 #      reads as a network or permissions problem.
-#   2. A check that the VPS checkout exists at all. /opt/hill90/app is HILL90's
-#      clone despite the name; this app has no checkout on the box.
+#   2. A gate on `all`, so the workflow cannot bypass the runbook's staging rule
+#      that scripts/deploy.sh implements.
+#   3. A check that the VPS checkout exists. /opt/hill90/app is HILL90's clone
+#      despite the name, so a wrong path would deploy into the platform's tree.
+#   4. A Hill90 baseline check, because the tenancy contract runs both ways.
 #
-# NOTHING HERE HAS EVER RUN. See the PR body for the secrets that must be set
-# and the checkout that must be created first.
+# NOTHING HERE HAS EVER RUN. The VPS checkout at /opt/hill90-app now exists; the
+# four repository secrets do not. See the PR body.
 
 on:
   workflow_call:
@@ -51,9 +53,19 @@ jobs:
       # which is Hill90's checkout despite the name. Override with the
       # VPS_APP_PATH repository variable if the box is laid out differently.
       VPS_APP_PATH: ${{ vars.VPS_APP_PATH || '/opt/hill90-app' }}
-      # The app's own age key, on the VPS. Separate from Hill90's by design: a
-      # tenant must not be able to decrypt platform secrets.
-      VPS_AGE_KEY: ${{ vars.VPS_AGE_KEY || '/opt/hill90-app/infra/secrets/keys/age-prod.key' }}
+      # The HOST's age key. Deliberately Hill90's, not a second one of the app's.
+      #
+      # An earlier version defaulted to
+      # /opt/hill90-app/infra/secrets/keys/age-prod.key on the reasoning that a
+      # tenant should not share the platform's key. That file can never exist —
+      # age private keys are not committed, and Hill90's own checkout carries only
+      # age-dev.pub, age-prod.pub and a .gitkeep at that path.
+      #
+      # The isolation argument also does not survive contact with the host: both
+      # deploys run as the same `deploy` user on the same box, and the key is mode
+      # 600 owned by deploy, so the app's deploy can read it either way. A second
+      # key would add no boundary and one more thing to rotate.
+      VPS_AGE_KEY: ${{ vars.VPS_AGE_KEY || '/opt/hill90/secrets/keys/keys.txt' }}
 
     steps:
       # ---------------------------------------------------------------------
@@ -81,8 +93,8 @@ jobs:
             TS_OAUTH_CLIENT_ID    Tailscale OAuth client, tag:github-actions
             TS_OAUTH_SECRET       its secret
             VPS_SSH_PRIVATE_KEY   private key for deploy@<vps>
-            SOPS_AGE_KEY          age private key for THIS app's secrets store,
-                                  not Hill90's
+            SOPS_AGE_KEY          the HOST's age key — the same one Hill90 uses.
+                                  Shared deliberately; see infra/secrets/.sops.yaml
 
           Stopping before writing any key material or opening any connection.
           EOF
@@ -201,9 +213,9 @@ jobs:
             "test -r '${VPS_AGE_KEY}'" && exit 0
 
           echo "::error::No readable age key at ${VPS_AGE_KEY} on the VPS."
-          echo "scripts/deploy.sh decrypts the app's secrets store with it. It is"
-          echo "deliberately NOT Hill90's key: a tenant must not be able to decrypt"
-          echo "platform secrets."
+          echo "scripts/deploy.sh decrypts the app's secrets store with it. This is"
+          echo "the HOST's key, shared with Hill90 deliberately — see the note in"
+          echo "this workflow's env block. Expected mode 600, owned by deploy."
           exit 1
 
       - name: Deploy ${{ inputs.service }}
