@@ -269,6 +269,29 @@ Deploy api first:  bash scripts/deploy.sh api ${env}"
             ;;
     esac
 
+    # container_name is fixed, so only one Compose project can own a given
+    # container at a time. If another project already holds one of this stack's
+    # names -- typically because `scripts/local.sh --infra` brought the app up
+    # under the single `hill90-local` project -- Compose fails with a bare
+    # "container name is already in use" naming a hex id, which says nothing
+    # about which project owns it or how to release it.
+    #
+    # Hill90 auto-removes colliding containers from a known old project. This
+    # refuses instead: removing containers belonging to another project is not
+    # something a deploy should do without being asked.
+    local owner cn
+    for cn in $(stack_containers "$stack"); do
+        cn="$(cname "$cn")"
+        owner="$(docker inspect "$cn" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)"
+        if [ -n "$owner" ] && [ "$owner" != "$project_name" ]; then
+            die "Container ${cn} is already owned by Compose project '${owner}', not '${project_name}'.
+Two projects cannot share a container_name. Release it first, then retry:
+  docker compose -p ${owner} ... down
+or, if it came from the local tenant path:
+  ./scripts/local.sh down --infra"
+        fi
+    done
+
     load_secrets "$env"
 
     local -a files=(-f "$compose_file")
@@ -279,6 +302,19 @@ Deploy api first:  bash scripts/deploy.sh api ${env}"
         info "layering local override: ${ov}"
     fi
 
+    # build and pull BEFORE up, matching Hill90's deploy.sh.
+    #
+    # Five of the eight stacks build from local source and are tagged
+    # image: hill90/<svc>:${VERSION:-latest}. Compose builds only when the tagged
+    # image is ABSENT, so without this the first deploy on a clean host builds and
+    # works, and every deploy after it finds the tag present and reuses it. A
+    # deploy following a code change would then ship nothing, complete cleanly,
+    # and pass its own readiness check -- the container is healthy, it is simply
+    # the old one. There is no error anywhere, which is what makes it dangerous.
+    #
+    # --ignore-buildable so `pull` does not try to fetch images this repo builds.
+    docker compose -p "$project_name" "${files[@]}" build --parallel
+    docker compose -p "$project_name" "${files[@]}" pull --ignore-buildable
     docker compose -p "$project_name" "${files[@]}" up -d
 
     cmd_verify "$stack" "$env"
