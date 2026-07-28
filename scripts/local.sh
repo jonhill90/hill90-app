@@ -9,20 +9,27 @@
 #   ./scripts/local.sh init      generate .env.local and keys, then stop
 #   ./scripts/local.sh agentbox  build the agentbox images (needed to run agents)
 #
-# Add --infra to any command to run the app as a TENANT of a locally-running
-# Hill90 infra stack (Traefik + observability) instead of standalone:
+# Add --standalone to any command to use the self-contained fork instead of the
+# production compose files. See the note below on why the tenant path is the
+# default.
 #
-#   ./scripts/local.sh up --infra
+# By DEFAULT the app runs as a TENANT of a locally-running Hill90 infra stack,
+# on the same compose files production uses:
+#
+#   ./scripts/local.sh up                 tenant (default)
+#   ./scripts/local.sh up --standalone    self-contained fork, no Hill90 needed
 #
 # The two paths use different compose files on purpose:
 #
-#   standalone  compose/local.yml                     self-contained fork
-#   --infra     deploy/compose/prod/*.yml             the files production uses,
-#               + deploy/compose/overrides/local.*    layered, not forked
+#   default      deploy/compose/prod/*.yml            the files production uses,
+#                + deploy/compose/overrides/local.*   layered, not forked
+#   --standalone compose/local.yml                    self-contained fork
 #
-# --infra is the path that exercises production's own compose files. Standalone
-# cannot: the production files declare Hill90's networks external, so they need
-# the platform running.
+# The default is the tenant path deliberately. It is the only one that exercises
+# production's own compose files, and a default that exercises the fork is how
+# the fork drifted in the first place. --standalone remains because the
+# production files declare Hill90's networks external, so they cannot run at all
+# without the platform up.
 #
 # Everything is local. This script never touches a VPS, and there is no deploy
 # path in this repository.
@@ -52,14 +59,34 @@ STACKS="db auth api ai knowledge mcp minio ui"
 # per stack would need eight entries added there and every app router is dropped
 # until they are. `hill90-local` is already on that list.
 INFRA_PROJECT="hill90-local"
+
+# Note: compose/local.yml carries `name: hill90-local` too, so the standalone
+# path and the tenant path share a Compose project name. They are mutually
+# exclusive by design — the README says so, and both create
+# <prefix>_agent_sandbox — but one consequence is visible: `status --standalone`
+# will display tenant containers if the tenant path is what is running. The
+# tenant path cannot simply use a different name, because Hill90's local Traefik
+# allowlists project names and cannot pattern-match on v2.11.
 ENV_FILE="$ROOT/.env.local"
 KEY_DIR="$ROOT/compose/local/keys"
 
-# --infra may appear anywhere in the arguments; strip it out and keep the rest.
-INFRA=0
+# The TENANT path is the default. --standalone opts out of it.
+#
+# This used to be the other way round, and that was the real problem: `local.sh
+# up` drove compose/local.yml, so the default path everyone actually types kept
+# exercising the fork. Adding a --infra flag did not fix that; it only gave the
+# override layer a door nobody walks through. The drift the override layer exists
+# to stop carried on through the default.
+#
+# --infra is still accepted so existing muscle memory and docs keep working.
+INFRA=1
 ARGS=()
 for a in "$@"; do
-  if [ "$a" = "--infra" ]; then INFRA=1; else ARGS+=("$a"); fi
+  case "$a" in
+    --standalone) INFRA=0 ;;
+    --infra)      INFRA=1 ;;
+    *)            ARGS+=("$a") ;;
+  esac
 done
 set -- ${ARGS+"${ARGS[@]}"}
 
