@@ -169,7 +169,40 @@ cmd_verify() {
             die "${stack} failed its readiness check (last status: ${status:-unknown})"
         fi
     done
+
+    stack_assert "$stack"
     success "${stack} ready"
+}
+
+# A container being healthy is not the same as the stack being usable, and for
+# Postgres the difference is the whole point.
+#
+# The compose healthcheck is `pg_isready -U $DB_USER`, which reports only that
+# the server is accepting connections. It does NOT authenticate and exits 0 on a
+# Postgres whose credentials are entirely broken. Hill90's deploy.sh carries a
+# comment saying exactly that above its own check, and runs a real query as the
+# real user instead. This script copied the loop and left the correction behind,
+# so `auth` could be cleared to deploy against a Postgres it cannot authenticate
+# to -- and Keycloak would crash-loop with
+#   FATAL: password authentication failed for user "hill90"
+# which reads as a secrets problem and is not. This estate has already hit that
+# exact message once, from a different cause.
+#
+# Locally the password comes from a known-good .env.local. On the VPS it comes
+# from a SOPS store populated by hand, so the one gate that cannot detect a wrong
+# password was guarding the only environment where a wrong password is likely.
+stack_assert() {
+    local stack="$1" c
+    case "$stack" in
+        db)
+            c="$(cname app-postgres)"
+            docker exec "$c" psql -U "${DB_USER:-hill90}" -tAc 'SELECT 1' >/dev/null 2>&1 \
+                || die "${c} is accepting connections but a real query as '${DB_USER:-hill90}' failed.
+That is an authentication or role problem, not a startup problem. pg_isready
+would have passed here. Check DB_USER/DB_PASSWORD in the secrets store."
+            success "${c}: authenticated query as ${DB_USER:-hill90}"
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -220,9 +253,12 @@ cmd_deploy() {
     # into a crash loop, which is what Hill90's deploy.sh does for auth->db.
     case "$stack" in
         auth)
-            docker exec "$(cname app-postgres)" pg_isready -U "${DB_USER:-hill90}" >/dev/null 2>&1 \
-                || die "Cannot deploy auth: the app's postgres is not accepting connections.
-Keycloak stores its realm there. Deploy it first:  bash scripts/deploy.sh db ${env}"
+            # A real query as the real user, not pg_isready -- see stack_assert.
+            docker exec "$(cname app-postgres)" psql -U "${DB_USER:-hill90}" -tAc 'SELECT 1' >/dev/null 2>&1 \
+                || die "Cannot deploy auth: a query against the app's postgres as
+'${DB_USER:-hill90}' failed. Keycloak stores its realm there and would crash-loop
+with a password-authentication error that reads as a secrets problem.
+Deploy the database first:  bash scripts/deploy.sh db ${env}"
             ;;
         ai|knowledge)
             local pfx; pfx="$(network_prefix)"
