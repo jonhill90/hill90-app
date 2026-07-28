@@ -946,9 +946,13 @@ Three deliberate divergences:
 2. **The stack table is data, not a case statement repeated per function.**
    Hill90 repeats its allowlist independently in `cmd_service`, `cmd_teardown`
    and `cmd_verify`, which is a drift surface it guards by hand.
-3. **The app has its own age key.** Reusing Hill90's would let the app decrypt
-   platform secrets it has no business reading, and rotating one would force
-   rotating the other. Tenancy is a trust boundary, not only a naming one.
+3. ~~**The app has its own age key.**~~ **Retracted — the app uses the host's
+   key.** The original reasoning was that reusing Hill90's key would let the app
+   decrypt platform secrets. That argument does not survive contact with the
+   host: both deploys run as the same `deploy` user on the same box, and the key
+   is mode 600 owned by that user, so the app's deploy can read it either way. A
+   second key would add no boundary the OS does not already decline to provide,
+   and one more thing to rotate. See "The age key is shared, deliberately" below.
 
 ### The preflight is the tenancy contract, checked before anything changes
 
@@ -1283,3 +1287,42 @@ passes `bash -n`, and the secret preflight was exercised directly — it fails
 naming the missing secrets with no secrets set, names the single missing one when
 three of four are present, and passes when all four are. Nothing beyond that is
 proven, and nothing was created on the VPS.
+
+
+## The age key is shared, deliberately
+
+The deploy workflow originally defaulted `VPS_AGE_KEY` to
+`/opt/hill90-app/infra/secrets/keys/age-prod.key`. **That file could never
+exist.** Age private keys are not committed, and Hill90's own checkout on the VPS
+carries only `age-dev.pub`, `age-prod.pub` and a `.gitkeep` at the equivalent
+path — verified read-only on the box.
+
+The real mechanism, also verified:
+
+```
+/opt/hill90/secrets/keys/keys.txt      -rw------- deploy deploy    the only key
+~deploy/.bashrc:28                     export SOPS_AGE_KEY_FILE=...keys.txt
+```
+
+Hill90's reusable workflow exports it inline in the ssh invocation as well,
+rather than relying on the profile, because a non-interactive ssh does not
+reliably source `.bashrc`. This workflow now does the same. (Measured here: a
+non-interactive ssh *did* inherit it on this host — which makes the inline export
+belt-and-braces rather than redundant, and that is the point of it.)
+
+**So the app reads Hill90's key.** That is a coupling someone will otherwise read
+as a mistake, so: it is deliberate, one key serves the host, and duplicating it
+would create a second thing to rotate for no isolation gain — the OS already
+gives both deploys the same user.
+
+The price, stated: this repository's `SOPS_AGE_KEY` GitHub secret therefore holds
+a key that can also decrypt Hill90's store. It never sees Hill90's ciphertext,
+but the capability exists. The app's `infra/secrets/.sops.yaml` encrypts to that
+key's public half, `age1p30vk2qpvlkj5pzh72f0wwvlqgmedvr204nldmpskmptgy9ryg8qg9qd5v`,
+taken from Hill90's committed `age-prod.pub`.
+
+### VPS checkout — now exists
+
+`/opt/hill90-app`, owned by `deploy`, on `main` at `4a09320`, with a read-only
+deploy key generated on the host so the private half never left it. `git fetch`
+works and push is rejected, which is correct for a deploy target.
