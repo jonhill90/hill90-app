@@ -2,6 +2,10 @@
 
 How to verify API authentication is working correctly after deployment.
 
+`<VPS_HOST>` below is the VPS's Tailscale address, or your local `~/.ssh/config`
+alias for it. The address is in SOPS: `infra/secrets/prod.enc.env`, key
+`TAILSCALE_IP`.
+
 ## Quick Health Check
 
 ```bash
@@ -56,7 +60,7 @@ Agent tokens use Ed25519 (EdDSA) signing for AKM and model-router auth.
 ### Verify Key Loading
 
 ```bash
-ssh deploy@remote.hill90.com "docker logs api 2>&1 | grep -i 'AKM.*token\|model.*router.*token' | tail -5"
+ssh deploy@<VPS_HOST> "docker logs api 2>&1 | grep -i 'AKM.*token\|model.*router.*token' | tail -5"
 ```
 
 If you see `DECODER routines::unsupported`, the PEM key has literal `\n` instead of real newlines. Fixed in PR #484.
@@ -64,7 +68,7 @@ If you see `DECODER routines::unsupported`, the PEM key has literal `\n` instead
 ### Verify Agent Tokens Are Issued
 
 ```bash
-ssh deploy@remote.hill90.com "docker logs api 2>&1 | grep 'token_issued' | tail -3"
+ssh deploy@<VPS_HOST> "docker logs api 2>&1 | grep 'token_issued' | tail -3"
 ```
 
 Should show `akm_jti` and `model_router_jti` for each agent start.
@@ -72,7 +76,7 @@ Should show `akm_jti` and `model_router_jti` for each agent start.
 ### Verify AKM Token Refresh
 
 ```bash
-ssh deploy@remote.hill90.com "docker logs agentbox-AGENT-SLUG 2>&1 | grep 'refresh' | tail -3"
+ssh deploy@<VPS_HOST> "docker logs agentbox-AGENT-SLUG 2>&1 | grep 'refresh' | tail -3"
 ```
 
 Should show `AKM token refresh loop started` and periodic refresh messages.
