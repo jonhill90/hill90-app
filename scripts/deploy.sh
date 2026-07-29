@@ -381,6 +381,28 @@ or, if it came from the local tenant path:
         success "exported and non-empty: ${required}"
     fi
 
+    # Non-empty is not the same as CORRECT. AUTH_KEYCLOAK_SECRET was non-empty,
+    # 64 characters, and had never been applied to the running Keycloak — which
+    # held a 32-char secret it minted at realm import. Login was broken from the
+    # first deploy and every health check passed, because the failure is one
+    # redirect past /api/auth/signin.
+    #
+    # Scoped to the stacks that actually consume the value rather than run
+    # everywhere: this is scoping, not skipping. Where it does run it fails closed,
+    # including when Keycloak cannot be reached.
+    case "$stack" in
+        ui)
+            if [ "${ALLOW_CLIENT_SECRET_MISMATCH:-0}" = "1" ]; then
+                warn "ALLOW_CLIENT_SECRET_MISMATCH=1 — not checking that ${AUTH_KEYCLOAK_ID:-hill90-ui}'s secret matches the running Keycloak. Login may fail after the password is accepted."
+            else
+                require_client_secret_matches \
+                    || die "Refusing to deploy ${stack}: the client secret in the running Keycloak does not match the store, so logins will fail at the token exchange even though every container reports healthy.
+Repair procedure: docs/runbooks/one-keycloak-migration.md section 5.
+To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"
+            fi
+            ;;
+    esac
+
     local -a files=(-f "$compose_file")
     if [ "${USE_LOCAL_OVERRIDE:-0}" = "1" ]; then
         local ov; ov="$(stack_override "$stack")"
