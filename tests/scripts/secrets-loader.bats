@@ -321,3 +321,37 @@ EOF
     [[ "$output" == *"UNSET_CAUGHT"* ]]
     [[ "$output" == *"NAMES_THE_VARIABLE"* ]]
 }
+
+# --- inert store keys (the AUTH_KEYCLOAK_ISSUER trap) -----------------------
+
+@test "every key in the secrets store is consumed by something" {
+    # Fails when a store key is not interpolated by any compose file and is not an
+    # allowlisted tooling-only key. This is the generalisable form of the
+    # AUTH_KEYCLOAK_ISSUER defect: a value an operator can edit to no effect, with
+    # no warning, because the compose file recomposes it from parts that all carry
+    # `:-` defaults so require_compose_interpolation can never fire.
+    run bash "$BATS_TEST_DIRNAME/store-keys-check.sh" "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ALL_KEYS_CONSUMED"* ]]
+}
+
+@test "the issuer is composed from exactly one source of truth" {
+    # api, mcp and ui must all derive the issuer from APP_AUTH_HOST/BASE_DOMAIN/
+    # KC_REALM. If any of them read a literal AUTH_KEYCLOAK_ISSUER from the store
+    # instead, the two can disagree and `iss` mismatches between the token the UI
+    # obtains and the token the API validates.
+    run bash -c "
+        cd '$REPO_ROOT'
+        # no compose file may interpolate a literal AUTH_KEYCLOAK_ISSUER
+        if grep -rE '\\\$\{AUTH_KEYCLOAK_ISSUER' deploy/compose >/dev/null 2>&1; then
+            echo 'LITERAL_ISSUER_INTERPOLATED'; exit 1
+        fi
+        # and all three consumers must compose it from the parts
+        for f in docker-compose.api.yml docker-compose.mcp.yml docker-compose.ui.yml; do
+            grep -q 'APP_AUTH_HOST' \"deploy/compose/prod/\$f\" || { echo \"NO_PARTS \$f\"; exit 1; }
+        done
+        echo ONE_SOURCE_OF_TRUTH
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ONE_SOURCE_OF_TRUTH"* ]]
+}
