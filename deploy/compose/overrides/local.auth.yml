@@ -22,6 +22,16 @@ services:
       # sslRequired: none, a fixed client secret and a seeded dev/dev user.
       # platform/auth/keycloak/hill90-realm.json stays untouched.
       - ../../../compose/local/keycloak/realm-local.json:/opt/keycloak/data/import/realm-local.json:ro
+    # Theme authoring: disable theme and template caching so edits under
+    # platform/auth/keycloak/themes/ show up without a restart. Production must
+    # NOT have these — see the note in docker-compose.prod's auth file.
+    #
+    # Double hyphen is deliberate and is what Keycloak 26.4's docs use:
+    #   kc.sh start --spi-theme--static-max-age=-1 --spi-theme--cache-themes=false
+    #                --spi-theme--cache-templates=false
+    # The single-hyphen form previously in the production file may never have been
+    # recognised at all.
+    command: start --import-realm --spi-theme--cache-themes=false --spi-theme--cache-templates=false --spi-theme--static-max-age=-1
     environment:
       # http, and the browser-facing origin including the local Traefik port, or
       # Keycloak stamps the wrong `iss` and builds redirects against the
