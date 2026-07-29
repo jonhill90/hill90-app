@@ -649,13 +649,20 @@ that must be edited, or consciously accepted.
 
 ### hill90-app — runtime code
 
+**PR #28 has landed the no-op parameterisation for the rows marked below.** It made
+`KC_REALM` the knob for the ui health probe and collapsed `api`'s three copies of
+the issuer fallback into `services/api/src/middleware/keycloak-config.ts`. The
+fallback itself was deliberately left in place — removing it is a behaviour change
+tied to the realm-name decision, not a refactor.
+
+
 | File:line | What reads it | Migration action |
 |---|---|---|
 | `services/api/src/app.ts:105` | fallback issuer when `KEYCLOAK_ISSUER` unset | **Code change if the target realm is named `hill90`.** Today `auth.hill90.com/realms/hill90` 404s, so a blank issuer fails loudly. Name the realm `hill90` there and this fallback silently becomes *correct* — a blank issuer then looks like working config forever |
 | `services/api/src/index.ts:72` | same fallback, WebSocket terminal proxy path | Same. **Not previously reported** — a second copy of the same literal |
 | `services/api/src/routes/profile.ts:28` | same fallback, profile route | Same. **Third copy** |
 | `services/mcp/app/main.py:17` | fallback issuer for MCP | Same |
-| `services/ui/src/utils/admin-services.ts:24,29,30` | admin UI service list — hardcodes `url: 'https://auth.hill90.com'`, `internalUrl: 'http://keycloak:8080'` and `path: '/realms/hill90'` | **Code change, and it is already wrong today.** None of it is env-driven, and `internalUrl` names **`keycloak`** — Hill90's container — not `app-keycloak`. So the admin page's Keycloak health check already probes the platform's Keycloak, not the app's. **Not previously reported** |
+| `services/ui/src/utils/admin-services.ts:24,29,30` | admin UI service list — hardcodes `url: 'https://auth.hill90.com'`, `internalUrl: 'http://keycloak:8080'` and `path: '/realms/hill90'` | **Code change — and it is already broken today, but not for the reason first reported here.** See the correction below. |
 | `services/ui/src/app/api/services/health/route.ts:6` | health panel probes `/realms/hill90/.well-known/openid-configuration` against `KEYCLOAK_INTERNAL_URL` | **Code change if the realm is renamed.** Host is env-driven; the realm path is a literal, so a renamed realm makes the health panel report Keycloak down while it is fine |
 | `services/ui/src/auth.ts:116` | `decoded.realm_roles` | **Mapper decision, not a host/realm one** — see §7 |
 | `services/api/src/middleware/role.ts:11` | `user.realm_roles` | Same |
@@ -691,6 +698,43 @@ that must be edited, or consciously accepted.
   be churn with fixture-breaking risk.
 - `services/api/src/services/keycloak-account.ts` mentions the issuer **in comments
   only**.
+
+### Correction: the admin services page, and what is actually wrong with it
+
+An earlier version of this table said `admin-services.ts` pointed at the wrong
+container — that `internalUrl: 'http://keycloak:8080'` named Hill90's Keycloak
+instead of `app-keycloak`, and was therefore a bug. **That was wrong, and the
+reasoning behind it was wrong too.**
+
+`ADMIN_SERVICES` is a registry of **platform** services. The other entries are
+`openbao`, `grafana`, `portainer`, `minio`, `traefik` and `litellm` — every one an
+unprefixed Hill90 platform container. So `http://keycloak:8080` and
+`https://auth.hill90.com` are **correct by design**: this page is meant to show the
+platform's Keycloak, not the app's.
+
+**What is genuinely broken is the realm in the path**, and it was verified rather
+than reasoned — probed from inside the running `app-ui` container in production:
+
+```
+http://keycloak:8080/realms/hill90        -> 404      <- what the page probes
+http://keycloak:8080/realms/platform      -> 200      <- the platform's realm
+http://app-keycloak:8080/realms/hill90    -> 200      <- the app's realm
+```
+
+The health route treats any non-`ok` response as unhealthy, so **the admin page's
+Keycloak row reports unhealthy today**, and has for as long as the registry has
+looked like this. The platform Keycloak holds `master` and `platform` — there is no
+`hill90` realm on it.
+
+**This is not fixed here, deliberately.** Correcting it changes what the admin page
+displays, so it is a behaviour change rather than the no-op parameterisation in
+PR #28, and it belongs to the platform-services registry rather than to this
+migration. It needs a decision — probe `/realms/platform`, or probe something
+realm-independent like the Keycloak health endpoint — which is Jon's to make.
+
+**Why this correction is in the runbook rather than quietly amended:** the original
+claim would have sent someone renaming a container reference that was right, during
+a migration, to fix a symptom whose real cause is one field further along.
 
 ### The count that matters
 
