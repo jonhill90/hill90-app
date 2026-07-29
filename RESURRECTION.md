@@ -7,8 +7,9 @@ having next time someone touches the compose or auth wiring.
 
 **Status: the local stack runs, the test suites pass, and the app is deployed to
 production as a Hill90 tenant.**
-`./scripts/local.sh up` brings up nine healthy containers and a working login;
-CI on `main` is green across all six jobs, 1953 tests, zero failures (§8).
+`./scripts/local.sh up` brings up nine healthy containers and a working login
+**locally**; CI on `main` is green across all six jobs, 1953 tests, zero failures
+(§8). **Production login does not work — see §11.**
 Items 1–5 and 8 below are resolved; what remains open is called out as such.
 
 A deployment path now exists and has been used — see item 2. **All eight stacks
@@ -346,7 +347,33 @@ typo: seeding an account into a committed realm import means deciding what
 credential it carries and how that is rotated, and the local file's answer
 (`dev` / `dev`) is not one production can copy.
 
-## 11. The app's data had never been backed up — RESOLVED 2026-07-29
+## 11. Production login does not work — OPEN
+
+Confirmed 2026-07-29 09:23 UTC. Nobody can sign in to `hill90.com`, and nobody
+has been able to since the app was deployed.
+
+The `hill90-ui` client secret Keycloak minted at realm import is 32 characters;
+the one `app-ui` holds is 64. Different values, so the token exchange fails and
+`app-ui` logs `CallbackRouteError` → `unauthorized_client` / *Invalid client or
+Invalid client credentials*.
+
+**Cause.** `platform/auth/keycloak/hill90-realm.json` declares its clients with
+no `secret` field, so Keycloak generates a random one at import, while the SOPS
+store carries a value that was never applied to anything. Present, plausible,
+inert — §10's sibling, and the same family as the collisions in §2.
+
+**Why it survived a whole deployment.** A browser was driven to the login form
+and stopped there deliberately, to avoid consuming a one-time password. That
+proved the redirect chain and never exercised the exchange that fails. Reachable
+is not working. Local is unaffected — `compose/local/keycloak/realm-local.json`
+pins a fixed secret that `.env.local` matches, which is exactly why the local
+login works and the production one does not.
+
+The repair is prepared in
+[docs/runbooks/one-keycloak-migration.md](docs/runbooks/one-keycloak-migration.md).
+It is a credential operation and is not something to improvise.
+
+## 12. The app's data had never been backed up — RESOLVED 2026-07-29
 
 Two defects, found together and fixed in Hill90 rather than here, because that is
 where the backup tooling lives.

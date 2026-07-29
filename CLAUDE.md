@@ -105,8 +105,14 @@ database. No credential belongs in this repo. See `RESURRECTION.md` §10.
 **Tenancy detachment — proven.** The yank-out test passed on 2026-07-29:
 teardown left Hill90 at exactly its 13-container baseline with all shared
 networks intact, the redeploy brought the app back to 10 healthy containers,
-`hill90.com` answered 200, and both user accounts survived. Detachability is no
-longer an assumption.
+`hill90.com` answered 200, and both user accounts survived in the database.
+Detachability is no longer an assumption.
+
+**Production login does not work and never has** (confirmed 2026-07-29
+09:23 UTC): the `hill90-ui` client secret Keycloak minted at import is not the
+one `app-ui` holds, because `hill90-realm.json` declares clients with no `secret`
+field. **Do not write anything implying a user can sign in.** Reachable is not
+working — that distinction is what let this survive a full deployment.
 
 ## Fast facts
 
