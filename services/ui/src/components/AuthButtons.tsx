@@ -11,7 +11,9 @@ function useAvatar() {
   const fetchAvatar = useCallback(async () => {
     try {
       const res = await fetch('/api/profile/avatar')
-      if (res.ok) {
+      // 204 means "no avatar set" and is a 2xx, so res.ok alone is not enough —
+      // blob() would give an empty Blob and createObjectURL a broken image.
+      if (res.ok && res.status !== 204) {
         const blob = await res.blob()
         setAvatarUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev)

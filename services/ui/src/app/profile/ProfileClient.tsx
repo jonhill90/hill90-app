@@ -55,7 +55,8 @@ export default function ProfileClient({ session }: { session: Session }) {
   const fetchAvatar = useCallback(async () => {
     try {
       const res = await fetch('/api/profile/avatar')
-      if (res.ok) {
+      // 204 means "no avatar set" — a 2xx with no body. See AuthButtons.
+      if (res.ok && res.status !== 204) {
         const blob = await res.blob()
         setAvatarUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev)

@@ -252,7 +252,11 @@ describe('DELETE /profile/avatar', () => {
     expect(mockDeleteAvatar).toHaveBeenCalledWith(expect.anything(), 'avatars/test-user/abc.webp');
   });
 
-  it('returns 404 when no avatar exists', async () => {
+  // DELETE keeps its 404, and this test exists to hold that line. DELETE and GET
+  // have byte-identical "no avatar" guard blocks, so a search-and-replace that
+  // relaxes GET's status will silently relax this one too. Deleting something
+  // that is not there is a client error; asking for it is not.
+  it('returns 404 when no avatar exists — deliberately NOT 204', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
@@ -297,13 +301,47 @@ describe('GET /profile/avatar', () => {
     expect(res.status).toBe(304);
   });
 
-  it('returns 404 when no avatar row', async () => {
+  // TopBar asks for this on every authenticated page load, so the response for a
+  // user who has never uploaded an avatar is the single most-requested response
+  // in the app. It must not be an error.
+  it('returns 204, not 404, when the user has no avatar', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
       .get('/profile/avatar')
       .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(204);
+    expect(res.body).toEqual({});
+  });
+
+  it('returns 204 when the row exists but avatar_key is null', async () => {
+    // Production shape: a user_profiles row created by a preferences write, with
+    // no avatar ever uploaded.
+    mockQuery.mockResolvedValueOnce({ rows: [{ avatar_key: null }] });
+
+    const res = await request(app)
+      .get('/profile/avatar')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(204);
+  });
+
+  // The other direction: the database claims an avatar exists and object storage
+  // disagrees. That is a dangling avatar_key, a genuine inconsistency, and it
+  // stays a 404 on purpose so it does not hide inside the empty-state response.
+  it('still returns 404 when avatar_key is set but the object is missing', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ avatar_key: 'avatars/test-user/gone.webp' }] });
+    const err: any = new Error('NoSuchKey');
+    err.name = 'NoSuchKey';
+    mockGetAvatarStream.mockRejectedValueOnce(err);
+
+    const res = await request(app)
+      .get('/profile/avatar')
+      .set('Authorization', `Bearer ${userToken}`);
+
     expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'No avatar found' });
   });
 });
 

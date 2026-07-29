@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
 vi.mock('next-auth/react', () => ({
@@ -23,7 +23,11 @@ const mockSession = { user: { name: 'Jon Hill', email: 'jon@hill90.com', roles: 
 function mockFetch() {
   return vi.fn((url: string, opts?: any) => {
     if (typeof url === 'string' && url.endsWith('/api/profile/avatar')) {
-      return Promise.resolve({ ok: false, status: 404 })
+      // 204, matching what the API actually returns for a user with no avatar.
+      // This fixture said `{ ok: false, status: 404 }` — the old contract. A
+      // fixture that simulates a response the server no longer sends is how a
+      // suite keeps passing while the real thing breaks.
+      return Promise.resolve({ ok: true, status: 204, blob: () => Promise.resolve(new Blob([])) })
     }
     if (typeof url === 'string' && url.endsWith('/api/profile')) {
       if (opts?.method === 'PATCH') {
@@ -105,5 +109,44 @@ describe('ProfileClient', () => {
     await waitFor(() => {
       expect(screen.getByText('Save')).toBeInTheDocument()
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The 204 empty-state contract, from the profile page's side.
+// ---------------------------------------------------------------------------
+
+describe('ProfileClient avatar empty state', () => {
+  let createdUrls: string[]
+
+  beforeEach(() => {
+    createdUrls = []
+    vi.stubGlobal('fetch', mockFetch())
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => {
+        const u = `blob:fake-${createdUrls.length}`
+        createdUrls.push(u)
+        return u
+      }),
+      revokeObjectURL: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  it('renders no avatar image and creates no object URL on a 204', async () => {
+    render(<ProfileClient session={mockSession} />)
+
+    // Settle the avatar fetch and its blob() before asserting a negative.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10))
+    })
+
+    expect(createdUrls).toEqual([])
+    expect(document.querySelector('img')).toBeNull()
   })
 })
