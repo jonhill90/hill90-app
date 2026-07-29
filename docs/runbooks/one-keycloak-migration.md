@@ -969,14 +969,142 @@ Confirm all three conditions before starting, not during the rollback.
 >   hill90-ui secret sha256   d3eca7b3…   == Keycloak's
 > ```
 >
-> **Suggested repair, NOT performed — it is a secret change plus a deploy, which is
-> Jon's to authorise:**
+> ### The repair — two directions, and which to pick
 >
-> 1. Read `clients[] → hill90-ui → secret` out of that artifact (or from Keycloak's
->    admin API) — do not regenerate it, or every other copy breaks too.
-> 2. Write it to `AUTH_KEYCLOAK_SECRET` in `infra/secrets/prod.enc.env`.
-> 3. Deploy `ui`.
-> 4. Re-run the acceptance test in §10 and confirm a token is issued.
+> **NOT performed. Aligning a client secret is a credential operation and it is
+> Jon's to authorise.** Login has been broken since deployment, so this is not a
+> regression and nobody is locked out who was not already.
+>
+> There are exactly two ways to make the two sides agree.
+>
+> | | **A — make Keycloak match SOPS** | **B — make SOPS match Keycloak** |
+> |---|---|---|
+> | What changes | one client secret inside the running Keycloak | one value in `prod.enc.env`, committed |
+> | Redeploy needed | **none** — the containers already hold the store's value | **`ui`**, to pick up the new store value |
+> | Effect on the §1 export artifact | **invalidates it** — it carries Keycloak's *current* secret | artifact stays valid |
+> | Survives a future realm re-import | no, but the store stays canonical so it can be re-applied | **no, and the store would have to chase Keycloak again** |
+>
+> **RECOMMENDED: A — make Keycloak match SOPS.** Four reasons, in order of weight:
+>
+> 1. **It is the only direction that survives the migration.** A realm import mints
+>    a fresh secret every time (that is this whole section). If SOPS chases
+>    Keycloak, the chase repeats after every import, forever. If the store is
+>    canonical, there is one value and something re-applies it.
+> 2. **The deploy model already treats the store as authoritative.** Every other
+>    value flows store → container. Option B adopts an accident — a value Keycloak
+>    generated because a field was missing from a JSON file — and promotes it to
+>    canonical.
+> 3. **It needs no deploy.** `app-ui` already holds the store's value, so login
+>    starts working the moment Keycloak's secret changes, with nothing restarted.
+> 4. The store's value is 64 characters against Keycloak's 32. Minor, but it is the
+>    deliberately generated one.
+>
+> **The cost of A, which must be handled and is easy to miss:** it **invalidates the
+> realm export at `/opt/hill90/backups/app-realm/20260729_084747/`**. That artifact
+> carries Keycloak's *present* secret. Re-importing it after the repair would set
+> the secret back and break login again. **Keep it until the repair is verified —
+> it is also the rollback — then take a fresh export.** §1's command does that with
+> no downtime.
+>
+> **The counter-argument for B, stated fairly:** Jon is deploying in the morning
+> anyway, so B's "needs a deploy" costs little on the day. And B keeps the artifact
+> valid. If the store's value is believed to have come from nowhere in particular
+> while Keycloak's is what has actually been running, B is defensible. It just loses
+> on point 1, which is the one that recurs.
+>
+> ### Option A, exactly
+>
+> ```bash
+> ssh deploy@<VPS_HOST> '
+>   set -euo pipefail
+>   cd /opt/hill90-app
+>   export SOPS_AGE_KEY_FILE=/opt/hill90/secrets/keys/keys.txt
+>
+>   KCU=$(sops -d --extract "[\"KC_ADMIN_USERNAME\"]" infra/secrets/prod.enc.env)
+>   KCP=$(sops -d --extract "[\"KC_ADMIN_PASSWORD\"]" infra/secrets/prod.enc.env)
+>   SEC=$(sops -d --extract "[\"AUTH_KEYCLOAK_SECRET\"]" infra/secrets/prod.enc.env)
+>   [ -n "$KCU" ] && [ -n "$KCP" ] && [ -n "$SEC" ] || { echo FATAL empty credential; exit 1; }
+>
+>   export KCU KCP SEC
+>   docker run --rm --network container:app-keycloak \
+>     -e KCU -e KCP -e SEC python:3.12-alpine python3 -c "
+> import os,json,urllib.request,urllib.parse,urllib.error
+> B=\"http://localhost:8080\"
+> def call(p,data=None,tok=None,form=False,method=None):
+>     h={};b=None
+>     if data is not None:
+>         b=urllib.parse.urlencode(data).encode() if form else json.dumps(data).encode()
+>         h[\"Content-Type\"]=\"application/x-www-form-urlencoded\" if form else \"application/json\"
+>     if tok: h[\"Authorization\"]=\"Bearer \"+tok
+>     r=urllib.request.Request(B+p,data=b,headers=h,method=method or (\"POST\" if b else \"GET\"))
+>     try:
+>         with urllib.request.urlopen(r,timeout=20) as x:
+>             raw=x.read(); return x.status,(json.loads(raw) if raw else None)
+>     except urllib.error.HTTPError as e: return e.code,None
+> s,t=call(\"/realms/master/protocol/openid-connect/token\",form=True,data={
+>     \"grant_type\":\"password\",\"client_id\":\"admin-cli\",
+>     \"username\":os.environ[\"KCU\"],\"password\":os.environ[\"KCP\"]})
+> assert s==200, s
+> AT=t[\"access_token\"]
+> s,cs=call(\"/admin/realms/hill90/clients?clientId=hill90-ui\",tok=AT); assert s==200 and cs, s
+> cid=cs[0][\"id\"]
+> s,_=call(\"/admin/realms/hill90/clients/\"+cid,tok=AT,method=\"PUT\",
+>          data={**cs[0], \"secret\": os.environ[\"SEC\"]})
+> print(\"update status\", s)
+> s,c2=call(\"/admin/realms/hill90/clients/\"+cid,tok=AT)
+> print(\"secrets now agree:\", c2.get(\"secret\")==os.environ[\"SEC\"])
+> "
+> '
+> ```
+>
+> **Then verify, in this order:**
+>
+> 1. `bash scripts/deploy.sh ui prod` is **not** needed. Instead confirm the guard
+>    agrees: it now runs on the `ui` deploy path, and can be exercised directly —
+>    `require_client_secret_matches` prints `CLIENT_SECRET_AGREES`.
+> 2. Browser-login `testuser01` at `https://hill90.com`. It must reach a signed-in
+>    page rather than `/api/auth/error?error=Configuration`. The password is in
+>    `infra/secrets/test-accounts.enc.env`.
+> 3. **Take a fresh realm export** (§1) and keep the old one until the new one
+>    verifies.
+>
+> **Rollback for A:** the previous secret is in the existing export artifact at
+> `clients[] → hill90-ui → secret`. Re-run the same `PUT` with that value. This is
+> why the artifact must not be deleted before verification.
+>
+> **If Jon prefers B instead:** write Keycloak's current value to
+> `AUTH_KEYCLOAK_SECRET` in `prod.enc.env`, then deploy **`ui` only** — it is the
+> sole consumer. `app-api` holds no client-secret variable (verified) and `mcp`
+> none. Note that deploying `ui` also does `git reset --hard origin/main` on a
+> checkout that is 15 commits behind, so it ships everything merged since #20,
+> including #26's change to how tokens are validated. Rollback for B is reverting
+> the store commit and deploying `ui` again.
+>
+> ### Stopping it recurring — the deeper defect
+>
+> The realm JSON minting a random secret on every import is the actual bug. It will
+> fire again on any re-import, **including during this migration**, whose §5 depends
+> on secrets surviving. Three ways to stop it, and the recommendation is the last
+> two together:
+>
+> - **Put the secret in the committed realm JSON. NO.** That is a plaintext client
+>   secret in git. Rejected outright.
+> - **Have the deploy reconcile it.** After the `auth` stack comes up, set each
+>   confidential client's secret from the store via the admin API. Idempotent, keeps
+>   the secret out of git, and makes "the store is authoritative" true *by
+>   construction* rather than by convention. **This is the durable fix**, and it is
+>   the natural next step after the guard below.
+> - **Keep the guard.** `require_client_secret_matches` in `scripts/_common.sh` now
+>   runs on the `ui` deploy path and fails closed, so the mismatch cannot be silent
+>   again. It detects rather than prevents, which is why it pairs with reconciliation
+>   rather than replacing it.
+>
+> There may be a fourth option: Keycloak can substitute environment variables into
+> realm import files, which would let the JSON carry `${env.AUTH_KEYCLOAK_SECRET}`
+> instead of a literal. **This is unverified for `26.4.0` and must not be relied on
+> until it is.** To test it, import a realm file containing that placeholder into a
+> throwaway (the §1 rehearsal shape) and check whether the resulting client secret
+> equals the environment value or the literal string.
 >
 > Check `hill90-api` and `hill90-vault` the same way before assuming only the ui is
 > affected. `app-api` was checked and holds **no** client-secret env var at all, so
