@@ -17,8 +17,15 @@ for it. It is in SOPS at `infra/secrets/prod.enc.env`, key `TAILSCALE_IP`.
 ### `app-keycloak` holds the only copy of realm `hill90`
 
 Realm `hill90`, its 16 clients, and **both user accounts (`jon`, `hill90admin`)
-exist only inside `prod_app-postgres-data`**. There is no export, no backup, and no
-second copy. Deleting `app-keycloak` or that volume destroys them.
+live inside `prod_app-postgres-data`.** Deleting `app-keycloak` or that volume
+still destroys the live copy.
+
+**This is no longer the only copy — see §0.** A cluster dump taken on 2026-07-29
+contains the realm and both accounts, verified by reading the rows out of it. That
+was the largest single risk in this consolidation and it is materially reduced.
+Two caveats keep it from being a green light: **the dump has not been
+test-restored**, and it is a copy of the *app's* Keycloak database, which is a
+rollback artifact rather than something that can carry the migration (§0).
 
 The yank-out test on 2026-07-29 proved the volume survives a full teardown and
 redeploy — `deploy.sh teardown` keeps volumes, and both users came back with
@@ -70,6 +77,14 @@ below gets shorter and more reversible. It also avoids importing into the existi
 `platform` realm, which would risk overwriting that realm's own `hill90-vault`
 client — the one OpenBao SSO depends on.
 
+**A collision was the other worry, and there is none.** Verified live: the platform
+Keycloak holds realms `master` and `platform` only — **there is no realm named
+`hill90` on it.** So importing the app's realm under its existing name is not
+blocked by a name clash, and the `hill90-vault` client the reviewer worried about
+belongs to `platform`, which an import of a *separate* realm named `hill90` never
+touches. That removes the strongest practical objection to option A and makes
+`KC_REALM=hill90` genuinely available.
+
 **AGAINST naming it `hill90`:**
 
 `services/api/src/app.ts:105` and `services/mcp/app/main.py:17` hardcode a
@@ -84,6 +99,13 @@ Today that realm **404s** (verified: `platform` → 200, `hill90` → 404), so a
 `hill90` on `auth.hill90.com`, that fallback becomes correct** — and from then on a
 blank or misconfigured issuer is indistinguishable from correct configuration,
 permanently. Naming the target realm anything else keeps the loud failure.
+
+**And it is not two copies of that fallback, it is four** — §8 found two more in
+`api` (`index.ts:72`, `routes/profile.ts:28`) beyond `app.ts:105`, plus `mcp`. Name
+the realm `hill90` and all four go silently correct at once. **This is the decision's
+real shape: option A buys a shorter, more reversible migration, and pays for it by
+permanently disarming four loud failures.** Both halves are now quantified; the
+choice is still Jon's.
 
 ### `APP_AUTH_HOST` used to move `app-keycloak` itself — the worst hazard
 
@@ -160,58 +182,228 @@ This is the failure this runbook exists to prevent. Read §7 before §4.
 
 ---
 
-## 1. Export the app realm — and accept the downtime
+## 0. The backup exists now — this changed the risk picture
 
-**The two export paths disagree, and you must pick one deliberately.**
+When this runbook was written, **no copy of the two accounts existed anywhere but
+the live volume.** That was the single largest risk in the consolidation. It is
+fixed. Verified on the host on 2026-07-29, by listing the files rather than
+trusting the job that made them:
 
-| Path | Users | Client secrets | Live instance? |
-|---|---|---|---|
-| REST partial-export | **never** — structurally excluded | no | yes, safe |
-| `kc.sh export` | yes | yes | **upstream says stop the server first** |
+```
+/opt/hill90/backups/app-db/20260729_065944/
+  app-database.sql          532513 bytes   deploy:deploy
+  app-postgres-data.tar.gz   17347196 bytes   root:root
 
-So *"export while `app-keycloak` keeps running"* and *"the export is a real backup"*
-**cannot both be true.** A REST partial-export can never return password hashes, so
-it is not a backup of the accounts.
+/opt/hill90/backups/db/20260729_065934/          <- the PLATFORM database, not the app's
+  database.sql              322299 bytes
+  postgres-data.tar.gz     10282251 bytes
+```
 
-**This runbook takes the `kc.sh export` path and accepts a brief outage.** Say so
-out loud before you start: logins via the app's Keycloak stop for the duration.
+**What `app-database.sql` actually contains.** It is a **cluster-wide** dump
+(`CREATE DATABASE` for five databases, with `\connect` between them), not a
+single-database dump:
+
+```
+hill90   hill90_akm   hill90_api   hill90_litellm   keycloak
+```
+
+The `keycloak` database in it carries the realm and the accounts. Confirmed by
+reading the `COPY` blocks out of the dump:
+
+```
+realms in the dump:  master, hill90
+users in the dump:   jon         (Jon Hill,     email jon@hill90.com)
+                     hill90admin (Hill90 Admin, email admin@hill90.com)
+                     -- the dump's user_entity rows lead with EMAIL, not username
+tables present:      realm, user_entity, credential, client, keycloak_role,
+                     protocol_mapper
+```
+
+**So there is now a recovery path for both accounts that does not depend on the
+live volume.** That is real and it is the reason the rest of this runbook is less
+frightening than it was.
+
+### The dump has NOT been test-restored
+
+**A backup nobody has restored is a hypothesis.** Nothing above proves the dump
+restores — only that it contains the right rows. The specific things an untested
+`pg_dumpall` output can still get wrong are ownership and role grants, extension
+availability in the target image (`pgvector` here), and the order of `CREATE
+DATABASE` against a non-empty cluster.
+
+**Do not describe this as a proven recovery path until someone has restored it into
+a throwaway Postgres and logged in.** If that has been done since this was written,
+update this section with the date and who did it.
+
+### The dump does NOT make the realm export optional
+
+This is worth being precise about, because it is tempting. The reasoning is:
+
+- **What the dump is good for:** recreating **`app-keycloak`'s own database**. That
+  is a rollback and disaster-recovery artifact, and a good one.
+- **Why it cannot carry the migration:** the migration puts realm `hill90` into the
+  **platform** Keycloak, which has its own `keycloak` database holding `master` and
+  `platform` (verified live). Restoring the app's `keycloak` database over the
+  platform's would **replace the platform's realms wholesale and destroy platform
+  SSO.** They are two different databases that happen to share a schema.
+- Extracting one realm from the SQL by hand means untangling a realm's rows across
+  roughly ninety foreign-keyed tables. That is not a supported operation and not one
+  to attempt during a migration.
+
+**The dump is the safety net. The realm export is the vehicle. You need both, and
+they are not substitutes.**
+
+## 1. Export the app realm — no downtime required
+
+**The earlier version of this section was wrong, and it mattered.** It said
+`kc.sh export` requires stopping `app-keycloak`, and told you to accept a login
+outage. That premise has been tested and is false for this image.
+
+`kc.sh export` does not need *this* server stopped — it needs *an* exporter with
+access to the database. Run it as a **throwaway sidecar container on the same
+image, pointed at the same database, while `app-keycloak` keeps serving.**
+
+**Verified locally against `quay.io/keycloak/keycloak:26.4.0`** — the exact prod
+image — with the live Keycloak up throughout:
+
+```
+export of realm 'hill90' requested          KC-SERVICES0034
+export finished successfully                KC-SERVICES0035
+live keycloak during and after:             Up (healthy)
+```
+
+### The exact command
 
 ```bash
-# 1a. stop accepting logins, then export
 ssh deploy@<VPS_HOST> '
-  docker stop app-keycloak
-  docker run --rm     -v prod_app-postgres-data:/dev/null:ro     --network hill90_internal     --entrypoint /opt/keycloak/bin/kc.sh     -e KC_DB=postgres     -e KC_DB_URL=jdbc:postgresql://app-postgres:5432/keycloak     -e KC_DB_USERNAME="$DB_USER" -e KC_DB_PASSWORD="$DB_PASSWORD"     -v /tmp/realm-export:/export     quay.io/keycloak/keycloak:26.4.0     export --dir /export --realm hill90 --users realm_file
-  docker start app-keycloak
+  set -euo pipefail
+  cd /opt/hill90-app
+  export SOPS_AGE_KEY_FILE=/opt/hill90/secrets/keys/keys.txt
+  DB_USER=$(sops -d --extract "[\"DB_USER\"]" infra/secrets/prod.enc.env)
+  DB_PASSWORD=$(sops -d --extract "[\"DB_PASSWORD\"]" infra/secrets/prod.enc.env)
+
+  mkdir -p /tmp/realm-export && chmod 777 /tmp/realm-export
+
+  docker run --rm \
+    --network hill90_internal \
+    --user root \
+    -v /tmp/realm-export:/out \
+    -e KC_DB=postgres \
+    -e KC_DB_URL=jdbc:postgresql://app-postgres:5432/keycloak \
+    -e KC_DB_USERNAME="$DB_USER" \
+    -e KC_DB_PASSWORD="$DB_PASSWORD" \
+    quay.io/keycloak/keycloak:26.4.0 \
+    export --realm hill90 --users same_file --file /out/hill90-realm.json
 '
 ```
 
-**The volume snapshot is the backup that does not depend on any of this**, and it
-is the one to trust:
+**Every flag in that command was tested, and one obvious guess is wrong:**
+
+| Flag | Why |
+|---|---|
+| `--users same_file` | **`--users realm_file` is REJECTED with `--file`.** The error is *"Property '--users' can be used only when exporting to a directory, or value set to 'same_file' when exporting to a file."* `realm_file` is valid only with `--dir`. |
+| `--file` (not `--dir`) | Either works and both produced a byte-identical realm file here. `--file` gives one artifact to checksum. Upstream advises `--dir` above 50 000 users; this realm has two. |
+| `--user root` | The image runs as uid 1000 and cannot write a host bind mount owned by someone else. Without it the export fails on permissions after doing all the work. |
+| `--network hill90_internal` | Verified: `app-postgres` is attached to `hill90_internal` in prod. The hostname `app-postgres` does not resolve from anywhere else. |
+| `--rm` | The sidecar must not linger. It is not part of the stack and nothing should ever restart it. |
+
+The first run prints `Changes detected in configuration. Updating the server image.`
+and takes noticeably longer — that is Keycloak rebuilding its augmented image
+inside the throwaway container. It is expected, not a fault.
+
+### Verify the artifact before trusting it
+
+**`docs/runbooks/scripts/verify-realm-export.sh` does this. Use it.**
 
 ```bash
-ssh deploy@<VPS_HOST> '
-  docker stop app-postgres
-  docker run --rm -v prod_app-postgres-data:/v -v /tmp:/out alpine:3     tar -czf /out/app-postgres-data-$(date +%Y%m%d-%H%M).tgz -C /v .
-  docker start app-postgres
-  ls -la /tmp/app-postgres-data-*.tgz
-'
+scp deploy@<VPS_HOST>:/tmp/realm-export/hill90-realm.json /tmp/
+docs/runbooks/scripts/verify-realm-export.sh /tmp/hill90-realm.json hill90
 ```
 
-Stopping `app-postgres` also stops `api`, `ai`, `knowledge` and `litellm` from
-serving. **That is the downtime. Plan it.** A snapshot of a running Postgres volume
-is not crash-consistent, which is why this stops it rather than pretending.
+It asserts, and fails loudly on each: the realm name; a **non-empty `users` array**;
+that every user has a password credential with real hash material
+(`secretData.value` and `.salt`); that every **confidential** client carries a
+`secret`; and that realm signing keys are present.
 
-**Verify:** the archive is non-empty and the realm JSON names both users.
+Two traps it exists to avoid:
+
+- **Asserting on the wrong clients.** `broker` and `realm-management` are built-in
+  and `bearerOnly`, and never carry a secret. A naive "every non-public client has a
+  secret" check **fails on a perfectly good export.** The script excludes
+  `bearerOnly`.
+- **Confusing the email for the username.** The accounts are username `jon` /
+  email `jon@hill90.com`, and username `hill90admin` / email `admin@hill90.com`
+  (verified live). The `user_entity` rows in the SQL dump lead with the **email**
+  column, so reading a dump makes the emails look like the usernames. Grepping an
+  export for `admin@hill90.com` as a *username* finds nothing and looks like a
+  missing account. The original `grep` for `jon` and `hill90admin` in this section
+  was right; this note exists because it was briefly "corrected" to the emails,
+  which was wrong.
+
+What a good export looks like, measured on the local realm:
+
+```
+users=1  password-hash=True
+clients=8 total, 2 confidential — hill90-api secret=present, hill90-ui secret=present
+client protocolMappers=3
+realm roles=[offline_access, default-roles-hill90, uma_authorization, user, admin]
+signing key providers=4
+EXPORT_LOOKS_COMPLETE
+```
+
+### Rehearse the import — this is the part that proves it
+
+Checking the file proves the file. It does not prove an import restores it. That
+was rehearsed in a **fully isolated throwaway stack** (its own network, its own
+empty Postgres, nothing existing touched, both removed afterwards): import the
+export, export it back out, compare.
+
+```
+password hash value identical   True   (argon2, 44 chars)
+password salt identical         True
+credentialData identical        True
+hill90-api  secret IDENTICAL    True
+hill90-ui   secret IDENTICAL    True
+signing key private material    identical (4 providers)
+realm roles identical           True
+clientScopes                    14 -> 14
+client protocolMappers          3 -> 3
+```
+
+**Three consequences, all good:**
+
+1. **Passwords survive.** The argon2 hash and salt come across byte-identical, so
+   both accounts log in with the passwords they already have. No reset, no
+   coordination with Jon about a new password.
+2. **Client secrets survive**, byte-identical. This is the measured version of §5's
+   second bullet — it was reasoned there and is now verified. `AUTH_KEYCLOAK_SECRET`
+   in SOPS keeps matching, so it stays out of the change set.
+3. **Realm signing keys survive**, which was not previously considered. The realm
+   keeps its RSA keypair, so the JWKS the app fetches contains the *same* keys and
+   **tokens issued before the migration keep validating after it.** That removes a
+   forced-logout failure mode nobody had accounted for.
+
+**Do this rehearsal against the real prod export too, before the migration.** The
+numbers above are from the local realm, which has one user and possibly different
+client secrets. The mechanism is proven; the specific artifact is not until you run
+it on the artifact.
 
 ```bash
-ssh deploy@<VPS_HOST> 'ls -la /tmp/realm-export/'
-ssh deploy@<VPS_HOST> 'grep -oE "\"username\" *: *\"[^\"]+\"" /tmp/realm-export/hill90-realm.json | sort -u'
+docker network create kcrehearse
+docker run -d --name kcrehearse-db --network kcrehearse \
+  -e POSTGRES_USER=kc -e POSTGRES_PASSWORD=rehearse -e POSTGRES_DB=keycloak \
+  pgvector/pgvector:pg16
+# then, same sidecar shape as above but --network kcrehearse and the kc/rehearse creds:
+#   import --file /out/hill90-realm.json
+#   export --realm hill90 --users same_file --file /out/roundtrip.json
+docker rm -f kcrehearse-db && docker network rm kcrehearse      # leave nothing behind
 ```
 
-Expect `jon` and `hill90admin`.
-
-**Rollback:** nothing has changed except two restarts. If the export is empty or
-missing a user, **stop** — every later step assumes a good one.
+**Rollback:** nothing to roll back. No existing container is stopped, started or
+reconfigured by any of this — the only thing created is a `--rm` sidecar and, for
+the rehearsal, an isolated network and database that are removed afterwards. If the
+export is empty or the verifier fails, **stop** — every later step assumes a good
+one.
 
 ## 2. Create a test user, and never use `jon` for testing
 
@@ -366,6 +558,13 @@ so it looks like a credential problem rather than an import problem.
   `AUTH_KEYCLOAK_SECRET` keeps matching. **This is the reason §1 takes the
   `kc.sh export` path.**
 
+  **This bullet is now measured, not reasoned.** An export/import/re-export round
+  trip in a throwaway stack returned both client secrets **byte-identical**, along
+  with the argon2 password hashes and the realm signing keys. Evidence in §1. The
+  warning at the top of this section stands unchanged — it is about the *committed*
+  `hill90-realm.json`, which genuinely has no `secret` fields, and that artifact
+  still mints new secrets.
+
 **State which artifact you are importing before you start.** The two have different
 revert counts.
 
@@ -450,13 +649,20 @@ that must be edited, or consciously accepted.
 
 ### hill90-app — runtime code
 
+**PR #28 has landed the no-op parameterisation for the rows marked below.** It made
+`KC_REALM` the knob for the ui health probe and collapsed `api`'s three copies of
+the issuer fallback into `services/api/src/middleware/keycloak-config.ts`. The
+fallback itself was deliberately left in place — removing it is a behaviour change
+tied to the realm-name decision, not a refactor.
+
+
 | File:line | What reads it | Migration action |
 |---|---|---|
 | `services/api/src/app.ts:105` | fallback issuer when `KEYCLOAK_ISSUER` unset | **Code change if the target realm is named `hill90`.** Today `auth.hill90.com/realms/hill90` 404s, so a blank issuer fails loudly. Name the realm `hill90` there and this fallback silently becomes *correct* — a blank issuer then looks like working config forever |
 | `services/api/src/index.ts:72` | same fallback, WebSocket terminal proxy path | Same. **Not previously reported** — a second copy of the same literal |
 | `services/api/src/routes/profile.ts:28` | same fallback, profile route | Same. **Third copy** |
 | `services/mcp/app/main.py:17` | fallback issuer for MCP | Same |
-| `services/ui/src/utils/admin-services.ts:24,29,30` | admin UI service list — hardcodes `url: 'https://auth.hill90.com'`, `internalUrl: 'http://keycloak:8080'` and `path: '/realms/hill90'` | **Code change, and it is already wrong today.** None of it is env-driven, and `internalUrl` names **`keycloak`** — Hill90's container — not `app-keycloak`. So the admin page's Keycloak health check already probes the platform's Keycloak, not the app's. **Not previously reported** |
+| `services/ui/src/utils/admin-services.ts:24,29,30` | admin UI service list — hardcodes `url: 'https://auth.hill90.com'`, `internalUrl: 'http://keycloak:8080'` and `path: '/realms/hill90'` | **Code change — and it is already broken today, but not for the reason first reported here.** See the correction below. |
 | `services/ui/src/app/api/services/health/route.ts:6` | health panel probes `/realms/hill90/.well-known/openid-configuration` against `KEYCLOAK_INTERNAL_URL` | **Code change if the realm is renamed.** Host is env-driven; the realm path is a literal, so a renamed realm makes the health panel report Keycloak down while it is fine |
 | `services/ui/src/auth.ts:116` | `decoded.realm_roles` | **Mapper decision, not a host/realm one** — see §7 |
 | `services/api/src/middleware/role.ts:11` | `user.realm_roles` | Same |
@@ -492,6 +698,43 @@ that must be edited, or consciously accepted.
   be churn with fixture-breaking risk.
 - `services/api/src/services/keycloak-account.ts` mentions the issuer **in comments
   only**.
+
+### Correction: the admin services page, and what is actually wrong with it
+
+An earlier version of this table said `admin-services.ts` pointed at the wrong
+container — that `internalUrl: 'http://keycloak:8080'` named Hill90's Keycloak
+instead of `app-keycloak`, and was therefore a bug. **That was wrong, and the
+reasoning behind it was wrong too.**
+
+`ADMIN_SERVICES` is a registry of **platform** services. The other entries are
+`openbao`, `grafana`, `portainer`, `minio`, `traefik` and `litellm` — every one an
+unprefixed Hill90 platform container. So `http://keycloak:8080` and
+`https://auth.hill90.com` are **correct by design**: this page is meant to show the
+platform's Keycloak, not the app's.
+
+**What is genuinely broken is the realm in the path**, and it was verified rather
+than reasoned — probed from inside the running `app-ui` container in production:
+
+```
+http://keycloak:8080/realms/hill90        -> 404      <- what the page probes
+http://keycloak:8080/realms/platform      -> 200      <- the platform's realm
+http://app-keycloak:8080/realms/hill90    -> 200      <- the app's realm
+```
+
+The health route treats any non-`ok` response as unhealthy, so **the admin page's
+Keycloak row reports unhealthy today**, and has for as long as the registry has
+looked like this. The platform Keycloak holds `master` and `platform` — there is no
+`hill90` realm on it.
+
+**This is not fixed here, deliberately.** Correcting it changes what the admin page
+displays, so it is a behaviour change rather than the no-op parameterisation in
+PR #28, and it belongs to the platform-services registry rather than to this
+migration. It needs a decision — probe `/realms/platform`, or probe something
+realm-independent like the Keycloak health endpoint — which is Jon's to make.
+
+**Why this correction is in the runbook rather than quietly amended:** the original
+claim would have sent someone renaming a container reference that was right, during
+a migration, to fix a symptom whose real cause is one field further along.
 
 ### The count that matters
 
