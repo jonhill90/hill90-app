@@ -104,7 +104,18 @@ services:
       - KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
       # Back-channel: resolved inside the network, so it uses the app's own
       # service name rather than going out through Traefik and back.
-      - KEYCLOAK_JWKS_URI=http://app-keycloak:8080/realms/${KC_REALM:-hill90}/protocol/openid-connect/certs
+      # KEYCLOAK_JWKS_URI is deliberately NOT set.
+      #
+      # It was hardcoded to http://app-keycloak:8080/... — which meant flipping
+      # APP_AUTH_HOST moved only the FRONT channel. The back channel kept asking
+      # app-keycloak for a realm the new Keycloak would host, so every API and MCP
+      # call would 401 while the login page looked fine. Worse, reverting
+      # APP_AUTH_HOST alone would restore the login page and leave authenticated
+      # calls broken — a revert that looks like it worked.
+      #
+      # Unset, both services derive it from KEYCLOAK_ISSUER
+      # (services/api/src/index.ts, services/mcp/app/main.py), so APP_AUTH_HOST is
+      # the single knob and front and back channels cannot diverge.
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_api
       - DOCKER_HOST=tcp://docker-proxy:2375
       # services/api attaches agent containers to <prefix>_agent_internal and
