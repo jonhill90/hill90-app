@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
 // Mock next-auth/react
@@ -195,5 +195,101 @@ describe('AuthButtons', () => {
     render(<AuthButtons />)
 
     expect(screen.getByText('JP')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The avatar request that fires on every authenticated page load.
+//
+// GET /api/profile/avatar answers 204 for a user who has never uploaded one.
+// 204 is a 2xx, so `res.ok` is true — checking res.ok alone builds an object URL
+// from an empty Blob and renders a broken image. These tests pin the distinction.
+//
+// They settle the pending fetch BEFORE asserting. An earlier version used
+// waitFor(initials are shown), which passes on the very first render — before
+// the fetch resolves — so it held for both the correct and the broken component.
+// A negative assertion has to be made after the thing it denies could have
+// happened, or it proves nothing.
+// ---------------------------------------------------------------------------
+
+describe('AuthButtons avatar fetch', () => {
+  let createdUrls: string[]
+  let blobRead: number
+
+  // Flush the fetch promise, the blob() promise and the resulting setState.
+  async function settle() {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10))
+    })
+  }
+
+  function stubFetch(status: number, ok = true) {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok,
+      status,
+      blob: async () => {
+        blobRead += 1
+        return new Blob(status === 204 ? [] : ['webp-bytes'])
+      },
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  beforeEach(() => {
+    createdUrls = []
+    blobRead = 0
+    mockSession = { data: { user: { name: 'Admin Hill90' } }, status: 'authenticated' }
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => {
+        const u = `blob:fake-${createdUrls.length}`
+        createdUrls.push(u)
+        return u
+      }),
+      revokeObjectURL: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  it('does not read the body or create an object URL when the answer is 204', async () => {
+    const fetchMock = stubFetch(204)
+
+    render(<AuthButtons />)
+    await settle()
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/profile/avatar')
+    expect(blobRead).toBe(0)
+    expect(createdUrls).toEqual([])
+    expect(document.querySelector('img')).toBeNull()
+    expect(screen.getByText('AH')).toBeInTheDocument()
+  })
+
+  it('renders the image when the answer is 200 with a body', async () => {
+    stubFetch(200)
+
+    render(<AuthButtons />)
+    await settle()
+
+    expect(blobRead).toBe(1)
+    expect(createdUrls).toHaveLength(1)
+    const img = document.querySelector('img')
+    expect(img).not.toBeNull()
+    expect(img!.getAttribute('src')).toBe(createdUrls[0])
+    expect(screen.queryByText('AH')).toBeNull()
+  })
+
+  it('falls back to initials when the request fails outright', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')))
+
+    render(<AuthButtons />)
+    await settle()
+
+    expect(createdUrls).toEqual([])
+    expect(screen.getByText('AH')).toBeInTheDocument()
   })
 })

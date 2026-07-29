@@ -182,7 +182,14 @@ router.get('/avatar', requireRole('user'), async (req: Request, res: Response) =
     );
 
     if (!rows[0]?.avatar_key) {
-      res.status(404).json({ error: 'No avatar found' });
+      // 204, not 404. "This user has not set an avatar" is the normal state for
+      // every account that has never uploaded one, and TopBar asks on every
+      // authenticated page load, so a 404 here meant a permanent error in the
+      // console and the access log of a working system.
+      //
+      // Callers must treat 204 as "no avatar": it is a 2xx, so `res.ok` is true
+      // and a naive reader would build an object URL from an empty body.
+      res.status(204).end();
       return;
     }
 
@@ -202,6 +209,10 @@ router.get('/avatar', requireRole('user'), async (req: Request, res: Response) =
     (stream as any).pipe(res);
   } catch (err: any) {
     if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+      // Deliberately still 404, and deliberately different from the branch above.
+      // Here the database says this user HAS an avatar and object storage
+      // disagrees — a dangling avatar_key, a real inconsistency worth staying
+      // visible. It cannot fire on the page-load path, which has no row at all.
       res.status(404).json({ error: 'No avatar found' });
       return;
     }
