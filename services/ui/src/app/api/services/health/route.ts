@@ -3,7 +3,10 @@ import { NextResponse } from 'next/server';
 const SERVICES = [
   { name: 'API', url: process.env.API_URL || 'http://localhost:3000', path: '/health' },
   { name: 'AI', url: process.env.AI_URL || 'http://localhost:8000', path: '/health' },
-  { name: 'Keycloak', url: process.env.KEYCLOAK_INTERNAL_URL || 'http://localhost:8080', path: '/realms/hill90/.well-known/openid-configuration' },
+  // KC_REALM is the same knob compose already uses to build the issuer, so the
+  // migration is an env change here rather than an image rebuild. Default matches
+  // the current realm exactly, so this is a no-op until KC_REALM is set.
+  { name: 'Keycloak', url: process.env.KEYCLOAK_INTERNAL_URL || 'http://localhost:8080', path: `/realms/${process.env.KC_REALM || 'hill90'}/.well-known/openid-configuration` },
   { name: 'MCP', url: process.env.MCP_URL || 'http://localhost:8001', path: '/health' },
 ];
 

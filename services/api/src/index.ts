@@ -3,6 +3,7 @@ import { app } from './app';
 import { getPool, closePool } from './db/pool';
 import { runMigrations } from './db/migrate';
 import { createJwksKeyResolver } from './middleware/auth';
+import { getIssuer, getJwksUri } from './middleware/keycloak-config';
 import { reconcileAgentStatuses } from './services/docker';
 import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
 import { attachTerminalProxy } from './services/terminal-proxy';
@@ -69,8 +70,8 @@ async function start() {
   });
 
   // Attach WebSocket terminal proxy for live agent terminal sessions
-  const issuer = process.env.KEYCLOAK_ISSUER || 'https://auth.hill90.com/realms/hill90';
-  const jwksUri = process.env.KEYCLOAK_JWKS_URI || `${issuer}/protocol/openid-connect/certs`;
+  const issuer = getIssuer();
+  const jwksUri = getJwksUri(issuer);
   const getSigningKey = createJwksKeyResolver(jwksUri);
 
   attachTerminalProxy(server, async (token: string) => {
