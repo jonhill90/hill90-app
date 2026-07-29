@@ -3,8 +3,8 @@
 An AI agent platform that runs locally in Docker and, since 2026-07-29, in
 production as a tenant of the [Hill90](https://github.com/jonhill90/Hill90)
 platform. [hill90.com](https://hill90.com) serves the UI on a Let's Encrypt
-certificate. Six of the eight stacks are deployed and healthy; `mcp` and `minio`
-have never been deployed. See [Production](#production).
+certificate. **All eight stacks are deployed and healthy.** See
+[Production](#production).
 
 ```bash
 ./scripts/local.sh up
@@ -247,13 +247,16 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
 `confirm_public_deploy`. `dry_run` runs every guard — secrets, tenancy contract,
 host paths — and stops before deploying anything.
 
-**Verified against the host 2026-07-29 05:40 UTC** — 21 containers running, 0
-unhealthy, of which 13 are Hill90's platform baseline and 8 are this app.
+**Verified against the host 2026-07-29 07:34 UTC** — 23 containers running, 0
+unhealthy, of which 13 are Hill90's platform baseline and 10 are this app.
 
 | Stack | State |
 |---|---|
-| `db`, `auth`, `api`, `ui`, `knowledge`, `ai` | deployed, healthy |
-| `mcp`, `minio` | never deployed |
+| `db`, `auth`, `api`, `ui`, `knowledge`, `ai`, `mcp`, `minio` | deployed, healthy |
+
+**Deployed is not the same as current.** Several changes are merged to `main` and
+**not yet deployed** — as of 2026-07-29 07:34 UTC that includes #22, #25, #26 and
+#28. The running containers still carry the previous configuration.
 
 Do not read the table as a roadmap. It is the state of the host at the timestamp
 above, and it goes stale — re-check before relying on it.
@@ -283,9 +286,39 @@ Hill90 holds realm `platform` on `auth.hill90.com`, the app holds realm `hill90`
 on `app-auth.hill90.com`, and each has its own Postgres with separate volumes.
 **Whether these consolidate is an open question and is not decided here.**
 
-The tenancy is detachable *by design* — the app declares what it consumes rather
-than assuming it. That has **not** been tested by actually detaching it. No
-yank-out test has been run.
+The tenancy is detachable, and this has been **tested rather than assumed**. On
+2026-07-29 the app was torn down to a single container and redeployed: Hill90
+returned to exactly its 13-container baseline with all four shared networks
+intact, the app came back to 10 healthy containers, `hill90.com` answered 200,
+the login form was reachable, and both user accounts survived. The yank-out test
+passed.
+
+### Backups
+
+The app's data is backed up by **Hill90's** `scripts/backup.sh`, not by anything
+in this repository:
+
+```bash
+bash scripts/backup.sh backup app-db      # run in the Hill90 checkout, on the VPS
+```
+
+That takes a real `pg_dumpall` of the app's databases plus a tar of the
+`prod_app-postgres-data` volume, and refuses rather than warns if the dump cannot
+be produced. `backup-all` includes it on the nightly cron.
+
+**Verified end to end on 2026-07-29.** The dump was restored into a throwaway
+Postgres container and both user accounts came back with their correct realm
+roles. Artifacts from that run:
+
+```
+/opt/hill90/backups/db/20260729_065934/database.sql              322299 bytes
+/opt/hill90/backups/app-db/20260729_065944/app-database.sql      532513 bytes
+/opt/hill90/backups/app-db/20260729_065944/app-postgres-data.tar.gz  17347196 bytes
+```
+
+Worth knowing what this replaced: before that date the app's volume had **never
+been backed up by anything**, and Hill90's own SQL dump had been failing silently
+for days — the job reported success while producing only a volume tar.
 
 ## History
 
@@ -321,12 +354,18 @@ Postgres entrypoint script instead.
 
 ## CI
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs unit tests only and
-is gated to `workflow_dispatch` — it never fires on its own. The deploy workflow
-is dispatch-only for the same reason: a merge should not deploy to production
-by itself.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on **every pull
+request**, on pushes to `main`, and on demand. Six suites: `services/api` (jest),
+`services/ui` (vitest), and pytest for `ai`, `knowledge`, `mcp` and `agentbox`.
 
-**The suites pass.** Run on `main` at `e04aa6a` on 2026-07-26: all six jobs green in
-2m26s, **1953 tests, zero failures**. See [`RESURRECTION.md`](RESURRECTION.md#8-ci-is-gated-off--still-gated-and-the-suites-pass)
-for the breakdown and for what that does and does not prove — it is unit tests only, and
-nothing there demonstrates the services work together.
+It gated nothing but shell tests until 2026-07-29 (#30); before that it was
+`workflow_dispatch`-only, justified by a comment saying this repo had no deploy
+target. It has one, and now the application tests gate a merge.
+
+The deploy workflow remains dispatch-only, deliberately: a merge should not
+deploy to production by itself.
+
+**The suites pass** — all six jobs green, **1953 tests, zero failures**. See
+[`RESURRECTION.md`](RESURRECTION.md#8-ci-runs-the-application-tests-on-every-pull-request--resolved)
+for the breakdown and for what it does and does not prove: these are unit tests,
+and nothing in them demonstrates the services work together.

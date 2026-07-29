@@ -11,9 +11,9 @@ production as a Hill90 tenant.**
 CI on `main` is green across all six jobs, 1953 tests, zero failures (§8).
 Items 1–5 and 8 below are resolved; what remains open is called out as such.
 
-A deployment path now exists and has been used — see item 2. Six of the eight
-stacks are deployed and healthy as of 2026-07-29 05:40 UTC; `mcp` and `minio`
-have never been deployed.
+A deployment path now exists and has been used — see item 2. **All eight stacks
+are deployed and healthy** as of 2026-07-29 07:34 UTC (23 containers running, 0
+unhealthy, of which 13 are Hill90's baseline).
 
 ---
 
@@ -56,12 +56,17 @@ before changing anything.
 The app deploys as a **tenant**: it consumes `hill90_edge` and `hill90_internal`
 as external networks that Hill90 creates, and parameterises names through
 `NETWORK_PREFIX`, `VOLUME_PREFIX` and `CONTAINER_PREFIX` so one set of files
-serves both environments. It is detachable in design only — **no yank-out test
-has been run.**
+serves both environments. Detachability is **proven, not assumed**: on
+2026-07-29 the app was torn down to a single container and redeployed, Hill90
+held at exactly 13 containers with all shared networks intact, and both user
+accounts survived. The yank-out test passed.
 
-Not everything is deployed. As of 2026-07-29 05:40 UTC, six stacks — `db`,
-`auth`, `api`, `ui`, `knowledge`, `ai` — are deployed and healthy. `mcp` and
-`minio` have never been deployed.
+All eight stacks — `db`, `auth`, `api`, `ui`, `knowledge`, `ai`, `mcp`,
+`minio` — are deployed and healthy as of 2026-07-29 07:34 UTC.
+
+**Merged is not deployed.** As of that timestamp, #22, #25, #26 and #28 are on
+`main` and have not been deployed; the running containers still carry the
+previous configuration. Treat the two as separate facts.
 
 `knowledge` and `ai` failed on the first deploy in ways that looked unrelated:
 `knowledge` crash-looped on `FileNotFoundError: /etc/akm/public.pem`, `ai` came
@@ -116,7 +121,12 @@ that file to recover them if needed):
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
 - `KC_ADMIN_USERNAME` / `KC_ADMIN_PASSWORD`
 - `AUTH_SECRET`, `AUTH_KEYCLOAK_ID`, `AUTH_KEYCLOAK_SECRET`,
-  `AUTH_KEYCLOAK_ISSUER`, `AUTH_URL`
+  `AUTH_KEYCLOAK_ISSUER`, `AUTH_URL` — the last two are **no longer store keys**.
+  #22 removed them because nothing read them: the compose files compose the
+  issuer from `APP_AUTH_HOST`, `BASE_DOMAIN` and `KC_REALM`, so editing
+  `AUTH_KEYCLOAK_ISSUER` in the store changed nothing and warned about nothing.
+  The knobs are `APP_AUTH_HOST` and `KC_REALM`. The variable still exists as an
+  env var the UI reads; it is simply computed rather than stored.
 - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`
 
 Two more are referenced by services but were never in `.env.example`, having been
@@ -237,16 +247,21 @@ that could not execute. It now uses BuildKit's `TARGETARCH`. The agentbox image
 copies that binary out of the knowledge image, so the breakage reached agent
 shells too.
 
-## 8. CI is gated off — STILL GATED, and the suites PASS
+## 8. CI runs the application tests on every pull request — RESOLVED
 
-`.github/workflows/ci.yml` runs unit tests only and is `workflow_dispatch`-only.
-Deliberately manual. The original reason was that this repo had no deploy target;
-now that it has one, the reason is stronger rather than weaker — a merge should
-not deploy to production by itself. `deploy.yml` is dispatch-only for the same
-reason.
+`.github/workflows/ci.yml` now runs on `pull_request`, on pushes to `main`, and
+on demand. Six suites: `services/api` (jest), `services/ui` (vitest), and pytest
+for `ai`, `knowledge`, `mcp` and `agentbox`.
 
-**The tests pass.** Run on `main` at `e04aa6a` on 2026-07-26, all six jobs
-green in 2m26s:
+Until 2026-07-29 (#30) it was `workflow_dispatch`-only, and the comment
+justifying that said this repo had no deploy target. It had acquired one, so the
+justification had inverted: the tests were gating nothing precisely when a merge
+had started to matter. Only the shell tests gated a PR until then.
+
+`deploy.yml` remains dispatch-only, and that reason has not inverted — a merge
+should not deploy to production by itself.
+
+**The tests pass.** All six jobs green in 2m26s:
 
 | Job | Result |
 |---|---|
@@ -330,3 +345,42 @@ This is recorded rather than fixed because the fix is a real decision, not a
 typo: seeding an account into a committed realm import means deciding what
 credential it carries and how that is rotated, and the local file's answer
 (`dev` / `dev`) is not one production can copy.
+
+## 11. The app's data had never been backed up — RESOLVED 2026-07-29
+
+Two defects, found together and fixed in Hill90 rather than here, because that is
+where the backup tooling lives.
+
+**The app's volume had no backup at all.** `prod_app-postgres-data` holds the
+app's Keycloak realm and its user accounts, AKM knowledge, chat history and
+LiteLLM data. Hill90's `scripts/backup.sh` knew only `prod_postgres-data`, and
+this repository has no backup script, so `find /opt/hill90/backups -iname "*app*"`
+returned nothing.
+
+**Hill90's own SQL dump had been failing silently for days.** Under cron,
+`PATH=/sbin:/bin:/usr/sbin:/usr/bin` while `sops` installs to `/usr/local/bin`, so
+the decrypt was "command not found", its stderr was discarded, `DB_USER` came back
+empty, the dump was skipped with a warning, the volume tar still ran, and the job
+exited 0. Three consecutive nightly backups held a tar and no dump.
+
+Both are fixed in Hill90 (#563): `sops` is resolved by absolute path, a dump that
+cannot be taken is fatal rather than a warning, artifacts are checked non-empty
+before success is reported, and a new `app-db` service covers this app.
+
+```bash
+bash scripts/backup.sh backup app-db      # in the Hill90 checkout, on the VPS
+```
+
+**Verified end to end on 2026-07-29**, not merely produced: the dump was restored
+into a throwaway Postgres container and both accounts came back with their
+correct realm roles. That is the first restore this application has ever had.
+
+| Artifact | Bytes |
+|---|---|
+| `/opt/hill90/backups/db/20260729_065934/database.sql` | 322,299 |
+| `/opt/hill90/backups/app-db/20260729_065944/app-database.sql` | 532,513 |
+| `/opt/hill90/backups/app-db/20260729_065944/app-postgres-data.tar.gz` | 17,347,196 |
+
+Note what this does and does not cover. It is the database. Volumes holding
+object storage and agent state are not in it, and `/opt/hill90/agentbox-configs`
+is a host path outside any checkout and outside any backup.
