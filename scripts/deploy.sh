@@ -112,6 +112,27 @@ stack_containers() {
 # reason to group.
 stack_project() { printf 'hill90-app-%s-%s' "${2:-prod}" "$1"; }
 
+# Variables each stack interpolates from the secrets store with NO compose-level
+# default, so an empty value silently becomes "" in the container. Derived by
+# extracting ${VAR} (not ${VAR:-default}) from each prod compose file, not by
+# hand — tests/scripts/secrets-loader.bats guards the mechanism.
+#
+# This list is why the incident cannot recur silently: `ui` requires exactly the
+# three variables that were empty when hill90.com served a broken signin page.
+stack_secrets() {
+    case "$1" in
+        db)        printf 'DB_USER DB_PASSWORD' ;;
+        auth)      printf 'DB_USER DB_PASSWORD KC_ADMIN_USERNAME KC_ADMIN_PASSWORD' ;;
+        api)       printf 'DB_USER DB_PASSWORD AKM_INTERNAL_SERVICE_TOKEN AKM_SIGNING_PRIVATE_KEY ANTHROPIC_API_KEY CHAT_CALLBACK_TOKEN MINIO_ROOT_USER MINIO_ROOT_PASSWORD MODEL_ROUTER_INTERNAL_SERVICE_TOKEN MODEL_ROUTER_SIGNING_PRIVATE_KEY PROVIDER_KEY_ENCRYPTION_KEY' ;;
+        ai)        printf 'DB_USER DB_PASSWORD ANTHROPIC_API_KEY LITELLM_MASTER_KEY MODEL_ROUTER_INTERNAL_SERVICE_TOKEN OPENAI_API_KEY PROVIDER_KEY_ENCRYPTION_KEY' ;;
+        knowledge) printf 'DB_USER DB_PASSWORD AKM_INTERNAL_SERVICE_TOKEN LITELLM_MASTER_KEY MODEL_ROUTER_INTERNAL_SERVICE_TOKEN' ;;
+        minio)     printf 'MINIO_ROOT_USER MINIO_ROOT_PASSWORD' ;;
+        ui)        printf 'AUTH_SECRET AUTH_KEYCLOAK_ID AUTH_KEYCLOAK_SECRET' ;;
+        mcp)       printf '' ;;
+        *)         printf '' ;;
+    esac
+}
+
 # Resolve a service's actual container name. The compose files set
 # container_name: ${CONTAINER_PREFIX:-}app-<name>, so anything in this script
 # that runs `docker exec` or `docker inspect` must apply the same prefix.
@@ -263,7 +284,7 @@ cmd_preflight() {
 cmd_deploy() {
     local stack="${1:?stack required}"
     local env="${2:-prod}"
-    local compose_file project_name
+    local compose_file project_name required
 
     compose_file="$(stack_compose "$stack" "$env")"
     project_name="$(stack_project "$stack" "$env")"
@@ -335,6 +356,20 @@ or, if it came from the local tenant path:
     done
 
     load_secrets "$env"
+
+    # A loader that exported nothing must not be able to produce a green deploy.
+    # This is the cause fix for the hill90.com incident: the store was correct,
+    # load_secrets ran in a subshell, every variable arrived empty, docker compose
+    # substituted "" with only a warning, and the container passed a healthcheck
+    # that probes the port. Empty-string is the failure mode, so this checks
+    # non-empty rather than merely present.
+    # shellcheck disable=SC2046  # word splitting is intended: a space-separated list
+    required="$(stack_secrets "$stack")"
+    if [ -n "$required" ]; then
+        # shellcheck disable=SC2086
+        require_secrets $required
+        success "$(printf '%s' "$required" | wc -w | tr -d ' ') required secrets present and non-empty"
+    fi
 
     local -a files=(-f "$compose_file")
     if [ "${USE_LOCAL_OVERRIDE:-0}" = "1" ]; then
