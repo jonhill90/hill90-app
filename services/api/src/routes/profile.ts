@@ -14,6 +14,7 @@ import {
   getKeycloakProfile,
   updateKeycloakProfile,
 } from '../services/keycloak-account';
+import { getIssuer } from '../middleware/keycloak-config';
 
 const router = Router();
 
@@ -23,10 +24,6 @@ const upload = multer({
 });
 
 const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-
-function getIssuer(): string {
-  return process.env.KEYCLOAK_ISSUER || 'https://auth.hill90.com/realms/hill90';
-}
 
 function getBearerToken(req: Request): string {
   return req.headers.authorization!.slice(7);
