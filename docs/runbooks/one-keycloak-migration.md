@@ -1106,10 +1106,112 @@ Confirm all three conditions before starting, not during the rollback.
 > throwaway (the §1 rehearsal shape) and check whether the resulting client secret
 > equals the environment value or the literal string.
 >
-> Check `hill90-api` and `hill90-vault` the same way before assuming only the ui is
-> affected. `app-api` was checked and holds **no** client-secret env var at all, so
-> it is not affected by this; `hill90-vault` belongs to OpenBao SSO and is the infra
-> lane's.
+> ### Scope: the repair is ONE secret. Verified, not assumed.
+>
+> All three confidential clients in realm `hill90` carry 32-char Keycloak-minted
+> secrets, exactly as a no-`secret` realm import produces. But only one of them has a
+> counterpart the app uses.
+>
+> | Client | Keycloak | App store | Verdict |
+> |---|---|---|---|
+> | `hill90-ui` | 32 chars, `d3eca7b376…` | `AUTH_KEYCLOAK_SECRET`, 64 chars, `008156b6a6…` | **THE ONLY THING TO FIX** |
+> | `hill90-api` | 32 chars, `d38a177ce5…` | absent | **Correctly absent — no fix needed** |
+> | `hill90-vault` | 32 chars, `531b988ac0…` | absent | **Vestigial. Do not carry it across** |
+>
+> **`hill90-api` needs no secret, confirmed in code rather than inferred.** The only
+> consumer of a client secret anywhere in this repository is
+> `services/ui/src/auth.ts:30` (`client_secret: requireEnv("AUTH_KEYCLOAK_SECRET")`).
+> `api` and `mcp` both only *validate* tokens — `createJwksKeyResolver` in
+> `services/api/src/middleware/auth.ts:48` and `_jwks_key_resolver` in
+> `services/mcp/app/main.py:27`. Validation needs the JWKS, never a client secret.
+> There is no OIDC code exchange outside the ui, so `hill90-api`'s minted secret is
+> simply unused.
+>
+> **`hill90-vault` in THIS realm is vestigial**, and the evidence is a hash
+> comparison rather than an assumption:
+>
+> ```
+> app realm (hill90)   hill90-vault secret     531b988ac0…   <- matches nothing
+> platform realm       hill90-vault secret     3a91eb580a…
+> Hill90 store         VAULT_OIDC_CLIENT_SECRET 3a91eb580a…   <- matches the PLATFORM copy
+> ```
+>
+> OpenBao binds its OIDC to the platform realm, not this one —
+> Hill90 `scripts/vault.sh:394` sets
+> `oidc_discovery_url=https://auth.hill90.com/realms/platform`. The platform realm's
+> copy holds the secret that matches Hill90's store; this realm's copy matches
+> nothing and has **zero offline sessions**.
+>
+> It is a leftover from the shape Hill90's own
+> `platform/auth/keycloak/README.md` describes: *"The previous shape put `hill90-ui`
+> and `hill90-api` in the same realm as `hill90-vault`."* The split happened; this
+> copy did not get cleaned up.
+>
+> **The trap:** it carries production redirect URIs
+> (`https://vault.hill90.com/ui/vault/auth/oidc/oidc/callback` and
+> `.../v1/auth/oidc/callback`), so it looks load-bearing on inspection. It is not.
+>
+> **What to do about it:** nothing tonight, and **do not import it into the platform
+> Keycloak during the migration** — the platform realm already has the real one, and
+> importing a second `hill90-vault` into a realm that already has one is how the
+> OpenBao client gets clobbered. Strip it from the artifact before import, or accept
+> a realm name that keeps the two apart. An enabled confidential client with
+> production redirect URIs that nothing uses is also a small standing attack surface,
+> worth deleting once the migration settles.
+>
+> One caveat on the evidence: Keycloak event history is not retained here, so
+> "no events" could not be checked. The zero offline sessions and the discovery URL
+> pointing elsewhere are the load-bearing facts.
+>
+> ### Correction: `${VAR}` substitution in realm files is VERIFIED, and it is the fix
+>
+> An earlier version of this section listed environment substitution in realm import
+> files as an unverified fourth option, and rejected putting the secret in the realm
+> JSON as "a plaintext secret in git". **Both statements were wrong, and Hill90
+> already solved this.**
+>
+> `platform/auth/keycloak/platform-realm.json` sets, for its own vault client:
+>
+> ```json
+> "secret": "${VAULT_OIDC_CLIENT_SECRET}"
+> ```
+>
+> and Hill90's `platform/auth/keycloak/README.md` records that **Keycloak substitutes
+> environment variables into realm files at import — verified on 26.4.0** by
+> re-importing and reading the value back through `kcadm`. It is a placeholder, not a
+> literal, so nothing secret enters git.
+>
+> **Confirmed empirically tonight, not just taken from the README:** the platform
+> realm's `hill90-vault` secret hashes identically to Hill90's
+> `VAULT_OIDC_CLIENT_SECRET` (`3a91eb580a…`). The substitution is working in
+> production right now.
+>
+> Hill90's README also describes the identical failure it prevents: *"the secret is
+> otherwise generated at random by Keycloak… those two values cannot match, and
+> nothing detects the mismatch… only the back-channel token exchange fails — as
+> `invalid_client`"*. **Hill90 hit this exact bug, diagnosed it, and fixed it. The
+> app repository has the same defect and not the fix.**
+>
+> **So the recurrence fix is two lines, not a reconciliation loop:**
+>
+> 1. In `platform/auth/keycloak/hill90-realm.json`, give `hill90-ui`
+>    `"secret": "${AUTH_KEYCLOAK_SECRET}"`.
+> 2. Pass `AUTH_KEYCLOAK_SECRET` into the `app-keycloak` service in
+>    `deploy/compose/prod/docker-compose.auth.yml`. It is **not** there today — that
+>    service receives only `KC_*` variables — so the placeholder would otherwise
+>    substitute to nothing.
+>
+> Consider the same for `hill90-api` only if it ever gains a code path that performs
+> an exchange; today it has none.
+>
+> **This does not repair the running realm.** `start --import-realm` imports only when
+> the realm is absent, so the placeholder takes effect on a fresh install and on the
+> migration import — which is precisely where §5's warning bites. Today's mismatch
+> still needs the repair above.
+>
+> The reconciliation idea is therefore **demoted, not adopted**: it was the right
+> answer only while substitution looked unavailable. Keep the guard, which is what
+> makes either approach verifiable.
 >
 > **Consequence for the migration:** §5's warning is no longer hypothetical, and the
 > pre-migration checklist cannot be completed until this is fixed — there is no
