@@ -68,8 +68,12 @@ compose files and reads the actual error before this is changed.
 
 ### VPS baseline, captured before any change
 
-Break-glass `ssh -i ~/.ssh/remote.hill90.com deploy@100.88.29.112` works
-without DNS. Host `srv1264324.hstgr.cloud`.
+Break-glass `ssh -i ~/.ssh/<VPS_SSH_KEY> deploy@<VPS_TAILSCALE_IP>` works
+without DNS. Host `<VPS_PROVIDER_HOSTNAME>`.
+
+`<VPS_TAILSCALE_IP>` is in SOPS: `infra/secrets/prod.enc.env`, key
+`TAILSCALE_IP`. `<VPS_SSH_KEY>` and `<VPS_PROVIDER_HOSTNAME>` are in your local
+`~/.ssh/config` and the hosting provider's console respectively.
 
 - 13 containers, **0 unhealthy**
 - networks `hill90_edge`, `hill90_internal`, `hill90_agent_internal` all present
