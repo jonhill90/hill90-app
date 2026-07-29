@@ -103,7 +103,52 @@ load_secrets() {
     # shellcheck disable=SC2064  # early expansion of $temp_file is intentional
     trap "rm -f '$temp_file'" RETURN
 
-    sops -d "$secrets_file" | _export_env_pairs
+    # Decrypt to the temp file, THEN feed _export_env_pairs by redirect.
+    #
+    # This was `sops -d "$secrets_file" | _export_env_pairs`, and that shipped a
+    # production incident. The right-hand side of a pipe runs in a subshell, so
+    # the function's `set -a; source` exported into a shell that exited
+    # immediately and nothing reached the caller. Every variable arrived unset,
+    # `docker compose` substituted "" for each one with only a warning, the
+    # container passed a healthcheck that probes the port, and hill90.com served
+    # app-ui with AUTH_SECRET empty and /api/auth/signin returning 500
+    # MissingSecret.
+    #
+    # The temp file was already being created here and never used — the redirect
+    # was the original intent. Do not reintroduce the pipe; the shape is asserted
+    # against in tests/scripts/secrets-loader.bats.
+    sops -d "$secrets_file" > "$temp_file"
+    _export_env_pairs < "$temp_file"
+}
+
+# ---------------------------------------------------------------------------
+# Assert that named variables are set AND non-empty.
+#
+# This is the cause fix rather than the symptom fix. A loader that silently
+# exports nothing must not be able to produce a green deploy again, and the
+# failure mode here was empty-string rather than unset — so a presence-only
+# check (`[ -v NAME ]`, or `${NAME+x}`) would have passed on the broken system.
+# Same class as the pg_isready gate that reported a healthy database it could not
+# authenticate to.
+# ---------------------------------------------------------------------------
+require_secrets() {
+    local missing=() name
+    for name in "$@"; do
+        if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+    done
+    [ ${#missing[@]} -eq 0 ] && return 0
+
+    die "These variables are unset or EMPTY after loading secrets:
+
+$(printf '  %s\n' "${missing[@]}")
+Each is required by the stack being deployed. An empty value is not a missing
+key: the secrets store may be correct while the loader failed to export it, which
+is what caused hill90.com to serve app-ui with a blank AUTH_SECRET.
+
+Check in this order:
+  1. sops -d infra/secrets/<env>.enc.env | grep '^<KEY>='   is it in the store?
+  2. does load_secrets run in the caller's shell, not a subshell or pipe?
+  3. is SOPS_AGE_KEY_FILE pointing at a key that can decrypt this store?"
 }
 
 # Read KEY=VALUE lines on stdin and export them, quoting each value so that
