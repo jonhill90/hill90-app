@@ -11,7 +11,8 @@
 # pipe runs in a subshell, so `set -a; source` exported into a shell that exited
 # immediately and nothing reached the caller. Nothing errored. `docker compose`
 # then substituted "" for every unset variable with only a warning, and the
-# container passed its healthcheck because the healthcheck probes the port.
+# container still reported healthy — its healthcheck is an HTTP GET of /api/health
+# asserting 200, which does not touch auth.
 #
 # Deliberately dependency-free: no sops, no age key, no Docker, no VPS. The bug is
 # in variable scoping, so it reproduces with a plaintext fixture and must be
@@ -168,7 +169,12 @@ EOF
     # The shape that caused the incident. Guards against it returning anywhere.
     run bash -c "
         cd '$REPO_ROOT'
-        grep -nE '\\|[[:space:]]*_export_env_pairs' scripts/*.sh | grep -vE ':[[:space:]]*#' || true
+        # tr the files to a single line first: a pipe split across two lines
+        # defeated a per-line grep, and the audit proved it.
+        for f in scripts/*.sh; do
+            sed -E 's/^[[:space:]]*#.*//' \"\$f\" | tr '\\n' ' ' \
+              | grep -oE '\\|[[:space:]]*_export_env_pairs' | sed \"s|^|\$f: |\"
+        done || true
     "
     [ -z "$output" ]
 }
@@ -229,4 +235,74 @@ EOF
         grep -q 'model-router-public.pem' scripts/_common.sh
     "
     [ "$status" -eq 0 ]
+}
+
+# --- gaps an adversarial audit found in the first version of this suite -----
+
+@test "exports must reach a CHILD PROCESS, not just the shell (set -a variant)" {
+    # The audit removed `set -a` from _export_env_pairs and the entire suite still
+    # passed, while reproducing the incident exactly: variables set in the shell,
+    # the gate satisfied, docker compose seeing nothing. compose is a child
+    # process, so this asserts what a child sees.
+    _stub_sops
+    printf 'AUTH_SECRET=child-visible\n' > "$FIXTURE"
+    run bash -c "
+        export PATH=\"$BATS_TEST_TMPDIR/bin:\$PATH\"
+        export SOPS_AGE_KEY_FILE='$BATS_TEST_TMPDIR/age.key'
+        unset APP_ENV_FILE
+        source '$REPO_ROOT/scripts/_common.sh'
+        load_secrets prod '$FIXTURE' >/dev/null 2>&1
+        # a genuine child process, as docker compose is
+        bash -c 'printf \"CHILD=[%s]\\n\" \"\$AUTH_SECRET\"'
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHILD=[child-visible]"* ]]
+}
+
+@test "require_secrets fails on a shell variable that was never exported" {
+    run bash -c "
+        source '$REPO_ROOT/scripts/_common.sh'
+        AUTH_SECRET=set-but-not-exported
+        require_secrets AUTH_SECRET
+    "
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"AUTH_SECRET"* ]]
+}
+
+@test "require_secrets refuses to pass when called with no arguments" {
+    run bash -c "source '$REPO_ROOT/scripts/_common.sh'; require_secrets"
+    [ "$status" -ne 0 ]
+}
+
+@test "stack_secrets matches what each prod compose file interpolates" {
+    # Guards the table against drift. The audit reduced ui) to an empty list and
+    # the whole suite stayed green.
+    #
+    # `|| true` on every grep is load-bearing: _common.sh sets `set -euo pipefail`,
+    # so a grep matching nothing aborts the loop. That silently truncated an
+    # earlier version of this test at the first stack with no required variables.
+    run bash "$BATS_TEST_DIRNAME/table-check.sh" "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+}
+
+@test "cmd_deploy still calls require_secrets and the interpolation gate" {
+    # The audit deleted the whole gate block from cmd_deploy and the suite stayed
+    # green. This asserts the wiring exists, not merely the helpers.
+    run bash -c "
+        cd '$REPO_ROOT'
+        sed -n '/^cmd_deploy()/,/^}/p' scripts/deploy.sh > /tmp/cd.\$\$
+        grep -q 'require_secrets' /tmp/cd.\$\$ && grep -q 'require_compose_interpolation' /tmp/cd.\$\$
+        rc=\$?; rm -f /tmp/cd.\$\$; exit \$rc
+    "
+    [ "$status" -eq 0 ]
+}
+
+@test "stack_secrets fails closed for an unknown stack" {
+    run bash -c "
+        cd '$REPO_ROOT'
+        source scripts/_common.sh >/dev/null 2>&1
+        eval \"\$(sed -n '/^stack_secrets()/,/^}/p' scripts/deploy.sh)\"
+        stack_secrets not-a-real-stack
+    "
+    [ "$status" -ne 0 ]
 }

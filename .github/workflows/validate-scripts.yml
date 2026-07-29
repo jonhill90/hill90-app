@@ -1,0 +1,49 @@
+name: Validate Scripts
+
+# Separate from ci.yml deliberately.
+#
+# ci.yml is workflow_dispatch-only "by design", because this repo had no deploy
+# target when it was written. A `shell` job added there would never run — an audit
+# caught exactly that, after a commit message of mine claimed the tests were
+# "enforced rather than remembered". They were not: they ran when someone
+# remembered to click.
+#
+# These tests are cheap, need no services, and guard a production incident
+# (hill90.com served app-ui with a blank AUTH_SECRET because the secrets loader
+# exported into a subshell). They run on every push and every pull request so they
+# can be a required check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bats:
+    name: scripts (bats)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned rather than `apt-get install bats`. The apt version is 1.2.1 on
+      # ubuntu-22.04, which predates BATS_TEST_TMPDIR (bats 1.4.0) — the suite
+      # would break on a runner-image change rather than on a code change.
+      - name: Install bats (pinned)
+        run: |
+          npm install -g bats@1.11.0
+          bats --version
+
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh tests/scripts/*.sh; do
+            bash -n "$f" && echo "ok  $f"
+          done
+
+      # Recursive: `bats tests/scripts/` is non-recursive, so a test added in a
+      # subdirectory would be skipped silently.
+      - name: Run bats tests
+        run: bats --recursive tests/scripts/

@@ -311,6 +311,25 @@ jobs:
             deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
             "cd ${VPS_APP_PATH} && bash scripts/deploy.sh verify ${{ inputs.service }} prod"
 
+      # The check that would have caught the incident this fix exists for.
+      #
+      # `ui` deployed green with a blank AUTH_SECRET: the homepage was 200, the
+      # container healthy, and /api/auth/signin returned 500 MissingSecret. Nothing
+      # in the pipeline looked at an auth surface. A healthy container and a
+      # working signin page are different claims.
+      - name: Smoke the auth surface
+        if: inputs.dry_run != true && inputs.service == 'ui'
+        run: |
+          host="${{ vars.BASE_DOMAIN || 'hill90.com' }}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://${host}/api/auth/signin" || echo 000)
+          echo "https://${host}/api/auth/signin -> ${code}"
+          case "$code" in
+            5*|000)
+              echo "::error::/api/auth/signin returned ${code}. The container may be healthy while auth is broken — this is exactly how a blank AUTH_SECRET shipped green."
+              exit 1 ;;
+            *) echo "auth surface responded ${code} (not 5xx)" ;;
+          esac
+
       # The tenancy contract runs the other way too: a tenant deploy must not
       # degrade the platform. Hill90's baseline is 13 containers, 0 unhealthy.
       - name: Verify the Hill90 baseline is unchanged
