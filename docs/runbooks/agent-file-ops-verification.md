@@ -78,7 +78,8 @@ Could not live-test Claude Sonnet inference because the agent was running with a
 
 ## Test Environment
 
-- VPS: remote.hill90.com (Tailscale)
+- VPS: `<VPS_HOST>` (Tailscale) — address in SOPS, `infra/secrets/prod.enc.env`
+  key `TAILSCALE_IP`
 - Agent container: `agentbox-live-chat-single-0315a`
 - Auth: testuser01 via password grant (directAccessGrants enabled temporarily, disabled after test)
 - Thread ID: `24f03872-696b-43c3-8450-5e8e8634d93b`

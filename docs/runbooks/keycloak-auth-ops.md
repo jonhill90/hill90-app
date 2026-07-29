@@ -4,6 +4,10 @@
 
 This runbook consolidates four related operational procedures around Keycloak authentication, test user management, and API testing via password grant.
 
+`<VPS_HOST>` below is the VPS's Tailscale address, or your local `~/.ssh/config`
+alias for it. The address is in SOPS: `infra/secrets/prod.enc.env`, key
+`TAILSCALE_IP`.
+
 ---
 
 ## Table of Contents
@@ -36,7 +40,7 @@ SOPS_AGE_KEY_FILE=infra/secrets/keys/age-prod.key \
   bash scripts/secrets.sh get infra/secrets/prod.enc.env KC_ADMIN_PASSWORD
 
 # From Vault (on VPS via SSH)
-ssh deploy@remote.hill90.com
+ssh deploy@<VPS_HOST>
 docker exec -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN="$BAO_TOKEN" openbao \
   bao kv get secret/auth/config
 ```
@@ -62,7 +66,7 @@ SOPS_AGE_KEY_FILE=infra/secrets/keys/age-prod.key \
 **Step 3 — Update Vault (on VPS):**
 
 ```bash
-ssh deploy@remote.hill90.com
+ssh deploy@<VPS_HOST>
 
 # Generate root token (required for kv writes)
 # See docs/runbooks/vault-unseal.md for generate-root procedure
@@ -129,7 +133,7 @@ If `testuser01` does not exist yet:
 ### Seeding Credentials to Vault
 
 ```bash
-ssh deploy@remote.hill90.com
+ssh deploy@<VPS_HOST>
 
 docker exec -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN="$ROOT_TOKEN" openbao \
   bao kv put secret/ops/verification \
