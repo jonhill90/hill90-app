@@ -1,8 +1,10 @@
 # hill90-app
 
-An AI agent platform that runs locally in Docker. Not currently deployed
-anywhere — the Hill90 VPS was rebuilt in June 2026 and this stack was not
-redeployed — but the local stack is verified working as of 2026-07-26.
+An AI agent platform that runs locally in Docker and, since 2026-07-29, in
+production as a tenant of the [Hill90](https://github.com/jonhill90/Hill90)
+platform. [hill90.com](https://hill90.com) serves the UI on a Let's Encrypt
+certificate. Four of eight stacks are deployed and healthy — `ui`, `db`, `auth`
+and `api`. See [Production](#production) for what is not.
 
 ```bash
 ./scripts/local.sh up
@@ -216,17 +218,64 @@ Node, Playwright and a shell environment.
 
 The infrastructure stayed in Hill90 and is **not** reproduced: Ansible VPS
 bootstrap, Traefik and its ACME configuration, the LGTM observability stack,
-OpenBao/SOPS secrets tooling, Tailscale, the deploy scripts and per-service
-deploy workflows, and `services/dns-manager` (which despite its path was
+OpenBao, Tailscale, and `services/dns-manager` (which despite its path was
 infrastructure — a DNS-01 ACME webhook Traefik depended on). That service no longer
 exists anywhere: Hill90 moved DNS to Cloudflare on 2026-07-27 and deleted it, and Traefik
 now solves DNS-01 with lego's built-in `cloudflare` provider. The capability is unchanged;
 the component is gone.
 
-So there is no deployment path in this repo. `deploy/compose/prod/*.yml`
-describes how the services *were* wired on the VPS and is preserved as a
-specification, not as something you can run. Redeploying would mean pairing it
-with an infrastructure repo again.
+This repo now carries its own deploy path — `scripts/deploy.sh`, a SOPS secrets
+store under `infra/secrets/`, and a GitHub Actions workflow — built here rather
+than inherited from Hill90. See [Production](#production).
+
+## Production
+
+The app runs as a **tenant** of the Hill90 platform. It does not own the host or
+the edge: `hill90_edge` and `hill90_internal` are consumed as external networks
+that Hill90's infra stack creates. Network, volume and container names are
+parameterised through `NETWORK_PREFIX`, `VOLUME_PREFIX` and `CONTAINER_PREFIX`,
+so one set of compose files serves both local and production.
+
+Deployment is **pipeline-only**, over SSH from a GitHub Actions runner joined to
+the tailnet. It is never run from a workstation.
+
+```bash
+gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
+```
+
+`workflow_dispatch` only, with inputs `service`, `dry_run` and
+`confirm_public_deploy`. `dry_run` runs every guard — secrets, tenancy contract,
+host paths — and stops before deploying anything.
+
+| Stack | State as of 2026-07-29 |
+|---|---|
+| `ui`, `db`, `auth`, `api` | deployed, healthy |
+| `knowledge` | crash-looping; fix merged to `main`, not yet deployed |
+| `ai` | deployed, unhealthy |
+| `mcp`, `minio` | never deployed |
+
+Do not read the table as a roadmap. It is the state of the host.
+
+### Signing in
+
+[hill90.com](https://hill90.com) → **Sign in** redirects to
+`app-auth.hill90.com`, the app's own Keycloak, using PKCE and the `hill90-ui`
+client. Accounts are created by the operator in the `hill90` realm with
+temporary passwords that must be changed at first login. No credentials are
+published here, and none are seeded — see
+[RESURRECTION.md](RESURRECTION.md#10-the-production-realm-ships-with-no-users--open)
+for why that is a known gap rather than an oversight.
+
+### Two Keycloaks, two Postgres
+
+Production currently runs both Hill90's platform services and the app's own:
+Hill90 holds realm `platform` on `auth.hill90.com`, the app holds realm `hill90`
+on `app-auth.hill90.com`, and each has its own Postgres with separate volumes.
+**Whether these consolidate is an open question and is not decided here.**
+
+The tenancy is detachable *by design* — the app declares what it consumes rather
+than assuming it. That has **not** been tested by actually detaching it. No
+yank-out test has been run.
 
 ## History
 
@@ -241,28 +290,31 @@ services/           the application (8 services)
 platform/ai/        LiteLLM model-router config
 platform/auth/      Keycloak realm, clients, and the hill90 theme
 platform/data/      Postgres database bootstrap
-deploy/compose/     prod and dev compose definitions (prod is spec-only)
-scripts/            local stack driver; two database provisioners that cannot
-                    currently run (see below)
+deploy/compose/     prod compose definitions, plus the local override layer
+infra/secrets/      SOPS-encrypted production secrets store
+scripts/            local stack driver, tenant deploy script, database
+                    provisioners
 tests/e2e/          Playwright suites
 docs/               architecture, decisions, app runbooks
 docs/extraction/    provenance, verification output, Hill90 commit map
 PRD.md / SPEC.md    why and how this extraction was done
 ```
 
-`scripts/provision-akm-db.sh` and `scripts/provision-litellm-db.sh` **cannot run as
-extracted.** Both source `scripts/_common.sh`, which was never extracted and does not
-exist in this repo, so under `set -e` they die at line 7. Both also hardcode
-`--username postgres`, and the Postgres they were written against has `hill90` as its only
-role. The local stack does not use them — `platform/data/postgres/init.sh` runs as a
-Postgres entrypoint script instead — so this blocks nothing today, but the scripts are
-not usable in their current form.
+`scripts/provision-akm-db.sh` and `scripts/provision-litellm-db.sh` were unusable
+as extracted — both sourced a `scripts/_common.sh` that had never been extracted,
+so under `set -e` they died at line 7, and that masked three further bugs. All
+four are fixed: `_common.sh` now exists, both scripts resolve
+`${PG_CONTAINER:-${CONTAINER_PREFIX:-}app-postgres}` rather than Hill90's
+`postgres`, and they run one `psql` invocation per target database. The local
+stack still does not use them — `platform/data/postgres/init.sh` runs as a
+Postgres entrypoint script instead.
 
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs unit tests only and
-is gated to `workflow_dispatch` — it never fires on its own, because this repo has no
-deploy target.
+is gated to `workflow_dispatch` — it never fires on its own. The deploy workflow
+is dispatch-only for the same reason: a merge should not deploy to production
+by itself.
 
 **The suites pass.** Run on `main` at `e04aa6a` on 2026-07-26: all six jobs green in
 2m26s, **1953 tests, zero failures**. See [`RESURRECTION.md`](RESURRECTION.md#8-ci-is-gated-off--still-gated-and-the-suites-pass)

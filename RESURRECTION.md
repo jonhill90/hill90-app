@@ -5,12 +5,15 @@ been done about it. Originally a list of things to fix; now mostly a record of
 fixes, kept because several of these were subtle and the reasoning is worth
 having next time someone touches the compose or auth wiring.
 
-**Status: the local stack runs, and the test suites pass.**
+**Status: the local stack runs, the test suites pass, and the app is deployed to
+production as a Hill90 tenant.**
 `./scripts/local.sh up` brings up nine healthy containers and a working login;
 CI on `main` is green across all six jobs, 1953 tests, zero failures (§8).
 Items 1–5 and 8 below are resolved; what remains open is called out as such.
 
-There is still no deployment path — see item 2.
+A deployment path now exists and has been used — see item 2. Four of eight
+stacks are deployed and healthy; `knowledge` and `ai` are not working and `mcp`
+and `minio` have never been deployed.
 
 ---
 
@@ -36,10 +39,32 @@ current architecture and could not build at all, so it was replaced rather than
 repaired: `compose/local.yml` covers postgres, minio, keycloak, litellm, api, ai,
 knowledge, mcp and ui. See [README](README.md#running-locally).
 
-## 2. There is no deployment path — STILL OPEN (by design)
+## 2. There is no deployment path — RESOLVED
 
-The infrastructure stayed in Hill90. `deploy/compose/prod/*.yml` is preserved as
-a specification, not as something runnable. What it assumes but does not provide:
+This was open by design for most of the extraction's life. It is no longer true:
+the app was deployed to the Hill90 VPS on 2026-07-29 from a GitHub Actions
+workflow in this repository, and `hill90.com` serves the UI on a Let's Encrypt
+certificate.
+
+What was built here rather than inherited: `scripts/deploy.sh` and
+`scripts/_common.sh`, a SOPS-encrypted store at `infra/secrets/prod.enc.env`, and
+`.github/workflows/deploy.yml` ("Manual Deploy App (Prod)"). Deploys run over SSH
+from the runner via Tailscale — never from a workstation — and the workflow is
+`workflow_dispatch`-only with a `dry_run` mode that runs every guard and stops
+before changing anything.
+
+The app deploys as a **tenant**: it consumes `hill90_edge` and `hill90_internal`
+as external networks that Hill90 creates, and parameterises names through
+`NETWORK_PREFIX`, `VOLUME_PREFIX` and `CONTAINER_PREFIX` so one set of files
+serves both environments. It is detachable in design only — **no yank-out test
+has been run.**
+
+Not everything is deployed. `ui`, `db`, `auth` and `api` are healthy;
+`knowledge` is crash-looping with its fix merged but not deployed; `ai` is
+unhealthy; `mcp` and `minio` have never been deployed.
+
+The original analysis, kept because it is what the design answers — what
+`deploy/compose/prod/*.yml` assumed but did not provide:
 
 - **Three external Docker networks** — `hill90_edge`, `hill90_internal`, and
   `hill90_agent_internal`, all declared `external: true`. All three were created
@@ -57,15 +82,15 @@ a specification, not as something runnable. What it assumes but does not provide
   exists in Hill90 either.** DNS moved to Cloudflare on 2026-07-27 and the service was
   deleted; Traefik now solves DNS-01 with lego's built-in `cloudflare` provider. The
   capability survives as configuration, so this is no longer a missing dependency.
-- **The deploy tooling** — `scripts/deploy.sh`, the `Makefile` targets, and the
-  per-service GitHub Actions deploy workflows all stayed in Hill90.
+- **The deploy tooling** — `scripts/deploy.sh` and the per-service GitHub Actions
+  deploy workflows stayed in Hill90. Both have since been rebuilt here, following
+  Hill90's shape rather than inventing a second dialect. The `Makefile` targets
+  were not; there is still no `Makefile` in this repo.
 
-**Resolved locally, still open for deployment.** `compose/local.yml` takes the
-second option: it creates `hill90_local` plus the two agent networks itself, and
-publishes ports instead of using Traefik labels. `deploy/compose/prod/*.yml` is
-untouched and still assumes the Hill90 infrastructure. Redeploying to a homelab
-means pairing this repo with an infrastructure repo again, or extending the local
-compose with an edge proxy.
+**Resolved.** `compose/local.yml` remains the standalone local path, creating its
+own networks and publishing ports. `deploy/compose/prod/*.yml` is now the
+deployed article rather than a specification, with `deploy/compose/overrides/`
+layering local differences onto the same files instead of forking them.
 
 ## 3. Secrets have no source — FIXED for local
 
@@ -207,8 +232,10 @@ shells too.
 ## 8. CI is gated off — STILL GATED, and the suites PASS
 
 `.github/workflows/ci.yml` runs unit tests only and is `workflow_dispatch`-only.
-Deliberately manual — this repo has no deploy target, so nothing should fire on
-push. Now that the local stack runs, it is also testable end-to-end by hand.
+Deliberately manual. The original reason was that this repo had no deploy target;
+now that it has one, the reason is stronger rather than weaker — a merge should
+not deploy to production by itself. `deploy.yml` is dispatch-only for the same
+reason.
 
 **The tests pass.** Run on `main` at `e04aa6a` on 2026-07-26, all six jobs
 green in 2m26s:
@@ -269,3 +296,29 @@ deploy workflows all remain in
 [docs/extraction/PROVENANCE.md](docs/extraction/PROVENANCE.md) for the full
 exclusion list, the reason for each, and the reconciliation audit against
 Hill90's removal list.
+
+## 10. The production realm ships with no users — OPEN
+
+The two realm imports disagree about accounts, and only one of them is
+reproducible:
+
+| Import | Realm | Realm roles | Users |
+|---|---|---|---|
+| `compose/local/keycloak/realm-local.json` | `hill90` | `user`, `admin` | 1 — `dev` / `dev@localhost`, both roles |
+| `platform/auth/keycloak/hill90-realm.json` | `hill90` | `user`, `admin` | **0** |
+
+So a local stack has a working account the moment it starts, and production has
+none. The realm imports cleanly and OIDC discovery answers, but nobody can sign
+in until an operator creates an account by hand.
+
+Two accounts were created that way on 2026-07-29 — `jon` and `hill90admin`, with
+temporary passwords that must be changed at first login. **They exist only in
+`app-postgres`.** They are not in any import, not in the SOPS store, and not in
+any script. Rebuilding the app's database — `deploy.sh teardown db` keeps the
+volume, but a volume loss or a deliberate reset does not — deletes both and locks
+everyone out of production with no path back except direct Keycloak admin access.
+
+This is recorded rather than fixed because the fix is a real decision, not a
+typo: seeding an account into a committed realm import means deciding what
+credential it carries and how that is rotated, and the local file's answer
+(`dev` / `dev`) is not one production can copy.
