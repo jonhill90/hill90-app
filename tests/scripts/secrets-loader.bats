@@ -172,3 +172,61 @@ EOF
     "
     [ -z "$output" ]
 }
+
+# --- akm key materialisation (the ai/knowledge outage) ---------------------
+
+@test "an inlined PEM expands to a parseable key, and does NOT parse unexpanded" {
+    # Delegated to a helper: the awk that inlines a PEM does not survive being
+    # nested inside a bats double-quoted `run bash -c` string.
+    run bash "$BATS_TEST_DIRNAME/pem-escape-check.sh" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"EXPANDED_OK"* ]]
+    [[ "$output" == *"LITERAL_REJECTED"* ]]
+}
+
+@test "materialise_akm_keys dies when a signing key is absent" {
+    printf 'OTHER=fine\n' > "$FIXTURE"
+    run bash -c "
+        export APP_ENV_FILE='$FIXTURE'
+        source '$REPO_ROOT/scripts/_common.sh'
+        load_secrets prod >/dev/null 2>&1
+        materialise_akm_keys
+    "
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"AKM_SIGNING_PRIVATE_KEY"* ]]
+}
+
+@test "materialise_akm_keys dies on a key whose escapes were not expanded" {
+    # Simulates a store value that somehow arrives with real newlines already
+    # mangled — the parse check must catch it rather than write garbage.
+    printf 'AKM_SIGNING_PRIVATE_KEY=not-a-key\nMODEL_ROUTER_SIGNING_PRIVATE_KEY=also-not-a-key\n' > "$FIXTURE"
+    run bash -c "
+        export APP_ENV_FILE='$FIXTURE'
+        source '$REPO_ROOT/scripts/_common.sh'
+        load_secrets prod >/dev/null 2>&1
+        materialise_akm_keys
+    "
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"did not parse as a key"* ]]
+}
+
+@test "cmd_deploy materialises akm keys for ai and knowledge" {
+    run bash -c "
+        cd '$REPO_ROOT'
+        sed -n '/^cmd_deploy()/,/^}/p' scripts/deploy.sh | grep -q 'materialise_akm_keys'
+    "
+    [ "$status" -eq 0 ]
+}
+
+@test "the akm public key filenames match what the services read" {
+    # knowledge reads /etc/akm/public.pem, ai reads /etc/akm/model-router-public.pem.
+    # A rename in one place and not the other is silent until deploy.
+    run bash -c "
+        cd '$REPO_ROOT'
+        grep -q 'AKM_PUBLIC_KEY_PATH=/etc/akm/public.pem' deploy/compose/prod/docker-compose.knowledge.yml
+        grep -q 'PUBLIC_KEY_PATH=/etc/akm/model-router-public.pem' deploy/compose/prod/docker-compose.ai.yml
+        grep -q 'out/public.pem' scripts/_common.sh
+        grep -q 'model-router-public.pem' scripts/_common.sh
+    "
+    [ "$status" -eq 0 ]
+}

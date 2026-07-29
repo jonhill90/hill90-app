@@ -211,6 +211,88 @@ truncated signing key and a deploy that looks entirely successful."
 }
 
 # ---------------------------------------------------------------------------
+# Materialise the AKM public keys into the akm-keys volume.
+#
+# services/knowledge reads /etc/akm/public.pem and services/ai reads
+# /etc/akm/model-router-public.pem, both from the shared `akm-keys` volume which
+# they mount read-only. Nothing populated that volume, so on the VPS it was empty:
+# knowledge crash-looped with
+#   FileNotFoundError: [Errno 2] No such file or directory: '/etc/akm/public.pem'
+# and ai started but reported {"status":"not_ready","errors":["public_key_not_loaded"]},
+# giving 503 on /health/ready and an unhealthy container.
+#
+# The store holds the PRIVATE halves. This mirrors gen_keys() in scripts/local.sh,
+# which is the app's own established mechanism: derive the public halves with
+# `openssl pkey -pubout` and use exactly the filenames the services expect. Hill90
+# has no equivalent to copy — no compose `secrets:` blocks and no key-writing step
+# anywhere — so there is no platform pattern being diverged from here.
+#
+# The escapes matter. The store keeps PEMs inlined with literal \n, because
+# _export_env_pairs requires single-line values. `printf '%b'` expands them back to
+# real newlines. A PEM written with literal backslash-n parses as garbage, and
+# openssl would accept the file and fail later somewhere else — so each key is
+# parsed immediately after writing and the deploy dies here if it does not.
+# ---------------------------------------------------------------------------
+
+akm_volume() { printf '%s_app-akm-keys' "${VOLUME_PREFIX:-prod}"; }
+
+materialise_akm_keys() {
+    local vol tmp
+    vol="$(akm_volume)"
+
+    require_secrets AKM_SIGNING_PRIVATE_KEY MODEL_ROUTER_SIGNING_PRIVATE_KEY
+
+    tmp="$(mktemp -d)"
+    chmod 700 "$tmp"
+    # shellcheck disable=SC2064  # early expansion is intentional
+    trap "rm -rf '$tmp'" RETURN
+
+    # %b expands the \n escapes the store keeps them inlined with.
+    printf '%b\n' "$AKM_SIGNING_PRIVATE_KEY"          > "$tmp/akm-private.pem"
+    printf '%b\n' "$MODEL_ROUTER_SIGNING_PRIVATE_KEY" > "$tmp/model-router-private.pem"
+    chmod 600 "$tmp"/*.pem
+
+    # Parse immediately. If the escapes were not expanded, this is where it fails —
+    # not later, elsewhere, in a service that cannot say why.
+    local name
+    for name in akm model-router; do
+        openssl pkey -in "$tmp/$name-private.pem" -noout 2>/dev/null || die \
+"${name} private key did not parse as a key after expanding escapes.
+
+Almost certainly the value reached this shell with literal backslash-n rather than
+real newlines. A PEM written that way is accepted by the filesystem and rejected by
+whatever reads it later, which is the failure mode this check exists to stop."
+    done
+
+    # Names are exactly what the services expect:
+    #   knowledge  AKM_PUBLIC_KEY_PATH=/etc/akm/public.pem
+    #   ai         PUBLIC_KEY_PATH=/etc/akm/model-router-public.pem
+    openssl pkey -in "$tmp/akm-private.pem"          -pubout -out "$tmp/public.pem"
+    openssl pkey -in "$tmp/model-router-private.pem" -pubout -out "$tmp/model-router-public.pem"
+
+    # Seed the volume by piping through a throwaway container. Avoids bind-mounting
+    # a host path and avoids leaving the private halves anywhere near the volume —
+    # only the public halves are copied in.
+    local pub
+    for pub in public.pem model-router-public.pem; do
+        docker run --rm -i -v "${vol}:/out" alpine:3 \
+            sh -c "cat > /out/${pub} && chmod 644 /out/${pub}" < "$tmp/$pub" \
+            || die "could not write ${pub} into volume ${vol}"
+    done
+
+    # Verify from inside the volume, not from the temp dir: this asserts what the
+    # services will actually read.
+    docker run --rm -v "${vol}:/out" alpine:3 \
+        sh -c 'set -e; for f in /out/public.pem /out/model-router-public.pem; do
+                   [ -s "$f" ] || { echo "missing or empty: $f" >&2; exit 1; }
+                   head -1 "$f" | grep -q "BEGIN PUBLIC KEY" || { echo "not a PEM header: $f" >&2; exit 1; }
+               done' \
+        || die "the akm-keys volume does not contain valid public keys after seeding"
+
+    success "akm public keys materialised into ${vol} (public.pem, model-router-public.pem)"
+}
+
+# ---------------------------------------------------------------------------
 # Tenancy contract
 #
 # The app is a tenant of Hill90. It does not create the shared networks and must
