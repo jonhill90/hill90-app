@@ -1,7 +1,18 @@
 # One Keycloak: Migration Runbook
 
-**Status:** PREPARATION ONLY — nothing in this runbook has been executed
+**Status:** STEP 1 IS DONE. Steps 2 onwards are unexecuted.
 **Date:** 2026-07-29
+
+**Step 1 — the realm export — was performed on 2026-07-29 at 08:48 UTC.** It was
+chosen as the one executable step because it only *adds* an artifact: it stops
+nothing, changes nothing and deletes nothing. The artifact is on the VPS at
+
+```
+/opt/hill90/backups/app-realm/20260729_084747/hill90-realm.json
+  -rw------- deploy:deploy  83970 bytes   (directory and parent both 700 deploy:deploy)
+```
+
+**Jon can start at step 2.** What was verified in it is in §1.
 
 Jon decided there should be **one Keycloak**. Today there are two: Hill90's
 platform Keycloak at `auth.hill90.com` (realm `platform`) and the app's at
@@ -24,7 +35,7 @@ which means the code in the checkout is not the code that is running.**
 |---|---|---|
 | 1 | The backup exists | `ssh <VPS_HOST> 'ls -la /opt/hill90/backups/app-db/'` — newest directory holds `app-database.sql` and `app-postgres-data.tar.gz` |
 | 2 | The backup restores | Done 2026-07-29, evidence in §0. To redo: restore into `pgvector/pgvector:pg16` and expect **exit 0 with empty stderr**, then compare table counts against the table in §0 |
-| 3 | You have a verified realm export | `docs/runbooks/scripts/verify-realm-export.sh <file> hill90` prints `EXPORT_LOOKS_COMPLETE`. Produce it from the backup offline (§0) or from the live instance (§1) |
+| 3 | You have a verified realm export | **DONE 2026-07-29 08:48 UTC** — `/opt/hill90/backups/app-realm/20260729_084747/hill90-realm.json`, verified property by property in §1. To re-check: `docs/runbooks/scripts/verify-realm-export.sh <file> hill90` prints `EXPORT_LOOKS_COMPLETE`. **Note the verifier is not on the VPS checkout yet** — the box is 15 commits behind, so copy the file off or update the checkout first |
 | 4 | The import has been rehearsed | Import the artifact into a throwaway stack, export it again, and confirm the password hashes and all three client secrets come back **identical** (§1) |
 | 5 | Both Keycloaks are healthy | `ssh <VPS_HOST> 'docker ps --filter name=keycloak --format "{{.Names}} {{.Status}}"'` — `keycloak` and `app-keycloak` both `(healthy)` |
 | 6 | You know which realms exist where | `ssh <VPS_HOST> 'docker exec postgres psql -U hill90 -d keycloak -tAc "select name from realm"'` → expect `master`, `platform`. Same against `app-postgres` → expect `master`, `hill90`. **If `hill90` already exists on the platform side, stop** — the no-collision assumption in §"The realm choice" no longer holds |
@@ -38,6 +49,12 @@ which means the code in the checkout is not the code that is running.**
 As of 2026-07-29 the running containers still carry the pre-merge configuration.
 **Reading the checkout tells you what will run after the next deploy, not what is
 running now.** Confirm each against the live container, not the file.
+
+**Measured, not assumed:** the VPS checkout at `/opt/hill90-app` is at `f882158`
+(#20) and `origin/main` is at `fb90223` (#35) — **15 commits behind**, and the gap
+includes both #25 and #26. So *none* of the prerequisites below are live. The first
+deploy will also be the first run of the new checkout preflight (#35), which by
+design does not yet exist on the box; it prints the command that fixes that.
 
 | PR | What it changes | Verify it is actually live |
 |---|---|---|
@@ -395,47 +412,172 @@ both accounts, all three client secrets, and the `hill90` role's SCRAM verifier.
 copy taken off the VPS for a restore test is a copy of every app credential; delete
 it when done.
 
-## 1. Export the app realm — no downtime required
+## 1. Export the app realm — DONE, and it needed no downtime
+
+**This step has been executed. You do not need to run it again** unless the realm
+has changed since 2026-07-29 08:48 UTC.
+
+```
+artifact   /opt/hill90/backups/app-realm/20260729_084747/hill90-realm.json
+mode       600, deploy:deploy, 83970 bytes
+directory  700 deploy:deploy, and its parent likewise
+```
 
 **The earlier version of this section was wrong, and it mattered.** It said
 `kc.sh export` requires stopping `app-keycloak`, and told you to accept a login
-outage. That premise has been tested and is false for this image.
+outage. That premise was false for this image, and it is now disproved **on
+production**, not just in a local rehearsal.
 
 `kc.sh export` does not need *this* server stopped — it needs *an* exporter with
-access to the database. Run it as a **throwaway sidecar container on the same
-image, pointed at the same database, while `app-keycloak` keeps serving.**
+access to the database. It ran as a **throwaway `--rm` sidecar on the same image,
+against the same database, while `app-keycloak` kept serving.**
 
-**Verified locally against `quay.io/keycloak/keycloak:26.4.0`** — the exact prod
-image — with the live Keycloak up throughout:
+### Proof that it cost no downtime
+
+`app-keycloak` was compared before and after by container identity, not by a
+health check that could have passed across a restart:
 
 ```
-export of realm 'hill90' requested          KC-SERVICES0034
-export finished successfully                KC-SERVICES0035
-live keycloak during and after:             Up (healthy)
+                    BEFORE                     AFTER
+container id        0a1330bf8dd7…              0a1330bf8dd7…   (identical)
+StartedAt           2026-07-29T05:52:58Z       2026-07-29T05:52:58Z (identical)
+RestartCount        0                          0
+State                                          running, healthy
+
+export output       KC-SERVICES0034 Export of realm 'hill90' requested
+                    KC-SERVICES0035 Export finished successfully
+
+host afterwards     23 running containers (same as before)
+                    Hill90's own 13 containers all present
+                    0 unhealthy containers anywhere
+                    0 sidecar containers left behind
 ```
 
-### The exact command
+An identical container id with an identical `StartedAt` and `RestartCount` still
+zero is the part that matters: the process serving logins never stopped. **A
+"healthy" status alone would not have proved this** — a container that restarted
+would report healthy again within seconds.
+
+### What was verified inside the artifact
+
+Each property was checked, not assumed. **Values are never printed — presence,
+counts and lengths only**, because the file contains client secrets and password
+hashes.
+
+```
+realm                    hill90
+
+users                    2 — jon, hill90admin          <- non-empty, both present
+  jon                    enabled, email present, realmRoles [admin, default-roles-hill90, user]
+                         credential password: hash present (44 chars), salt present, argon2
+  hill90admin            enabled, email present, realmRoles [admin, default-roles-hill90]
+                         credential password: hash present (44 chars), salt present, argon2
+
+clients                  9 total
+  hill90-ui              confidential, secret present (32 chars)
+  hill90-api             confidential, secret present (32 chars)
+  hill90-vault           confidential, secret present (32 chars)
+
+realm_roles mapper on hill90-ui
+  name                   realm-roles
+  type                   oidc-usermodel-realm-role-mapper
+  claim.name             realm_roles          <- NOT realm_access.roles
+  multivalued            true
+  access.token.claim     true
+  any mapper pointing at realm_access.roles instead:  none
+
+signing key providers    4 — rsa-generated, rsa-enc-generated, hmac-generated-hs512, aes-generated
+realm roles              admin, default-roles-hill90, offline_access, uma_authorization, user
+clientScopes             14
+
+RESULT                   ARTIFACT_COMPLETE
+```
+
+The three properties that were the point of doing this at all:
+
+1. **The users array is non-empty and holds both accounts** with real argon2 hash
+   material. A REST partial-export could never contain this (§ table above).
+2. **All three confidential clients carry a `secret`.** This is the whole reason a
+   `kc.sh` export beats the `pg_dump` as a migration vehicle — had the secrets been
+   absent, the export would not have done what §5 assumes it does, and
+   `AUTH_KEYCLOAK_SECRET` would have stopped matching after import.
+3. **The `realm_roles` mapper survived the export, on `hill90-ui`, pointing at
+   `realm_roles`.** That mapper is the thing whose loss silently empties everyone's
+   roles after migration (§7), and `hill90-ui` is the client that mints the claim
+   the api reads.
+
+### Limitations of this artifact, stated plainly
+
+- **It lives on the same host as the Keycloak it protects.** That is where the
+  brief asked for it and it is consistent with the other backups, but a single-host
+  copy is not off-site. If the host is lost, so is this.
+- **It is a point-in-time copy.** Any realm change after 08:48 UTC on 2026-07-29 is
+  not in it. Re-run the command below if that is in doubt — it is cheap and it
+  costs no downtime, which is now a measured fact rather than a claim.
+- **The verifier is not on the VPS checkout.** It merged in #29 and the box is 15
+  commits behind, so re-verifying on the box needs the checkout updated first.
+
+### The exact command that was run, and how to re-run it
+
+This is what produced the artifact above, verbatim apart from the timestamp. It
+writes into `/opt/hill90/backups/`, beside the database backups, rather than
+`/tmp` — the file contains client secrets and password hashes and should not sit
+in a world-readable temp directory.
 
 ```bash
 ssh deploy@<VPS_HOST> '
   set -euo pipefail
   cd /opt/hill90-app
   export SOPS_AGE_KEY_FILE=/opt/hill90/secrets/keys/keys.txt
+
+  STAMP=$(date +%Y%m%d_%H%M%S)
+  DEST=/opt/hill90/backups/app-realm/$STAMP
+  mkdir -p "$DEST"
+  chmod 700 /opt/hill90/backups/app-realm "$DEST"
+
   DB_USER=$(sops -d --extract "[\"DB_USER\"]" infra/secrets/prod.enc.env)
   DB_PASSWORD=$(sops -d --extract "[\"DB_PASSWORD\"]" infra/secrets/prod.enc.env)
-
-  mkdir -p /tmp/realm-export && chmod 777 /tmp/realm-export
+  # Fail closed rather than exporting with empty credentials. This is the lesson
+  # from the secrets-loader incident: a loader that produces nothing must not
+  # yield a green result.
+  [ -n "$DB_USER" ] || { echo "FATAL: DB_USER decrypted empty"; exit 1; }
+  [ -n "$DB_PASSWORD" ] || { echo "FATAL: DB_PASSWORD decrypted empty"; exit 1; }
 
   docker run --rm \
+    --name app-realm-export-sidecar \
     --network hill90_internal \
     --user root \
-    -v /tmp/realm-export:/out \
+    -v "$DEST:/out" \
     -e KC_DB=postgres \
     -e KC_DB_URL=jdbc:postgresql://app-postgres:5432/keycloak \
     -e KC_DB_USERNAME="$DB_USER" \
     -e KC_DB_PASSWORD="$DB_PASSWORD" \
     quay.io/keycloak/keycloak:26.4.0 \
     export --realm hill90 --users same_file --file /out/hill90-realm.json
+
+  # The sidecar runs as root, so the file lands root:root 644. Tighten it.
+  # `chown` does NOT work here: the ssh user is deploy (uid 1000) and cannot
+  # chown a root-owned file. Copy to a deploy-owned file and unlink the original
+  # instead — deploy owns the directory, so it can. This avoids needing sudo.
+  cd "$DEST"
+  umask 077
+  cp hill90-realm.json hill90-realm.deploy.json
+  rm -f hill90-realm.json
+  mv hill90-realm.deploy.json hill90-realm.json
+  chmod 600 hill90-realm.json
+  ls -la hill90-realm.json
+'
+```
+
+**Then confirm nothing was left behind**, because a `--rm` container is only gone
+if the run actually completed:
+
+```bash
+ssh deploy@<VPS_HOST> '
+  docker ps -a --filter name=app-realm-export-sidecar --format "{{.Names}}"   # expect empty
+  docker ps -q | wc -l                                                        # expect 23
+  docker ps --filter health=unhealthy --format "{{.Names}}"                    # expect empty
+  docker inspect app-keycloak --format "{{.RestartCount}} {{.State.Health.Status}}"
 '
 ```
 
