@@ -45,6 +45,13 @@ on:
           checked first, per the runbook.
         type: boolean
         default: false
+      dry_run:
+        description: >-
+          Run every guard against the real host and STOP before deploying.
+          Use this first — it is the only way to test the pipeline without
+          deploying.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,4 +69,5 @@ jobs:
     with:
       service: ${{ inputs.service }}
       confirm_public_deploy: ${{ inputs.confirm_public_deploy }}
+      dry_run: ${{ inputs.dry_run }}
     secrets: inherit
