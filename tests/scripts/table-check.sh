@@ -15,7 +15,13 @@ rc=0
 for f in deploy/compose/prod/docker-compose.*.yml; do
     stack=$(basename "$f" .yml); stack=${stack#docker-compose.}
     case "$stack" in agentbox-images|discord-bot) continue ;; esac
-    want=$(grep -oE '\$\{[A-Z_][A-Z0-9_]*\}' "$f" 2>/dev/null | tr -d '${}' | sort -u | grep -v '^$' || true)
+    # Strip comment lines FIRST. Without this, a comment that merely mentions
+    # ${SOME_VAR} counts as an interpolation — which produced a false failure the
+    # moment a variable was removed from a file but still discussed in the comment
+    # explaining why it was removed.
+    want=$(sed -E 's/^[[:space:]]*#.*//' "$f" \
+            | grep -oE '\$\{[A-Z_][A-Z0-9_]*\}' 2>/dev/null \
+            | tr -d '${}' | sort -u | grep -v '^$' || true)
     got=$(stack_secrets "$stack" 2>/dev/null | tr ' ' '\n' | grep -v '^NONE$' | sort -u | grep -v '^$' || true)
     miss=$(comm -23 <(printf '%s\n' "$want" | grep -v '^$' || true) \
                     <(printf '%s\n' "$got"  | grep -v '^$' || true) || true)
