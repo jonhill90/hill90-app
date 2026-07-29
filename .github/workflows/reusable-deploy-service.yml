@@ -21,6 +21,37 @@ name: Reusable Deploy Service
 #      despite the name, so a wrong path would deploy into the platform's tree.
 #   4. A Hill90 baseline check, because the tenancy contract runs both ways.
 #
+# ---------------------------------------------------------------------------
+# dry_run
+#
+# Without it, the only way to exercise this pipeline is to deploy — which would
+# make the first ever execution, against a working production host, simultaneously
+# the first test of four independent things: whether the runner can join the
+# tailnet, whether the SSH key works, whether SOPS decrypts with the host key, and
+# whether the checkout is where we believe. None of those should be discovered
+# during a real deploy.
+#
+# dry_run runs every guard and stops before the deploy step. Excluded from it:
+# git fetch and git reset --hard on the VPS checkout, docker compose
+# build/pull/up, and the per-container readiness check. The git commands are
+# excluded specifically because they mutate the checkout even though they look
+# harmless.
+#
+# Three things a dry run DOES cause, stated rather than glossed, because "no side
+# effects" would be a claim I cannot defend:
+#
+#   1. The runner registers as an ephemeral tailnet node (tag:github-actions).
+#      That is tailnet state, not VPS state, and it is removed automatically.
+#   2. The SSH logins appear in the host's auth log. A log entry, not a state
+#      change, but it is a trace.
+#   3. cmd_preflight's middleware check runs `docker exec traefik grep`, which
+#      spawns a short-lived read-only process inside Hill90's Traefik container.
+#      Included deliberately: skipping it would mean not testing the check.
+#
+# Nothing in a dry run writes to a filesystem on the VPS, starts or stops a
+# container, or alters the checkout.
+# ---------------------------------------------------------------------------
+#
 # NOTHING HERE HAS EVER RUN. The VPS checkout at /opt/hill90-app now exists; the
 # four repository secrets do not. See the PR body.
 
@@ -35,6 +66,15 @@ on:
         description: >-
           Required for "all". Every stack becomes publicly reachable the moment
           it starts, because production Traefik sets no provider constraints.
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: >-
+          Run every guard and stop before deploying. Proves the runner can join
+          the tailnet, the SSH key works, SOPS decrypts with the host key, the
+          checkout is where expected, and the tenancy contract holds — without
+          changing anything on the host.
         required: false
         default: false
         type: boolean
@@ -68,6 +108,21 @@ jobs:
       VPS_AGE_KEY: ${{ vars.VPS_AGE_KEY || '/opt/hill90/secrets/keys/keys.txt' }}
 
     steps:
+      - name: Mode
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "::notice::DRY RUN — every guard runs, nothing is deployed."
+            echo "=========================================================="
+            echo " DRY RUN for '${{ inputs.service }}'"
+            echo " Nothing will be deployed. The host will not be changed."
+            echo "=========================================================="
+          else
+            echo "::notice::LIVE DEPLOY of '${{ inputs.service }}' to production."
+            echo "=========================================================="
+            echo " LIVE DEPLOY — '${{ inputs.service }}' to production"
+            echo "=========================================================="
+          fi
+
       # ---------------------------------------------------------------------
       # Fail early and loudly, before writing keys or opening connections.
       # ---------------------------------------------------------------------
@@ -103,7 +158,7 @@ jobs:
           echo "All required secrets are present."
 
       - name: Preflight — "all" requires explicit confirmation
-        if: inputs.service == 'all' && inputs.confirm_public_deploy != true
+        if: inputs.service == 'all' && inputs.confirm_public_deploy != true && inputs.dry_run != true
         run: |
           echo "::error::Deploying 'all' requires confirm_public_deploy."
           cat <<'EOF'
@@ -218,7 +273,20 @@ jobs:
           echo "this workflow's env block. Expected mode 600, owned by deploy."
           exit 1
 
+      # The app's own tenancy contract, asserted from the host rather than from the
+      # runner. Entirely read-only: docker network inspect, docker inspect, and
+      # -e/-d/-w tests on the agentbox path. It does not call load_secrets, so the
+      # production defaults apply — NETWORK_PREFIX=hill90 and
+      # AGENTBOX_CONFIG_HOST_PATH=/opt/hill90/agentbox-configs — which is what a
+      # real deploy would use.
+      - name: Verify the tenancy contract on the host
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && bash scripts/deploy.sh preflight prod"
+
       - name: Deploy ${{ inputs.service }}
+        if: inputs.dry_run != true
         env:
           CONFIRM: ${{ inputs.confirm_public_deploy && '1' || '0' }}
         run: |
@@ -237,7 +305,7 @@ jobs:
       # the SSH session closes, which is what catches a container that came up
       # and then died.
       - name: Verify readiness
-        if: inputs.service != 'all'
+        if: inputs.dry_run != true && inputs.service != 'all'
         run: |
           ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
             deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
@@ -255,3 +323,48 @@ jobs:
                echo "::error::Unhealthy containers after deploy: $unhealthy"; exit 1; \
              fi; \
              echo "No unhealthy containers on the host."'
+
+      # Last, and deliberately loud. A dry run that ends in silence looks exactly
+      # like a successful deploy in the Actions UI — same green tick, same
+      # duration. This states what was proven and what was not.
+      - name: Dry run summary — NOTHING WAS DEPLOYED
+        if: inputs.dry_run == true && success()
+        run: |
+          echo "::notice::DRY RUN COMPLETE — nothing was deployed and the host is unchanged."
+          cat <<'EOF'
+
+          ============================================================
+                    DRY RUN COMPLETE — NOTHING WAS DEPLOYED
+          ============================================================
+
+          Proven, end to end, against the real host:
+
+            [x] all four required secrets are present
+            [x] the runner joined the tailnet as tag:github-actions
+            [x] sops installed and decrypted the store with the host age key
+            [x] TAILSCALE_IP extracted and masked
+            [x] SSH to deploy@<vps> succeeded with VPS_SSH_PRIVATE_KEY
+            [x] the app checkout exists at the expected path
+            [x] the host age key is readable by deploy
+            [x] the tenancy contract holds: shared networks, Traefik,
+                @file middlewares, agentbox host path
+            [x] no unhealthy containers on the host
+
+          NOT done, because this was a dry run:
+
+            [ ] git fetch / git reset --hard on the VPS checkout
+            [ ] docker compose build / pull / up
+            [ ] any readiness check of an app container
+            [ ] anything that changes state on the host
+
+          The four unknowns that could only be tested here — tailnet, SSH,
+          SOPS-with-the-host-key, and the checkout path — are now tested.
+
+          To deploy for real, re-run with dry_run disabled.
+          ============================================================
+          EOF
+
+      - name: Deploy summary
+        if: inputs.dry_run != true && success()
+        run: |
+          echo "::notice::DEPLOYED '${{ inputs.service }}' to production."
