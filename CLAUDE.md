@@ -102,10 +102,11 @@ bakes in a `dev` account. Production accounts are created by an operator with
 temporary passwords changed at first login, and they exist only in the app's
 database. No credential belongs in this repo. See `RESURRECTION.md` §10.
 
-**Tenancy detachment.** The yank-out test has been run in part: teardown left
-Hill90 at its 13-container baseline with all shared networks intact, and
-application data survived. **The redeploy half is not finished, so the test is
-not yet passed** (checked 2026-07-29 05:57 UTC).
+**Tenancy detachment — proven.** The yank-out test passed on 2026-07-29:
+teardown left Hill90 at exactly its 13-container baseline with all shared
+networks intact, the redeploy brought the app back to 10 healthy containers,
+`hill90.com` answered 200, and both user accounts survived. Detachability is no
+longer an assumption.
 
 ## Fast facts
 
@@ -119,7 +120,10 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   realm `hill90`). `auth.hill90.com` is **Hill90's**, realm `platform`.
 - Local: UI `http://localhost:13000`, API `:13001`, Keycloak `:18080` — full
   port table in the README.
-- CI (`ci.yml`) and deploy (`deploy.yml`) are both `workflow_dispatch` only.
-  Neither fires on push.
+- CI (`ci.yml`) runs on every pull request — six suites: api (jest), ui
+  (vitest), pytest for ai/knowledge/mcp/agentbox. Deploy (`deploy.yml`) stays
+  `workflow_dispatch` only; a merge must not deploy.
+- Backups live in **Hill90**: `bash scripts/backup.sh backup app-db`. Verified
+  restorable 2026-07-29. Nothing in this repo backs anything up.
 - Eight stacks: `db auth api ai knowledge mcp minio ui`. `api` creates the two
   agent networks, so it precedes `ai` and `knowledge`.
