@@ -367,3 +367,38 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"PIN_HOLDS"* ]]
 }
+
+# --- front and back channel must not diverge --------------------------------
+
+@test "no compose file hardcodes a JWKS URI at a specific Keycloak container" {
+    # KEYCLOAK_JWKS_URI was pinned to http://app-keycloak:8080/... in api and mcp,
+    # so flipping APP_AUTH_HOST moved only the FRONT channel: the login page would
+    # look fine while every authenticated API and MCP call 401'd, and reverting
+    # APP_AUTH_HOST alone would restore the login page and leave calls broken — a
+    # revert that looks like it worked.
+    #
+    # Both services derive the JWKS URI from KEYCLOAK_ISSUER when it is unset, so
+    # leaving it unset makes APP_AUTH_HOST the single knob.
+    run bash -c "
+        cd '$REPO_ROOT'
+        if grep -rn 'KEYCLOAK_JWKS_URI=http' deploy/compose/prod/ 2>/dev/null | grep -v '^\\s*#'; then
+            echo HARDCODED_JWKS; exit 1
+        fi
+        # and the issuer must still be present, or nothing derives the JWKS URI
+        for f in docker-compose.api.yml docker-compose.mcp.yml; do
+            grep -q 'KEYCLOAK_ISSUER=' \"deploy/compose/prod/\$f\" || { echo \"NO_ISSUER \$f\"; exit 1; }
+        done
+        echo SINGLE_KNOB
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SINGLE_KNOB"* ]]
+}
+
+@test "KEYCLOAK_ISSUER and KEYCLOAK_JWKS_URI cannot disagree about host or realm" {
+    # Generalises the #26 defect: two independently-settable values for one OIDC
+    # relationship. Passes only when the JWKS URI is unset (derived) or written
+    # literally in terms of ${KEYCLOAK_ISSUER}.
+    run bash "$BATS_TEST_DIRNAME/issuer-jwks-agree-check.sh" "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ISSUER_JWKS_CANNOT_DIVERGE"* ]]
+}
