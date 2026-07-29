@@ -12,6 +12,50 @@ for it. It is in SOPS at `infra/secrets/prod.enc.env`, key `TAILSCALE_IP`.
 
 ---
 
+## Pre-migration checklist — every line must be true before you start
+
+Each item has the command that proves it. Do not accept a remembered answer for any
+of them; the point of the command is that it is cheap to re-run on the box at 6am.
+
+**Read the second table first. Several prerequisites are MERGED BUT NOT DEPLOYED,
+which means the code in the checkout is not the code that is running.**
+
+| # | Must be true | Prove it |
+|---|---|---|
+| 1 | The backup exists | `ssh <VPS_HOST> 'ls -la /opt/hill90/backups/app-db/'` — newest directory holds `app-database.sql` and `app-postgres-data.tar.gz` |
+| 2 | The backup restores | Done 2026-07-29, evidence in §0. To redo: restore into `pgvector/pgvector:pg16` and expect **exit 0 with empty stderr**, then compare table counts against the table in §0 |
+| 3 | You have a verified realm export | `docs/runbooks/scripts/verify-realm-export.sh <file> hill90` prints `EXPORT_LOOKS_COMPLETE`. Produce it from the backup offline (§0) or from the live instance (§1) |
+| 4 | The import has been rehearsed | Import the artifact into a throwaway stack, export it again, and confirm the password hashes and all three client secrets come back **identical** (§1) |
+| 5 | Both Keycloaks are healthy | `ssh <VPS_HOST> 'docker ps --filter name=keycloak --format "{{.Names}} {{.Status}}"'` — `keycloak` and `app-keycloak` both `(healthy)` |
+| 6 | You know which realms exist where | `ssh <VPS_HOST> 'docker exec postgres psql -U hill90 -d keycloak -tAc "select name from realm"'` → expect `master`, `platform`. Same against `app-postgres` → expect `master`, `hill90`. **If `hill90` already exists on the platform side, stop** — the no-collision assumption in §"The realm choice" no longer holds |
+| 7 | **The realm decision is made and written down** | Not a command. §"The realm choice is OPEN and is Jon's" lists both arguments with the counts. Nothing below is safe to start while this is open, because it decides whether `KC_REALM` is in the change set |
+| 8 | The test user exists, and it is not `jon` | §2. Every token test uses `testuser01` |
+| 9 | You know the current claim shape | `docs/runbooks/scripts/token-claims.sh` against `testuser01`, output kept. §7 — the roles claim is the failure that passes every other check |
+| 10 | A rollback path is written for each step you will run | Each numbered section has one. Read them **before** starting, not after a failure |
+
+### Prerequisites that are on `main` but NOT RUNNING
+
+As of 2026-07-29 the running containers still carry the pre-merge configuration.
+**Reading the checkout tells you what will run after the next deploy, not what is
+running now.** Confirm each against the live container, not the file.
+
+| PR | What it changes | Verify it is actually live |
+|---|---|---|
+| #25 | Pins `app-keycloak`'s own hostname and router rule to the literal `app-auth`, so `APP_AUTH_HOST` no longer moves `app-keycloak` itself — the worst hazard in this migration | `ssh <VPS_HOST> 'docker inspect app-keycloak --format "{{range .Config.Env}}{{println .}}{{end}}" \| grep KC_HOSTNAME'` and `docker inspect app-keycloak --format '{{index .Config.Labels "traefik.http.routers.app-keycloak.rule"}}'`. Both must name `app-auth`, **not** `${APP_AUTH_HOST}` |
+| #26 | Removes the hardcoded `KEYCLOAK_JWKS_URI` from `api` and `mcp`, so the JWKS derives from the issuer and cannot disagree with it | `ssh <VPS_HOST> 'docker inspect app-api app-mcp --format "{{.Name}} {{range .Config.Env}}{{println .}}{{end}}" \| grep -i jwks'`. **Empty output means it is live.** Any `app-keycloak:8080` still there means the old config is running |
+| #28 | Makes the ui health probe's realm read `KC_REALM` instead of a baked-in `hill90` | `ssh <VPS_HOST> 'docker inspect app-ui --format "{{range .Config.Env}}{{println .}}{{end}}" \| grep KC_REALM'` — present means live |
+
+**Labels bake at container creation.** A router rule or hostname is fixed when the
+container is created, so a container started before #25 keeps the old rule no
+matter what the file says. This is why #25 must be *deployed*, not merely merged,
+before step 4 flips anything.
+
+**If #25 is not live, do not run step 4.** Flipping `APP_AUTH_HOST` while
+`app-keycloak`'s own rule still derives from it moves the Keycloak *and* the app
+that points at it in the same action, and the rollback is not symmetric.
+
+---
+
 ## Read this before you touch anything
 
 ### `app-keycloak` holds the only copy of realm `hill90`
@@ -223,35 +267,133 @@ tables present:      realm, user_entity, credential, client, keycloak_role,
 live volume.** That is real and it is the reason the rest of this runbook is less
 frightening than it was.
 
-### The dump has NOT been test-restored
+### The dump HAS been test-restored — 2026-07-29
 
-**A backup nobody has restored is a hypothesis.** Nothing above proves the dump
-restores — only that it contains the right rows. The specific things an untested
-`pg_dumpall` output can still get wrong are ownership and role grants, extension
-availability in the target image (`pgvector` here), and the order of `CREATE
-DATABASE` against a non-empty cluster.
+The earlier version of this section said it had not been, and told you not to call
+it a proven recovery path until someone restored it. Someone has. Restored into a
+throwaway Postgres on the same image the app runs (`pgvector/pgvector:pg16`), from
+the exact file listed above:
 
-**Do not describe this as a proven recovery path until someone has restored it into
-a throwaway Postgres and logged in.** If that has been done since this was written,
-update this section with the date and who did it.
+```
+psql -v ON_ERROR_STOP=0 -U postgres < app-database.sql
+  exit 0        zero lines on stderr        no errors, no warnings
+```
 
-### The dump does NOT make the realm export optional
+The four things an untested `pg_dumpall` can get wrong were each checked rather
+than assumed. Role and ownership: the dump carries `CREATE ROLE hill90` with its
+SCRAM verifier, and applied cleanly. Extensions: it requires `uuid-ossp` and
+`vector`, both present in that image — **restoring into plain `postgres:16` would
+fail on `CREATE EXTENSION vector`.** Ordering against a non-empty cluster: it is a
+cluster dump with its own `CREATE DATABASE` statements, so it wants an empty
+target. Contents: table counts match production **exactly**.
 
-This is worth being precise about, because it is tempting. The reasoning is:
+```
+database          production   restored
+hill90                     0          0     <- genuinely empty in prod too
+hill90_api                32         32
+hill90_akm                14         14
+hill90_litellm            55         55
+keycloak                  89         89
+```
 
-- **What the dump is good for:** recreating **`app-keycloak`'s own database**. That
-  is a rollback and disaster-recovery artifact, and a good one.
-- **Why it cannot carry the migration:** the migration puts realm `hill90` into the
-  **platform** Keycloak, which has its own `keycloak` database holding `master` and
-  `platform` (verified live). Restoring the app's `keycloak` database over the
-  platform's would **replace the platform's realms wholesale and destroy platform
-  SSO.** They are two different databases that happen to share a schema.
-- Extracting one realm from the SQL by hand means untangling a realm's rows across
-  roughly ninety foreign-keyed tables. That is not a supported operation and not one
-  to attempt during a migration.
+And the part that matters for the accounts:
 
-**The dump is the safety net. The realm export is the vehicle. You need both, and
-they are not substitutes.**
+```
+realm hill90   jon          jon@hill90.com     password credential present
+realm hill90   hill90admin  admin@hill90.com   password credential present
+confidential clients with a secret: hill90-api, hill90-ui, hill90-vault
+```
+
+**What is still not proven:** nobody has logged into a Keycloak backed by the
+restored database with either account's real password. The argon2 hash material is
+present and byte-identical round-tripping was demonstrated separately (§1), which
+is strong, but it is inference rather than a login. Treat the accounts as
+recoverable; do not tell anyone the passwords are *verified*.
+
+### Does the dump make the `kc.sh` export unnecessary? Partly — and the useful part is yes
+
+This was the open question. The answer has two halves and they point in opposite
+directions, so state which one you mean.
+
+**As an import mechanism: NO, and attempting it destroys platform SSO.**
+
+The migration puts realm `hill90` into the **platform** Keycloak, whose own
+`keycloak` database holds `master` and `platform` (verified live). Restoring the
+app's `keycloak` database over it replaces those wholesale. Two different databases
+that happen to share a schema. This is not a close call.
+
+Nor can you lift one realm out of the SQL by hand. Measured from the dump itself,
+not estimated:
+
+```
+tables in the keycloak schema         89
+FOREIGN KEY constraints                67
+tables carrying a realm_id column      37
+```
+
+and the 37 is a floor, not the total — `credential` has no `realm_id` at all, it
+hangs off `user_entity`. Reconstructing one realm's closure across that graph, in
+dependency order, during a migration, is not a supported operation.
+
+**As a SOURCE for the export artifact: YES, and this is the useful answer.**
+
+The dump does not replace the export. It replaces **running the export against the
+live `app-keycloak`**. Restore the dump into a throwaway Postgres, point a `kc.sh
+export` sidecar at *that*, and you get the migration artifact with **zero contact
+with production** — nothing read from the live database, nothing attached to a
+production network, no sidecar on the box at all.
+
+Demonstrated end to end with the real backup file. The artifact passes the repo's
+own checker and contains the real production accounts:
+
+```
+docs/runbooks/scripts/verify-realm-export.sh from-dump.json hill90
+
+realm:  hill90
+users:  2      jon (password-hash=True), hill90admin (password-hash=True)
+clients: 9 total, 3 confidential — hill90-api, hill90-ui, hill90-vault all with secrets
+client protocolMappers: 4
+signing key providers:  4
+EXPORT_LOOKS_COMPLETE
+```
+
+**So the operation's shape is:**
+
+| | |
+|---|---|
+| Downtime for the export | **None**, either way — the sidecar export works against a live database (§1) |
+| Contact with production to produce the artifact | **None needed** — restore the backup offline and export from that |
+| Can the dump be imported into the platform Keycloak | **No.** It would destroy `master` and `platform` |
+| Is the export still required | **Yes**, as the import vehicle — but it can be produced from the backup |
+
+The practical consequence: **the entire artifact-production step can be rehearsed
+and completed before anyone touches the platform, from a file that already exists.**
+The only remaining reason to export from the live instance is if changes were made
+after 2026-07-29 06:59 that must come across — check that before choosing.
+
+```bash
+# reproduce the offline path (nothing here touches production)
+docker network create dumprestore
+docker run -d --name dumprestore-db --network dumprestore \
+  -e POSTGRES_PASSWORD=x pgvector/pgvector:pg16          # NOT postgres:16 — needs vector
+# wait for real readiness: pg_isready returns true during bootstrap, before the
+# listener exists. Poll `psql -c 'select 1'` instead.
+docker exec -i dumprestore-db psql -U postgres < app-database.sql
+
+docker run --rm --network dumprestore --user root -v "$PWD/out:/out" \
+  -e KC_DB=postgres -e KC_DB_URL=jdbc:postgresql://dumprestore-db:5432/keycloak \
+  -e KC_DB_USERNAME=postgres -e KC_DB_PASSWORD=x \
+  quay.io/keycloak/keycloak:26.4.0 \
+  export --realm hill90 --users same_file --file /out/from-dump.json
+
+docs/runbooks/scripts/verify-realm-export.sh out/from-dump.json hill90
+docker rm -f dumprestore-db && docker network rm dumprestore
+```
+
+**Handle the dump like a credential store.** It contains argon2 password hashes for
+both accounts, all three client secrets, and the `hill90` role's SCRAM verifier. A
+copy taken off the VPS for a restore test is a copy of every app credential; delete
+it when done.
 
 ## 1. Export the app realm — no downtime required
 
@@ -599,6 +741,26 @@ knowledge base and chat history along with the realm.
 
 That claim exists **only** because of a per-client protocol mapper in the app's
 realm. It is not a Keycloak default.
+
+**Which clients carry it — read out of the real production realm, not assumed.**
+From a `kc.sh` export of the restored backup (§0):
+
+| Client | `realm-roles` mapper | `claim.name` | multivalued |
+|---|---|---|---|
+| `hill90-ui` | **yes** | `realm_roles` | true |
+| `hill90-vault` | **yes** | `realm_roles` | true |
+| `hill90-api` | **no mapper at all** | — | — |
+
+`hill90-api` having none is not a gap. The browser obtains its token from
+`hill90-ui`, and the api validates *that* token — so the claim the api reads at
+`middleware/role.ts:11` is minted by the **ui** client's mapper. **`hill90-ui` is
+the one that must survive the migration.** `hill90-vault` belongs to OpenBao SSO
+and is the infra lane's, not this migration's.
+
+The practical form of the check after any import: confirm the mapper exists on
+`hill90-ui` **and** that its `claim.name` is `realm_roles`, then assert on a real
+token (below). A mapper present with the default claim name is the failure this
+section is about.
 
 **Hill90's own helper defaults to the other name.** `scripts/keycloak.sh:154`:
 
