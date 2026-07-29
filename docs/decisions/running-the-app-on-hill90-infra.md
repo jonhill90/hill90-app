@@ -1402,3 +1402,40 @@ This does not block a `ui`-only first deploy. It blocks `ai` and `knowledge`.
 Both are empty rather than plausible-looking placeholders, deliberately: a fake
 value that looks real fails at runtime with an authentication error from a third
 party, which is harder to diagnose than an obviously absent one.
+
+
+## Post-incident corrections (2026-07-29)
+
+An adversarial audit of the loader fix corrected several statements made in this
+record and in the fix itself. Recorded here rather than quietly amended.
+
+**The `ui` healthcheck is not a port probe.** It is
+`node -e "require('http').get('http://localhost:3000/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1))"`
+— an HTTP GET asserting 200. The conclusion held (it passes regardless of
+`AUTH_SECRET`, because `/api/health` does not touch auth) but the stated reason was
+wrong, and it was repeated in four places.
+
+**There are three deliberately-empty store keys, not two.** `TAVILY_API_KEY`,
+`DISCORD_BOT_TOKEN` and `DISCORD_BOT_SERVICE_TOKEN` all reach containers empty via
+`${VAR:-}`. `CONTAINER_PREFIX` is a fourth empty value, empty by design in
+production.
+
+**Four store keys are read by nothing.** `AUTH_KEYCLOAK_ISSUER`, `AUTH_URL`,
+`DB_NAME` and `TAILSCALE_IP` are in the store, but `docker-compose.ui.yml`
+hardcodes `AUTH_URL` and composes the issuer from
+`${APP_AUTH_HOST}.${BASE_DOMAIN}/realms/${KC_REALM}`. `TAILSCALE_IP` is consumed by
+the workflow rather than by compose. So an operator editing `AUTH_KEYCLOAK_ISSUER`
+or `AUTH_URL` in SOPS gets no effect and no warning — the same silent-divergence
+class as the incident, pointing the other way.
+
+**`discord-bot` and `agentbox-images` are disowned by the tooling.** Neither has an
+entry in `stack_containers`, `stack_secrets`, `stack_summary`, `DEPLOY_ORDER` or the
+dispatcher allowlist, so neither is deployable through `deploy.sh` at all. That is
+consistent with RESURRECTION.md §6 — neither has ever been in an automated deploy —
+but it means the secrets table does not cover them by design rather than by
+oversight.
+
+**`scripts/local.sh` remains a second, ungoverned path.** It passes
+`--env-file .env.local` to compose directly and never sources `_common.sh`, so it
+was never affected by the subshell bug — but it has no non-empty validation either.
+A key missing from `.env.local` still becomes `""` in a local container silently.

@@ -110,7 +110,8 @@ load_secrets() {
     # the function's `set -a; source` exported into a shell that exited
     # immediately and nothing reached the caller. Every variable arrived unset,
     # `docker compose` substituted "" for each one with only a warning, the
-    # container passed a healthcheck that probes the port, and hill90.com served
+    # container still reported healthy: its healthcheck GETs /api/health and asserts
+    # 200, which does not touch auth, and hill90.com served
     # app-ui with AUTH_SECRET empty and /api/auth/signin returning 500
     # MissingSecret.
     #
@@ -118,6 +119,12 @@ load_secrets() {
     # was the original intent. Do not reintroduce the pipe; the shape is asserted
     # against in tests/scripts/secrets-loader.bats.
     sops -d "$secrets_file" > "$temp_file"
+    # An empty decryption previously died with no message at all: the grep inside
+    # _export_env_pairs failed on a file that was never created, and pipefail plus
+    # set -e killed the script silently.
+    [ -s "$temp_file" ] || die "sops decrypted ${secrets_file} to nothing.
+The file exists but produced no output. Check that SOPS_AGE_KEY_FILE
+(${SOPS_AGE_KEY_FILE:-unset}) holds a key that can decrypt this store."
     _export_env_pairs < "$temp_file"
 }
 
@@ -132,9 +139,22 @@ load_secrets() {
 # authenticate to.
 # ---------------------------------------------------------------------------
 require_secrets() {
+    [ $# -gt 0 ] || die "require_secrets called with no arguments — that is a bug in the caller, not a passing check"
+
     local missing=() name
     for name in "$@"; do
-        if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+        # printenv reads the EXPORTED ENVIRONMENT, not the shell variable.
+        #
+        # That distinction is the whole point. `docker compose` is a child process
+        # and interpolates from the environment, so a variable that is set in this
+        # shell but not exported is invisible to it. An earlier version of this
+        # function used [ -z "${!name:-}" ], which reads the shell variable — and
+        # an audit proved that removing `set -a` from _export_env_pairs reproduced
+        # the entire production incident with the whole test suite still green:
+        # variables set, gate satisfied, compose substituting "" anyway.
+        #
+        # Checking printenv means this gate sees exactly what compose will see.
+        if [ -z "$(printenv "$name" 2>/dev/null)" ]; then missing+=("$name"); fi
     done
     [ ${#missing[@]} -eq 0 ] && return 0
 
@@ -290,6 +310,40 @@ whatever reads it later, which is the failure mode this check exists to stop."
         || die "the akm-keys volume does not contain valid public keys after seeding"
 
     success "akm public keys materialised into ${vol} (public.pem, model-router-public.pem)"
+}
+
+# ---------------------------------------------------------------------------
+# Fail if docker compose cannot interpolate ANY variable.
+#
+# require_secrets covers a named list, which is one instance deep: it cannot catch
+# a variable nobody remembered to list. This covers the class, because compose
+# reports every substitution it could not make:
+#
+#   level=warning msg="The \"AUTH_SECRET\" variable is not set. Defaulting to a
+#   blank string."
+#
+# That warning is the exact signal that was present and ignored during the
+# hill90.com incident. Treating it as fatal is what turns a green deploy with
+# blank secrets into a refused deploy.
+# ---------------------------------------------------------------------------
+require_compose_interpolation() {
+    local out unset_vars
+    out="$(docker compose "$@" config 2>&1 >/dev/null)" || true
+    unset_vars="$(printf '%s\n' "$out" \
+        | grep -oE 'The "[A-Za-z_][A-Za-z0-9_]*" variable is not set' \
+        | sed -E 's/The "([^"]+)".*/\1/' | sort -u)"
+
+    [ -z "$unset_vars" ] && return 0
+
+    die "docker compose could not interpolate these variables:
+
+$(printf '  %s\n' $unset_vars)
+Compose does NOT fail on these — it warns and substitutes an empty string, which
+is how hill90.com came to serve app-ui with a blank AUTH_SECRET while the deploy
+reported success. Treated as fatal here.
+
+Either the value is missing from the secrets store, or it was not exported into
+this shell. Check both."
 }
 
 # ---------------------------------------------------------------------------

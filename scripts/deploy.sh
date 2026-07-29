@@ -128,8 +128,14 @@ stack_secrets() {
         knowledge) printf 'DB_USER DB_PASSWORD AKM_INTERNAL_SERVICE_TOKEN LITELLM_MASTER_KEY MODEL_ROUTER_INTERNAL_SERVICE_TOKEN' ;;
         minio)     printf 'MINIO_ROOT_USER MINIO_ROOT_PASSWORD' ;;
         ui)        printf 'AUTH_SECRET AUTH_KEYCLOAK_ID AUTH_KEYCLOAK_SECRET' ;;
-        mcp)       printf '' ;;
-        *)         printf '' ;;
+        # NONE is an explicit sentinel, not an empty string. mcp interpolates no
+        # store variables today, and saying so deliberately is different from a
+        # stack falling through to a silent default.
+        mcp)       printf 'NONE' ;;
+        *)         die "no secrets list defined for stack '$1'. Add one to stack_secrets.
+An unlisted stack previously fell through to an empty list, which meant zero
+required secrets, no warning, and a green deploy — fail-open in the one place that
+exists to fail closed." ;;
     esac
 }
 
@@ -360,15 +366,19 @@ or, if it came from the local tenant path:
     # A loader that exported nothing must not be able to produce a green deploy.
     # This is the cause fix for the hill90.com incident: the store was correct,
     # load_secrets ran in a subshell, every variable arrived empty, docker compose
-    # substituted "" with only a warning, and the container passed a healthcheck
-    # that probes the port. Empty-string is the failure mode, so this checks
-    # non-empty rather than merely present.
-    # shellcheck disable=SC2046  # word splitting is intended: a space-separated list
+    # substituted "" with only a warning, and the container still reported healthy.
+    #
+    # Correction: the ui healthcheck is an HTTP GET of /api/health asserting a 200,
+    # not a port probe as an earlier version of this comment said. It passes
+    # regardless of AUTH_SECRET because /api/health does not touch auth — the
+    # conclusion held, the stated reason did not.
     required="$(stack_secrets "$stack")"
-    if [ -n "$required" ]; then
-        # shellcheck disable=SC2086
+    if [ "$required" = "NONE" ]; then
+        info "${stack} interpolates no variables from the secrets store"
+    else
+        # shellcheck disable=SC2086  # word splitting is intended here
         require_secrets $required
-        success "$(printf '%s' "$required" | wc -w | tr -d ' ') required secrets present and non-empty"
+        success "exported and non-empty: ${required}"
     fi
 
     local -a files=(-f "$compose_file")
@@ -390,6 +400,12 @@ or, if it came from the local tenant path:
     # the old one. There is no error anywhere, which is what makes it dangerous.
     #
     # --ignore-buildable so `pull` does not try to fetch images this repo builds.
+    # Class-level gate: ask compose itself what it could not interpolate, for EVERY
+    # variable rather than a named list. This is the check that would have caught
+    # the hill90.com incident even if AUTH_SECRET had never been added to
+    # stack_secrets.
+    require_compose_interpolation -p "$project_name" "${files[@]}"
+    success "compose interpolated every variable"
     # ai and knowledge mount the akm-keys volume read-only and read their public
     # key from it. Nothing populated that volume, so knowledge crash-looped on
     # FileNotFoundError: /etc/akm/public.pem and ai reported public_key_not_loaded
