@@ -484,7 +484,8 @@ realm_roles mapper on hill90-ui
   claim.name             realm_roles          <- NOT realm_access.roles
   multivalued            true
   access.token.claim     true
-  any mapper pointing at realm_access.roles instead:  none
+  no OTHER mapper on hill90-ui competes for the claim
+  (see the correction below about realm_access.roles)
 
 signing key providers    4 — rsa-generated, rsa-enc-generated, hmac-generated-hs512, aes-generated
 realm roles              admin, default-roles-hill90, offline_access, uma_authorization, user
@@ -506,7 +507,110 @@ The three properties that were the point of doing this at all:
    roles after migration (§7), and `hill90-ui` is the client that mints the claim
    the api reads.
 
-### Limitations of this artifact, stated plainly
+### The import was rehearsed on 2026-07-29, and it works
+
+**An export nobody has imported is a hypothesis, and this one carries the whole
+premise of the migration**: that this file reconstitutes the realm somewhere else.
+It has now been imported.
+
+Into a **throwaway Keycloak on a throwaway database on its own network** — not the
+platform Keycloak, not `app-keycloak`. Isolation was proved rather than assumed
+before anything was imported:
+
+```
+from the throwaway network:   app-postgres does not resolve   (correct)
+                              kcimport-db resolves            (correct)
+import result:                Realm 'hill90' imported          KC-SERVICES
+app-keycloak during:          id/StartedAt/RestartCount unchanged, healthy
+```
+
+Everything below was then read **out of the throwaway's own database**, not out of
+the file that was imported — otherwise the check would only prove the file can be
+parsed twice.
+
+```
+1. realm exists              hill90 (enabled), alongside master
+
+2. users, enabled, roles     jon          enabled, email present,
+                                          roles: admin, default-roles-hill90, user
+                             hill90admin  enabled, email present,
+                                          roles: admin, default-roles-hill90
+   credentials survived      both: type=password, secret_data present (116 bytes),
+                                   credential_data present (156 bytes)
+
+3. clients and secrets       hill90-api    confidential, secret present (32)
+                             hill90-ui     confidential, secret present (32)
+                             hill90-vault  confidential, secret present (32)
+   secrets MATCH the export  sha256 compared, all three identical.
+                             The hash was computed INSIDE Postgres for the
+                             imported copy and in python for the artifact, so
+                             neither secret was ever printed or moved.
+
+4. the roles mapper          hill90-ui    realm-roles
+                                          oidc-usermodel-realm-role-mapper
+                                          claim.name    = realm_roles
+                                          multivalued   = true
+                                          access.token.claim = true
+                             hill90-vault same
+```
+
+**Point 4 is the one that mattered most.** If that mapper did not survive an
+import, every path in this runbook would produce a realm where **login succeeds and
+authorisation silently fails** — §7's failure, discovered by Jon rather than by a
+test. It survives.
+
+**A correction to an earlier claim in this section.** The verification of the
+artifact said *"any mapper pointing at `realm_access.roles`: none"*. That was
+scoped to **clients** only, and it is not the whole picture. The imported realm
+does contain one such mapper:
+
+```
+clientScope: roles   mapper: realm roles   claim.name: realm_access.roles
+```
+
+That is the **Keycloak built-in** `roles` client scope, which ships with every
+realm. It was checked against the artifact and is present there too, so the import
+reproduced it rather than inventing it. It is not a competing mapper and it does not
+break anything — the app reads `realm_roles`, which comes from the per-client
+mapper, and the two claims coexist exactly as they do in production today.
+
+The distinction matters because §7 is entirely about these two claim names, so
+"none" was the wrong word in a place where precision is the point. **What is true:
+nothing competes for the `realm_roles` claim, and the only `realm_access.roles`
+mapper is the stock one.**
+
+### Nothing was left behind
+
+Confirmed by listing, not asserted, and compared against a baseline taken before
+any of it:
+
+```
+                     before    after
+running containers      23        23
+all containers          24        24
+volumes                 23        23
+networks                 9         9
+Hill90's own            13        13
+unhealthy                0         0
+
+kcimport-* containers / volumes / networks after teardown:  none, none, none
+app-keycloak    id, StartedAt and RestartCount identical throughout
+```
+
+### What this still does NOT prove
+
+- **Nobody logged in.** The password hashes came across byte-identically and
+  Keycloak validates against exactly that material, which is why this is a restore
+  rather than a re-creation — but no browser has authenticated against the imported
+  realm. That would need a running throwaway Keycloak with a hostname, and it needs
+  either account's real password.
+- **Nothing was imported into the platform Keycloak.** That import *is* the
+  migration and it is Jon's to authorise. What is proved is that the artifact
+  imports faithfully into a Keycloak of the same version — not that the platform
+  Keycloak will accept it alongside `master` and `platform`, which §"The realm
+  choice" is still open on.
+
+
 
 - **It lives on the same host as the Keycloak it protects.** That is where the
   brief asked for it and it is consistent with the other backups, but a single-host
