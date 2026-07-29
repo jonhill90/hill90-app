@@ -11,6 +11,21 @@
 # Ports are in a 13000/18000 band to avoid colliding with anything already
 # bound on 3000/5432/8054.
 
+# STATUS: live, not a leftover. This is the `--standalone` path.
+#
+# The top-level compose/ directory predates the collapse of the production layout
+# into deploy/compose/, so it reads like something left behind. It is not:
+#
+#   * scripts/local.sh:42 drives THIS file for `./scripts/local.sh up --standalone`,
+#     which exists because deploy/compose/prod/*.yml declare Hill90's networks
+#     `external` and therefore cannot run at all without the platform up.
+#   * compose/local/keycloak/realm-local.json, mounted at line ~112 below, is ALSO
+#     mounted by deploy/compose/overrides/local.auth.yml. So it is load-bearing for
+#     the DEFAULT tenant path too, not only for this one.
+#
+# tests/scripts/compose-mounts.bats fails if that shared file is moved or deleted
+# without the compose references being updated with it.
+
 name: hill90-local
 
 networks:
