@@ -117,6 +117,43 @@ Both overrides are deleted, so both channels derive from `KEYCLOAK_ISSUER` and
 `APP_AUTH_HOST` is one knob. If #26 is not merged, step 4 is not single-revert
 reversible.
 
+### Token validation now depends on the edge — a deliberate tradeoff
+
+**PR #26 changed the network path of token validation.** It is worth understanding
+before the migration, not during an outage.
+
+```
+before  KEYCLOAK_JWKS_URI=http://app-keycloak:8080/realms/hill90/...
+        internal, direct, plain HTTP, inside the Docker network
+
+after   derived from KEYCLOAK_ISSUER = https://app-auth.hill90.com/realms/hill90/...
+        public, out through Traefik and back, TLS
+```
+
+**Why it was done.** OIDC expects the JWKS to correspond to the issuer. Two
+independently-settable values for one relationship is a latent inconsistency, and it
+is the specific inconsistency that made step 4 non-reversible in a single revert:
+flipping `APP_AUTH_HOST` moved only the front channel, and reverting it restored the
+login page while leaving every authenticated call 401ing.
+
+**What it costs.** **The edge is now a dependency of authentication.** Token
+validation requires Traefik to be up, public DNS to resolve, and the certificate to
+be valid. Before, it required none of those. If Traefik is down, token validation now
+fails where it previously kept working — so an edge problem becomes an auth problem.
+
+Verified before merging: from inside both running containers the public path resolves
+and returns the same key set as the internal one (2 keys, `app-api` and `app-mcp`).
+So it is safe today, but it is a real coupling and not a cleanup.
+
+**Operational consequence for this runbook:** if step 4's verification fails with
+401s, check Traefik and the certificate for `app-auth.<domain>` *before* suspecting
+the realm or the mapper.
+
+Locally the split is retained on purpose — app containers cannot resolve the
+browser-facing Traefik hostname, which is why `local.api.yml` carries a
+`DIVERGENCE-INTENTIONAL` marker. `tests/scripts/issuer-jwks-agree-check.sh` enforces
+that production cannot diverge while a marked local override may.
+
 ### The roles claim will break silently — see §7
 
 This is the failure this runbook exists to prevent. Read §7 before §4.
@@ -405,7 +442,65 @@ being 200 tells you nothing about either.
 
 ---
 
-## 8. What this runbook does not cover
+## 8. Inventory: every hardcoded realm name and issuer host
+
+Hand this list to whoever does the migration. **"Env change"** means it follows
+`APP_AUTH_HOST`/`KC_REALM` and needs no code edit. **"Code change"** means a literal
+that must be edited, or consciously accepted.
+
+### hill90-app — runtime code
+
+| File:line | What reads it | Migration action |
+|---|---|---|
+| `services/api/src/app.ts:105` | fallback issuer when `KEYCLOAK_ISSUER` unset | **Code change if the target realm is named `hill90`.** Today `auth.hill90.com/realms/hill90` 404s, so a blank issuer fails loudly. Name the realm `hill90` there and this fallback silently becomes *correct* — a blank issuer then looks like working config forever |
+| `services/api/src/index.ts:72` | same fallback, WebSocket terminal proxy path | Same. **Not previously reported** — a second copy of the same literal |
+| `services/api/src/routes/profile.ts:28` | same fallback, profile route | Same. **Third copy** |
+| `services/mcp/app/main.py:17` | fallback issuer for MCP | Same |
+| `services/ui/src/utils/admin-services.ts:24,29,30` | admin UI service list — hardcodes `url: 'https://auth.hill90.com'`, `internalUrl: 'http://keycloak:8080'` and `path: '/realms/hill90'` | **Code change, and it is already wrong today.** None of it is env-driven, and `internalUrl` names **`keycloak`** — Hill90's container — not `app-keycloak`. So the admin page's Keycloak health check already probes the platform's Keycloak, not the app's. **Not previously reported** |
+| `services/ui/src/app/api/services/health/route.ts:6` | health panel probes `/realms/hill90/.well-known/openid-configuration` against `KEYCLOAK_INTERNAL_URL` | **Code change if the realm is renamed.** Host is env-driven; the realm path is a literal, so a renamed realm makes the health panel report Keycloak down while it is fine |
+| `services/ui/src/auth.ts:116` | `decoded.realm_roles` | **Mapper decision, not a host/realm one** — see §7 |
+| `services/api/src/middleware/role.ts:11` | `user.realm_roles` | Same |
+| `services/api/src/middleware/auth.ts:52` | `cacheMaxAge: 3600000` | No change, but it is the **one-hour stale JWKS window** that can make step 4 false-pass |
+
+### hill90-app — compose and config
+
+| File:line | What reads it | Migration action |
+|---|---|---|
+| `deploy/compose/prod/docker-compose.api.yml` | `KEYCLOAK_ISSUER` from `${APP_AUTH_HOST}`/`${KC_REALM}` | **Env change** |
+| `deploy/compose/prod/docker-compose.mcp.yml` | same | **Env change** |
+| `deploy/compose/prod/docker-compose.ui.yml` | `AUTH_KEYCLOAK_ISSUER` from the same parts | **Env change** |
+| `deploy/compose/prod/docker-compose.auth.yml:32,68` | `KC_HOSTNAME` + router rule, **pinned to literal `app-auth`** by #25 | **No change, and must stay pinned.** This is the rollback target |
+| `deploy/compose/prod/.env.example:45` | `AUTH_KEYCLOAK_ISSUER=…` | **Stale — remove.** #22 removed it from the store; the example still carries it |
+| `deploy/compose/overrides/local.api.yml:20,21` | local issuer + marked internal JWKS | Local only. **No migration action** |
+| `deploy/compose/overrides/local.ui.yml:20,23` | local issuer + `KEYCLOAK_INTERNAL_ISSUER` | Local only |
+| `platform/auth/keycloak/setup-realm.sh:31` | `KC_BASE_URL` defaults to `https://auth.hill90.com` | **Env change** — override `KC_BASE_URL`, or it targets the platform Keycloak by accident |
+| `platform/auth/keycloak/hill90-realm.json` | the import artifact; 3 clients, **no secrets** | See §5 — minting |
+
+### Hill90 (platform repo) — do not edit without the infra lane
+
+| File:line | What reads it | Migration action |
+|---|---|---|
+| `scripts/vault.sh:394` | OpenBao OIDC discovery, `https://auth.hill90.com/realms/platform` | **Leave alone.** This is platform SSO. If the app's clients are added to the `platform` realm, confirm this still resolves and that the `hill90-vault` client was not overwritten |
+| `scripts/keycloak.sh:154` | `claim="${2:-realm_access.roles}"` | **Decision, not an edit** — see §7 |
+| `scripts/local.sh:307,310` | relaxes `sslRequired` on the `platform` realm locally | Local only |
+
+### Not code, but worth checking
+
+- **Test fixtures** in `services/{api,mcp,ai}` hardcode
+  `https://auth.hill90.com/realms/hill90` as `TEST_ISSUER`. They are self-consistent
+  literals fed to a mocked verifier — **no change needed**, and rewriting them would
+  be churn with fixture-breaking risk.
+- `services/api/src/services/keycloak-account.ts` mentions the issuer **in comments
+  only**.
+
+### The count that matters
+
+**Three** separate copies of the `auth.hill90.com/realms/hill90` fallback in `api`
+alone (`app.ts:105`, `index.ts:72`, `profile.ts:28`), plus one in `mcp`. If the realm
+is named `hill90`, all four become silently correct at once. That is the strongest
+form of the argument against that name.
+
+## 9. What this runbook does not cover
 
 - **Which realm to use.** Open, and Jon's call. §Read-this lists both arguments.
 - **Deleting the app's Keycloak.** Deliberately excluded; see §6.
