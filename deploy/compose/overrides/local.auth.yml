@@ -21,6 +21,13 @@ services:
       # clients and roles but uses localhost/localtest.me redirect URIs,
       # sslRequired: none, a fixed client secret and a seeded dev/dev user.
       # platform/auth/keycloak/hill90-realm.json stays untouched.
+      #
+      # NOTE: this path reaches OUT of deploy/compose and into the top-level
+      # compose/ directory, which is shared with the --standalone stack. compose/
+      # therefore cannot be deleted as a leftover — this mount, on the DEFAULT
+      # local path, depends on it. Guarded by tests/scripts/compose-mounts.bats,
+      # because a missing bind-mount FILE does not error: Docker creates a
+      # directory in its place and Keycloak then imports no realm.
       - ../../../compose/local/keycloak/realm-local.json:/opt/keycloak/data/import/realm-local.json:ro
     # Theme authoring: disable theme and template caching so edits under
     # platform/auth/keycloak/themes/ show up without a restart. Production must
