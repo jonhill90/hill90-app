@@ -329,9 +329,20 @@ whatever reads it later, which is the failure mode this check exists to stop."
 require_compose_interpolation() {
     local out unset_vars
     out="$(docker compose "$@" config 2>&1 >/dev/null)" || true
+    # `|| true` is load-bearing. When compose interpolates everything — the healthy
+    # case — grep matches nothing and returns 1, and under the `set -euo pipefail`
+    # at the top of this file that killed the whole deploy SILENTLY, with no
+    # message and exit 1. It failed exactly when there was nothing wrong, which is
+    # how it took down the first knowledge deploy after being added.
+    # The quotes in compose's warning are BACKSLASH-ESCAPED, because the message is
+    # embedded in a logfmt msg="..." field:
+    #   level=warning msg="The \\"AUTH_SECRET\\" variable is not set. Defaulting..."
+    # An earlier pattern here expected bare quotes, matched nothing, and made this
+    # gate silently inert — it returned 0 on a compose file with an unset variable.
+    # `\\?` tolerates both forms so it does not depend on compose's log format.
     unset_vars="$(printf '%s\n' "$out" \
-        | grep -oE 'The "[A-Za-z_][A-Za-z0-9_]*" variable is not set' \
-        | sed -E 's/The "([^"]+)".*/\1/' | sort -u)"
+        | grep -oE 'The \\?"[A-Za-z_][A-Za-z0-9_]*\\?" variable is not set' \
+        | sed -E 's/.*The \\?"([A-Za-z_][A-Za-z0-9_]*)\\?".*/\1/' | sort -u || true)"
 
     [ -z "$unset_vars" ] && return 0
 
