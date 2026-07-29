@@ -42,6 +42,7 @@ which means the code in the checkout is not the code that is running.**
 | 7 | **The realm decision is made and written down** | Not a command. §"The realm choice is OPEN and is Jon's" lists both arguments with the counts. Nothing below is safe to start while this is open, because it decides whether `KC_REALM` is in the change set |
 | 8 | The test user exists, and it is not `jon` | §2. Every token test uses `testuser01` |
 | 9 | You know the current claim shape | `docs/runbooks/scripts/token-claims.sh` against `testuser01`, output kept. §7 — the roles claim is the failure that passes every other check |
+| 0 | **LOGIN WORKS AT ALL.** Blocking, and currently FAILING — see the box at the top of §5 | Browser-login `testuser01` at `https://hill90.com`. It must reach a signed-in page, not `/api/auth/error?error=Configuration`. Until this passes there is no baseline to migrate against |
 | 10 | A rollback path is written for each step you will run | Each numbered section has one. Read them **before** starting, not after a failure |
 
 ### Prerequisites that are on `main` but NOT RUNNING
@@ -921,6 +922,72 @@ Confirm all three conditions before starting, not during the rollback.
 ---
 
 ## 5. Importing the realm MINTS NEW CLIENT SECRETS
+
+> ### THIS HAS ALREADY HAPPENED. LOGIN ON `hill90.com` IS BROKEN RIGHT NOW.
+>
+> This section was written as a *migration* hazard. On 2026-07-29 09:15 UTC it was
+> found to be a **live production defect**, discovered by attempting the first real
+> end-to-end browser login anyone has performed against production.
+>
+> **Symptom.** Keycloak authenticates the user correctly, then Auth.js fails the
+> code-for-token exchange and redirects to `/api/auth/error?error=Configuration`.
+> `app-ui` logs the cause exactly:
+>
+> ```
+> [auth][details]: { "error": "unauthorized_client",
+>                    "error_description": "Invalid client or Invalid client credentials",
+>                    "provider": "keycloak" }
+> ```
+>
+> **Cause — precisely the mechanism this section describes.**
+> `platform/auth/keycloak/hill90-realm.json` declares `hill90-ui`, `hill90-api` and
+> `hill90-vault` as confidential with **no `secret` field** (verified). `app-keycloak`
+> runs `start --import-realm`, so at first start Keycloak **minted** a fresh secret
+> for each. `AUTH_KEYCLOAK_SECRET` in SOPS was never that value.
+>
+> **Which copies disagree — compared by sha256, values never printed:**
+>
+> ```
+> Keycloak's actual hill90-ui secret     d3eca7b3…
+> the running app-ui container           008156b6…
+> the SOPS store (prod.enc.env)          008156b6…
+> ```
+>
+> **The store and the container agree with each other and both differ from
+> Keycloak. A redeploy will NOT fix this** — it would deploy the same wrong value.
+>
+> **This affects every user, not just the test account.** The token exchange
+> authenticates the *client*, not the person, so no one can complete a login. The
+> health checks cannot see it: `app-ui` is healthy, `/api/auth/signin` returns 200,
+> and the failure happens one redirect later.
+>
+> **The correct value already exists in a form we control.** The realm export taken
+> earlier tonight carries it, and its hash matches Keycloak exactly:
+>
+> ```
+> /opt/hill90/backups/app-realm/20260729_084747/hill90-realm.json
+>   hill90-ui secret sha256   d3eca7b3…   == Keycloak's
+> ```
+>
+> **Suggested repair, NOT performed — it is a secret change plus a deploy, which is
+> Jon's to authorise:**
+>
+> 1. Read `clients[] → hill90-ui → secret` out of that artifact (or from Keycloak's
+>    admin API) — do not regenerate it, or every other copy breaks too.
+> 2. Write it to `AUTH_KEYCLOAK_SECRET` in `infra/secrets/prod.enc.env`.
+> 3. Deploy `ui`.
+> 4. Re-run the acceptance test in §10 and confirm a token is issued.
+>
+> Check `hill90-api` and `hill90-vault` the same way before assuming only the ui is
+> affected. `app-api` was checked and holds **no** client-secret env var at all, so
+> it is not affected by this; `hill90-vault` belongs to OpenBao SSO and is the infra
+> lane's.
+>
+> **Consequence for the migration:** §5's warning is no longer hypothetical, and the
+> pre-migration checklist cannot be completed until this is fixed — there is no
+> known-good token to compare against while login cannot complete.
+
+
 
 `platform/auth/keycloak/hill90-realm.json` declares all three clients
 `publicClient: false` with **no `secret` field**:
