@@ -28,6 +28,10 @@ services:
       - API_URL=http://api:3000
       - AI_URL=http://ai:8000
       - KEYCLOAK_INTERNAL_URL=http://app-keycloak:8080
+      # Read by src/app/api/services/health/route.ts to build the realm path it
+      # probes. Same knob and same default as the issuer line below, so the two
+      # cannot drift apart the way a second hardcoded copy would.
+      - KC_REALM=${KC_REALM:-hill90}
       - MCP_URL=http://mcp:8001
       - AUTH_KEYCLOAK_ID=${AUTH_KEYCLOAK_ID}
       - AUTH_KEYCLOAK_SECRET=${AUTH_KEYCLOAK_SECRET}

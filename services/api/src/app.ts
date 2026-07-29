@@ -1,5 +1,6 @@
 import express, { Application } from 'express';
 import { createRequireAuth, createJwksKeyResolver } from './middleware/auth';
+import { getIssuer, getJwksUri } from './middleware/keycloak-config';
 import { correlationId } from './middleware/correlation-id';
 import type { JwtHeader } from 'jsonwebtoken';
 import agentsRouter from './routes/agents';
@@ -102,8 +103,8 @@ export function createApp(opts: AppOptions = {}): Application {
   app.use('/internal/discord', discordInternalRouter);
 
   // Protected routes
-  const issuer = opts.issuer || process.env.KEYCLOAK_ISSUER || 'https://auth.hill90.com/realms/hill90';
-  const jwksUri = process.env.KEYCLOAK_JWKS_URI || `${issuer}/protocol/openid-connect/certs`;
+  const issuer = getIssuer(opts.issuer);
+  const jwksUri = getJwksUri(issuer);
 
   const requireAuth = createRequireAuth({
     issuer,
