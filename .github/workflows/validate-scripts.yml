@@ -34,7 +34,9 @@ jobs:
       # would break on a runner-image change rather than on a code change.
       - name: Install bats (pinned)
         run: |
-          npm install -g bats@1.11.0
+          # sudo: the runner's global npm prefix is /usr/local, which the runner
+          # user cannot write. Caught by this job's own first run.
+          sudo npm install -g bats@1.11.0
           bats --version
 
       - name: Shell syntax
