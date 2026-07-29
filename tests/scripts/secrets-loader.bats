@@ -306,3 +306,18 @@ EOF
     "
     [ "$status" -ne 0 ]
 }
+
+# --- the interpolation gate, which shipped inert and then shipped fatal --------
+
+@test "require_compose_interpolation passes clean compose and catches an unset variable" {
+    # Needs docker, so it is skipped where docker is unavailable rather than
+    # failing. The two bugs it guards were both silent: the gate killed a healthy
+    # deploy with no message, and before that it returned 0 on a broken one.
+    command -v docker >/dev/null 2>&1 || skip "docker not available"
+    docker info >/dev/null 2>&1 || skip "docker daemon not running"
+    run bash "$BATS_TEST_DIRNAME/interpolation-gate-check.sh" "$BATS_TEST_TMPDIR" "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLEAN_PASSES"* ]]
+    [[ "$output" == *"UNSET_CAUGHT"* ]]
+    [[ "$output" == *"NAMES_THE_VARIABLE"* ]]
+}
