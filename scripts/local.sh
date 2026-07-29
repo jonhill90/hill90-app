@@ -47,6 +47,16 @@ ev() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true; 
 # Deliberately not computed at the top level: on a fresh clone .env.local does
 # not exist yet, and under `set -euo pipefail` a grep that matches nothing
 # aborts the script before cmd_init can create it — silently, with no output.
+# The app's Keycloak hostname under --infra. Deliberately NOT AUTH_HOST: Hill90's
+# own Keycloak owns auth.<domain> and serves realm `platform`, so printing
+# AUTH_HOST here sent people to the wrong Keycloak, where the app's realm 404s.
+# Default matches compose/local.infra.yml's ${APP_AUTH_HOST:-app-auth}.
+app_auth_host() {
+  local h
+  h=$(ev APP_AUTH_HOST)
+  printf '%s' "${h:-app-auth}"
+}
+
 infra_networks() {
   local pfx
   pfx=$(ev NETWORK_PREFIX)
@@ -186,9 +196,21 @@ BASE_DOMAIN=localtest.me
 HTTP_PORT=8080
 UI_HOST=app
 API_HOST=api
-AUTH_HOST=auth
 AI_HOST=ai
 STORAGE_HOST=storage
+
+# The app's Keycloak hostname. Deliberately NOT `auth`: Hill90's own Keycloak
+# owns auth.<domain> and serves realm `platform`, so asking for `auth` reaches
+# the wrong Keycloak and the app's realm 404s.
+APP_AUTH_HOST=app-auth
+
+# Hill90's Keycloak hostname. Kept so a value copied from Hill90's .env.local
+# does not read as missing; the app does not route on it.
+AUTH_HOST=auth
+
+# Container name prefix, matching Hill90's convention: empty in production, set
+# locally so two environments can coexist on one machine.
+CONTAINER_PREFIX=hill90dev-
 EOF
 }
 
@@ -304,7 +326,7 @@ EOF
   Through Traefik (Hill90 infra):
     UI            http://$(ev UI_HOST).$dom:$port
     API           http://$(ev API_HOST).$dom:$port/health
-    Keycloak      http://$(ev AUTH_HOST).$dom:$port
+    Keycloak      http://$(app_auth_host).$dom:$port
     MCP gateway   http://$(ev AI_HOST).$dom:$port/mcp
     MinIO console http://$(ev STORAGE_HOST).$dom:$port
 EOF

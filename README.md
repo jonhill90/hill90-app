@@ -123,7 +123,7 @@ in production, and Traefik labels make the app reachable by hostname:
 |---|---|
 | UI | http://app.localtest.me:8080 |
 | API | http://api.localtest.me:8080/health |
-| Keycloak | http://auth.localtest.me:8080 |
+| Keycloak | http://app-auth.localtest.me:8080 |
 | MCP gateway | http://ai.localtest.me:8080/mcp |
 | MinIO console | http://storage.localtest.me:8080 |
 
@@ -133,17 +133,43 @@ exception is Postgres: in this mode it sits on an `internal` network exactly as
 in production, and Docker cannot publish a port from one, so use `docker exec`.
 
 **Network ownership.** Infra creates `<prefix>_edge`, `<prefix>_internal` and
-`<prefix>_agent_internal`; the app creates `<prefix>_agent_sandbox`. That split
-is inherited from production, where `docker-compose.api.yml` is the sole creator
-of the sandbox network. The prefix comes from `NETWORK_PREFIX` in `.env.local`
-and must match the infra repo's value — its local path uses `hill90dev`.
-`--infra` checks all three infra networks exist before starting anything, and
-names the missing ones if not.
+`<prefix>_agent_internal`; the app creates `<prefix>_agent_sandbox` and
+`<prefix>_app_internal`. The sandbox split is inherited from production, where
+`docker-compose.api.yml` is the sole creator of that network. The prefix comes
+from `NETWORK_PREFIX` in `.env.local` and must match the infra repo's value — its
+local path uses `hill90dev`. `--infra` checks all three infra networks exist
+before starting anything, and names the missing ones if not.
+
+**Why the app's Keycloak is `app-auth` and not `auth`.** Hill90's own Keycloak
+already owns `auth.<domain>` and answers to the name `keycloak` on both shared
+networks, and its realm is `platform`, not `hill90`. The app's Keycloak therefore
+uses `${APP_AUTH_HOST:-app-auth}` for its hostname and an `app-keycloak` alias on
+`<prefix>_app_internal` for internal traffic. `<prefix>_app_internal` exists for
+the same reason: Compose cannot remove a service's own name as a network alias,
+so the only way for the app's Postgres not to answer to `postgres` alongside
+Hill90's is to keep it off the shared internal network. See
+[the decision record](docs/decisions/running-the-app-on-hill90-infra.md) for the
+full set of collisions and what each one looked like when it failed.
+
+**`--infra` also requires a fix in the Hill90 repo.** Its Traefik constrains the
+Docker provider to an explicit list of compose projects that omitted this app's
+project, so every app hostname returned 404. Branch
+`fix/local-traefik-accept-app-routers` there adds it. Without that change the
+hostnames below 404 and only the published ports work.
 
 Running standalone and `--infra` at the same time is not supported: both create
 `<prefix>_agent_sandbox`. Bring one down before starting the other.
 
 ### Verified cold
+
+> **Superseded in part, 2026-07-27.** This run is kept as the dated record it is,
+> but one line of it no longer reproduces: the app's Keycloak has moved from
+> `auth.localtest.me` to `app-auth.localtest.me`, because `auth.<domain>` is
+> Hill90's and serves realm `platform`. Against the current tree
+> `auth.localtest.me/realms/hill90` returns **404** and
+> `app-auth.localtest.me/realms/hill90` returns 200. Treat the `Keycloak realm`
+> row below as historical. The other rows were re-checked on 2026-07-27 and still
+> hold, with the Hill90-side Traefik fix noted above applied.
 
 Both stacks were brought up together from fresh clones of both repos, with no
 reused containers, volumes or images, on 2026-07-26:

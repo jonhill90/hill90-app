@@ -1,0 +1,39 @@
+# Local override for deploy/compose/prod/docker-compose.ai.yml
+#
+#   docker compose -f deploy/compose/prod/docker-compose.ai.yml \
+#                  -f deploy/compose/overrides/local.ai.yml \
+#                  --env-file .env.local up -d
+#
+# Layers ON the production file rather than forking it, which is the whole point:
+# a fork is how compose/local.yml drifted into something that proved nothing
+# about the path production uses. Every fix here lands in a file production also
+# reads.
+#
+# What local always has to change: the `websecure` entrypoint and the Let's
+# Encrypt resolver, neither of which exists locally.
+
+services:
+  litellm:
+    ports:
+      - "${PORT_LITELLM:-14000}:4000"
+    labels:
+      - "traefik.http.routers.app-litellm.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.routers.app-litellm.tls=false"
+      # tailscale-only@file would deny local traffic; see local.minio.yml.
+      - "traefik.http.routers.app-litellm.middlewares=compress@file"
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"
+
+  ai:
+    # Internal-only in production (traefik.enable=false). Kept that way; the port
+    # is published so its /health can be reached directly.
+    ports:
+      - "${PORT_AI:-18000}:8000"
+    volumes:
+      # Same as local.knowledge.yml: the akm-keys volume is populated by a deploy
+      # step that stayed in Hill90.
+      # Same target path as production's `akm-keys` volume, so this replaces it
+      # rather than mounting inside it -- mounting a single file into /etc/akm
+      # fails with "make mountpoint: read-only file system", because the
+      # directory does not exist in the image and the volume has not been
+      # populated yet.
+      - ../../../compose/local/keys:/etc/akm:ro
