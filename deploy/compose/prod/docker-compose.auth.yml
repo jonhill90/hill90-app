@@ -42,7 +42,17 @@ services:
       - KC_TRACING_ENDPOINT=http://tempo:4317
       - KC_TRACING_PROTOCOL=grpc
       - KC_TELEMETRY_SERVICE_NAME=keycloak
-    command: start --import-realm --spi-theme-cache-themes=false --spi-theme-static-max-age=-1
+    # Theme caching stays ON here, mirroring Hill90's own docker-compose.auth.yml,
+    # whose comment states it directly: the theme SPI settings are Keycloak's
+    # documented theme-AUTHORING settings and "production must not have them".
+    # Hill90's running keycloak carries neither; this container carried both.
+    #
+    # Keycloak 26.4's own docs spell them with a DOUBLE hyphen:
+    #   kc.sh start --spi-theme--static-max-age=-1 --spi-theme--cache-themes=false
+    # This file used a single hyphen, so whether the flags were ever in EFFECT is
+    # unproven — they may have been silently inert. Either way they do not belong
+    # in production, and the local override now carries the documented spelling.
+    command: start --import-realm
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9000"]
       interval: 30s
