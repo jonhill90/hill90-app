@@ -1,0 +1,28 @@
+# Local override for deploy/compose/prod/docker-compose.db.yml
+#
+#   docker compose -f deploy/compose/prod/docker-compose.db.yml \
+#                  -f deploy/compose/overrides/local.db.yml \
+#                  --env-file .env.local up -d
+#
+# Layers ON the production file rather than forking it, which is the whole point:
+# a fork is how compose/local.yml drifted into something that proved nothing
+# about the path production uses. Every fix here lands in a file production also
+# reads.
+#
+# What local always has to change: the `websecure` entrypoint and the Let's
+# Encrypt resolver, neither of which exists locally.
+
+services:
+  app-postgres:
+    # Published so local tooling can reach it. In production this service sits on
+    # the internal network only and Docker cannot publish from an `internal`
+    # network — but Hill90's <prefix>_internal is only internal when Hill90
+    # declares it so, and the app must not assume either way.
+    ports:
+      - "${PORT_POSTGRES:-15432}:5432"
+
+  app-postgres-exporter:
+    # Hill90's Prometheus scrapes `postgres-exporter:9187` by name and this
+    # service deliberately no longer answers to that name, so locally it is
+    # unscraped until Hill90 adds a job for app-postgres-exporter:9187.
+    restart: "no"

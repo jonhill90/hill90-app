@@ -1,0 +1,36 @@
+# Local override for deploy/compose/prod/docker-compose.auth.yml
+#
+#   docker compose -f deploy/compose/prod/docker-compose.auth.yml \
+#                  -f deploy/compose/overrides/local.auth.yml \
+#                  --env-file .env.local up -d
+#
+# Layers ON the production file rather than forking it, which is the whole point:
+# a fork is how compose/local.yml drifted into something that proved nothing
+# about the path production uses. Every fix here lands in a file production also
+# reads.
+#
+# What local always has to change: the `websecure` entrypoint and the Let's
+# Encrypt resolver, neither of which exists locally.
+
+services:
+  app-keycloak:
+    ports:
+      - "${PORT_KEYCLOAK:-18080}:8080"
+    volumes:
+      # The local realm, not the production one. realm-local.json keeps the same
+      # clients and roles but uses localhost/localtest.me redirect URIs,
+      # sslRequired: none, a fixed client secret and a seeded dev/dev user.
+      # platform/auth/keycloak/hill90-realm.json stays untouched.
+      - ../../../compose/local/keycloak/realm-local.json:/opt/keycloak/data/import/realm-local.json:ro
+    environment:
+      # http, and the browser-facing origin including the local Traefik port, or
+      # Keycloak stamps the wrong `iss` and builds redirects against the
+      # container hostname.
+      KC_HOSTNAME: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # Production enables tracing to Hill90's tempo. Locally it is noise.
+      KC_TRACING_ENABLED: "false"
+    labels:
+      - "traefik.http.routers.app-keycloak.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.routers.app-keycloak.tls=false"
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"

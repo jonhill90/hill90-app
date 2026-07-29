@@ -1,0 +1,34 @@
+# Local override for deploy/compose/prod/docker-compose.ui.yml
+#
+#   docker compose -f deploy/compose/prod/docker-compose.ui.yml \
+#                  -f deploy/compose/overrides/local.ui.yml \
+#                  --env-file .env.local up -d
+#
+# Layers ON the production file rather than forking it, which is the whole point:
+# a fork is how compose/local.yml drifted into something that proved nothing
+# about the path production uses. Every fix here lands in a file production also
+# reads.
+#
+# What local always has to change: the `websecure` entrypoint and the Let's
+# Encrypt resolver, neither of which exists locally.
+
+services:
+  ui:
+    ports:
+      - "${PORT_UI:-13000}:3000"
+    environment:
+      AUTH_KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      # Still required: the browser resolves the Traefik hostname, this container
+      # cannot, so the back-channel keeps using the service name.
+      KEYCLOAK_INTERNAL_ISSUER: http://app-keycloak:8080/realms/hill90
+      KEYCLOAK_INTERNAL_URL: http://app-keycloak:8080
+      AUTH_URL: http://${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
+    labels:
+      # Production routes the UI at the APEX domain (hill90.com), not app.<domain>.
+      # Locally the apex is localtest.me, which works -- but every runbook and the
+      # README say app.localtest.me, so accept both rather than silently diverging.
+      - "traefik.http.routers.app-ui.rule=Host(`${BASE_DOMAIN:-localtest.me}`) || Host(`www.${BASE_DOMAIN:-localtest.me}`) || Host(`${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}`)"
+      - "traefik.http.routers.app-ui.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.routers.app-ui.tls=false"
+      # rate-limit@file exists locally, so production's middleware is kept.
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"

@@ -1,0 +1,28 @@
+# Local override for deploy/compose/prod/docker-compose.api.yml
+#
+#   docker compose -f deploy/compose/prod/docker-compose.api.yml \
+#                  -f deploy/compose/overrides/local.api.yml \
+#                  --env-file .env.local up -d
+#
+# Layers ON the production file rather than forking it, which is the whole point:
+# a fork is how compose/local.yml drifted into something that proved nothing
+# about the path production uses. Every fix here lands in a file production also
+# reads.
+#
+# What local always has to change: the `websecure` entrypoint and the Let's
+# Encrypt resolver, neither of which exists locally.
+
+services:
+  api:
+    ports:
+      - "${PORT_API:-13001}:3000"
+    environment:
+      KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      # services/api attaches agent containers to <prefix>_agent_{internal,sandbox}
+      # by name. Under this overlay the prefix is Hill90's, not the default.
+      AGENT_NETWORK_PREFIX: ${NETWORK_PREFIX:-hill90}
+    labels:
+      - "traefik.http.routers.app-api.entrypoints=${APP_ENTRYPOINT:-web}"
+      - "traefik.http.routers.app-api.tls=false"
+      - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"

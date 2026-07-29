@@ -3,7 +3,7 @@
 services:
   discord-bot:
     image: hill90/discord-bot:latest
-    container_name: discord-bot
+    container_name: ${CONTAINER_PREFIX:-}app-discord-bot
     build:
       context: ../../../services/discord-bot
       dockerfile: Dockerfile
@@ -17,5 +17,5 @@ services:
 
 networks:
   internal:
-    name: hill90_internal
+    name: ${NETWORK_PREFIX:-hill90}_internal
     external: true
