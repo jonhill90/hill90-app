@@ -1,9 +1,33 @@
 name: Validate Repository
 
-# Manual-only by design: this repo has no deploy target, so nothing should fire
-# on push. All jobs below were verified green locally on 2026-07-26.
+# Runs on every pull request. It did not, and that was a real gap.
+#
+# The old comment here said "manual-only by design: this repo has no deploy
+# target, so nothing should fire on push". That rationale died the moment the
+# pipeline started deploying to production, and it outlived it by long enough to
+# be actively misleading: for a stretch, `validate-scripts.yml` was the ONLY
+# workflow gating a pull request, so bats was the entire quality bar. Pull
+# requests changed `services/api` and `services/ui` source — and added tests to
+# both — without a single jest or vitest test executing in CI. The tests existed;
+# nothing ran them.
+#
+# workflow_dispatch is kept so the suite can still be run by hand against any
+# branch.
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+# These are the tests, not a deploy: nothing here has a side effect outside the
+# runner, so a superseded run is pure waste. Six jobs per push adds up quickly on
+# a branch that gets several pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   api:
