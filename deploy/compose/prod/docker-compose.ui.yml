@@ -31,7 +31,11 @@ services:
       - MCP_URL=http://mcp:8001
       - AUTH_KEYCLOAK_ID=${AUTH_KEYCLOAK_ID}
       - AUTH_KEYCLOAK_SECRET=${AUTH_KEYCLOAK_SECRET}
-      - AUTH_KEYCLOAK_ISSUER=https://auth.hill90.com/realms/hill90
+      # This file contradicted itself: KEYCLOAK_INTERNAL_URL above already
+      # pointed at the app's app-keycloak while this pointed at Hill90's, so
+      # the back-channel and front-channel disagreed about which Keycloak the
+      # app uses. Auth.js validates `iss` against this value.
+      - AUTH_KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
       - AUTH_SECRET=${AUTH_SECRET}
       - AUTH_URL=https://hill90.com
     healthcheck:
@@ -42,7 +46,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app-ui.rule=Host(`${BASE_DOMAIN:-hill90.com}`) || Host(`www.${BASE_DOMAIN:-hill90.com}`)"
-      - "traefik.http.routers.app-ui.entrypoints=websecure"
-      - "traefik.http.routers.app-ui.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.app-ui.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.app-ui.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}"
       - "traefik.http.services.app-ui.loadbalancer.server.port=3000"
       - "traefik.http.routers.app-ui.middlewares=rate-limit@file"

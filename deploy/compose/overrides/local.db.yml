@@ -20,9 +20,3 @@ services:
     # declares it so, and the app must not assume either way.
     ports:
       - "${PORT_POSTGRES:-15432}:5432"
-
-  app-postgres-exporter:
-    # Hill90's Prometheus scrapes `postgres-exporter:9187` by name and this
-    # service deliberately no longer answers to that name, so locally it is
-    # unscraped until Hill90 adds a job for app-postgres-exporter:9187.
-    restart: "no"

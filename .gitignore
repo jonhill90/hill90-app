@@ -47,3 +47,9 @@ tests/e2e/playwright-report/
 .env.local
 .local/
 compose/local/keys/
+
+# App secrets: the age private key and any decrypted plaintext
+infra/secrets/keys/
+infra/secrets/*.env
+!infra/secrets/*.enc.env
+!infra/secrets/*.example
