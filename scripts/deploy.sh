@@ -390,6 +390,14 @@ or, if it came from the local tenant path:
     # the old one. There is no error anywhere, which is what makes it dangerous.
     #
     # --ignore-buildable so `pull` does not try to fetch images this repo builds.
+    # ai and knowledge mount the akm-keys volume read-only and read their public
+    # key from it. Nothing populated that volume, so knowledge crash-looped on
+    # FileNotFoundError: /etc/akm/public.pem and ai reported public_key_not_loaded
+    # with a 503 on /health/ready. Seed it before either can start.
+    case "$stack" in
+        ai|knowledge) materialise_akm_keys ;;
+    esac
+
     docker compose -p "$project_name" "${files[@]}" build --parallel
     docker compose -p "$project_name" "${files[@]}" pull --ignore-buildable
     docker compose -p "$project_name" "${files[@]}" up -d
