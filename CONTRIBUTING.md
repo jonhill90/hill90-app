@@ -1,13 +1,24 @@
 # Contributing to hill90-app
 
-This repository is **shelved**. There is no active development, no deployment
-target, and no CI that runs on its own. Read [`RESURRECTION.md`](RESURRECTION.md)
-before changing anything.
+This repository deploys to production. There is no CI that runs on its own, and
+no workflow fires on merge — deploys are dispatched by hand. Read
+[`RESURRECTION.md`](RESURRECTION.md) before changing anything, particularly §2
+for how the deploy path works and §10 for why nobody may be able to sign in.
 
 What follows is the working convention inherited from Hill90, kept because it is
-what the 542 commits of history already follow. The deploy rules, secrets
-workflow, and VPS operations from Hill90's `CONTRIBUTING.md` are deliberately
-**not** reproduced — none of that tooling came with the app.
+what the 542 commits of history already follow. Hill90's own deploy rules,
+secrets workflow and VPS operations are still **not** reproduced here; this repo
+grew its own, deliberately narrower, as a tenant rather than a platform owner.
+
+## Deploying
+
+`gh workflow run "Manual Deploy App (Prod)"`, `workflow_dispatch` only, inputs
+`service` / `dry_run` / `confirm_public_deploy`. It runs over SSH from a GitHub
+Actions runner on the tailnet. **Never deploy from a workstation** — there is no
+supported path for it and the guards do not run there.
+
+Use `dry_run=true` first. It exercises every guard — secrets present, tenancy
+contract satisfied, host paths writable — and stops before touching the host.
 
 ## Issue tracking
 
