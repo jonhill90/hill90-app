@@ -1,7 +1,17 @@
 version: '3.9'
 
-# PostgreSQL database (shared infrastructure)
-# Deploy with: make deploy-db
+# PostgreSQL database — the APP's own instance, not Hill90's.
+#
+# Hill90's platform Postgres asserts platform-only databases in its own health
+# check and its single role is `hill90` with a different password, so the app
+# cannot use it. See docs/decisions/running-the-app-on-hill90-infra.md.
+#
+# There is deliberately NO postgres-exporter here. Hill90 owns observability and
+# already runs one. Note the consequence, which is real: Hill90's exporter is
+# single-target (DATA_SOURCE_URI=postgres:5432/hill90), so it covers Hill90's
+# database and NOT this one. Until Hill90 adds multi-target scraping — which
+# postgres-exporter v0.17.1 supports via /probe?target= — the app's database has
+# no metrics. Tracked in the tenant deployment runbook, Phase A step 1.
 
 networks:
   internal:
@@ -10,7 +20,7 @@ networks:
 
 volumes:
   postgres-data:
-    name: prod_postgres-data
+    name: ${VOLUME_PREFIX:-prod}_app-postgres-data
 
 services:
   app-postgres:
@@ -31,27 +41,3 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  app-postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.17.1
-    container_name: ${CONTAINER_PREFIX:-}app-postgres-exporter
-    restart: unless-stopped
-    mem_limit: 64m
-    networks:
-      - internal
-    environment:
-      # app-postgres, not postgres: the bare name is Hill90's instance on the
-      # shared internal network, so this exporter would have scraped the wrong
-      # database. Hill90's own postgres-exporter covers Hill90's; this one exists
-      # to cover the app's, and Hill90's Prometheus scrapes it.
-      - DATA_SOURCE_URI=app-postgres:5432/hill90?sslmode=disable
-      - DATA_SOURCE_USER=${DB_USER}
-      - DATA_SOURCE_PASS=${DB_PASSWORD}
-    depends_on:
-      app-postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "postgres_exporter", "--version"]
-      interval: 30s
-      timeout: 10s
-      retries: 3

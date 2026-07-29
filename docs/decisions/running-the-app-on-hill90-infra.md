@@ -805,3 +805,596 @@ Not edited here. Both are in the Hill90 repo:
   `api` and `auth` hostnames; these have A records pointing at the VPS but no
   certificates. They are public hosts, so HTTP-01 applies rather than the DNS-01
   path that depended on the unextracted `services/dns-manager`.
+
+---
+
+# Phase A of the tenant deployment runbook
+
+Executing `Hill90/docs/runbooks/tenant-app-deployment.md` §3 Phase A. No VPS
+contact in this phase. Numbered to match the runbook.
+
+## Step 1 — name collisions resolved, and the data-plane network decided
+
+The naming scheme itself was settled earlier in this record. Verified against
+Hill90's repository across these namespaces, **named rather than counted** — a
+count cannot be audited and a list can:
+
+- `container_name`
+- Traefik router (and service) name
+- hostname
+- Compose **service key**
+- **volume name**
+
+The runbook lists the first three. The fourth and fifth were both missed, and
+**the fifth was missed here too, in this very section, while it claimed to be
+complete.** See the volume correction below.
+
+```
+container names : app-ai app-api app-discord-bot app-docker-proxy app-keycloak
+                  app-knowledge app-litellm app-mcp app-minio app-postgres app-ui
+                  overlap with Hill90: none
+traefik routers : app-api app-keycloak app-litellm app-mcp app-minio-console app-ui
+                  overlap with Hill90: none
+hostnames       : app's Keycloak on ${APP_AUTH_HOST:-app-auth}; Hill90 keeps auth
+                  overlap with Hill90: none
+service keys    : ai api app-keycloak app-minio app-postgres discord-bot
+                  docker-proxy knowledge litellm mcp ui agentbox*
+                  overlap with Hill90: none
+```
+
+**Service keys are the namespace that matters most and the runbook does not list
+it.** Compose derives a network alias from the service key, not from
+`container_name`, so renaming only the container would have left `postgres` and
+`keycloak` ambiguous on the shared network — which is exactly risk §4.3.
+
+### Decision: the app's data plane stays on `hill90_internal`
+
+The runbook makes this an explicit open question. Decided: **keep it on the
+shared internal network, do not give the app a private data network.**
+
+Reasoning. Risk §4.3 is entirely a *name* collision — two containers answering to
+`postgres` on one network, DNS returning both, Keycloak reaching the wrong one.
+Renaming the service key to `app-postgres` removes that at the root: the alias is
+now unique, so there is nothing to resolve ambiguously. A private network would be
+a second, independent fix for a cause already eliminated.
+
+Rejected alternative: a dedicated `${NETWORK_PREFIX:-hill90}_app_internal` with
+`internal: true`, which is what the *local overlay* on `compose/local.yml` does.
+It was necessary there because that path never renamed its service keys, so the
+alias really was ambiguous. It is not necessary here, and it would cost a fourth
+network to maintain, an extra attachment on five services, and a divergence
+between the local overlay and the production topology — the divergence this whole
+effort exists to remove.
+
+Residual risk, stated: if Hill90 ever introduces a service named `app-postgres`,
+the collision returns. That is implausible, because `app-` is the tenant's
+namespace by construction — but it is the assumption this decision rests on, and
+MinIO already demonstrated that Hill90 can retroactively claim a name the app
+believed was safe.
+
+### `postgres-exporter` deleted — and what that costs
+
+Deleted per the runbook, reversing an earlier decision in this record. Hill90 owns
+observability and already runs an exporter.
+
+**The cost is real and is not hypothetical.** Hill90's exporter is single-target:
+
+```
+DATA_SOURCE_URI=postgres:5432/hill90?sslmode=disable
+```
+
+It scrapes Hill90's database and cannot reach the app's. So **the app's database
+now has no metrics at all.** Hill90's Prometheus has one `postgres-exporter` job
+targeting `postgres-exporter:9187`.
+
+The fix, when someone wants app database metrics back, is on Hill90's side and is
+small: `postgres-exporter` v0.17.1 supports multi-target scraping via
+`/probe?target=`, so one exporter can cover both databases with a scrape config
+change and no second container. That is the right shape and it keeps observability
+in the repo that owns it. Recorded here so the gap is a known trade rather than a
+discovery.
+
+## Step 2 — `mcp-strip` fixed
+
+`docker-compose.mcp.yml` referenced `mcp-strip@file`, which Hill90 does not
+define — it removed the middleware in JON-27 as app-specific, correctly, since
+only this service used it.
+
+This does not degrade. A router naming an undefined middleware is **errored by
+Traefik and serves nothing**, so this would have been a total outage of the MCP
+gateway with no obvious cause. It is declared as a label instead, which is also
+the right ownership boundary: prefix-stripping for `/mcp` is an app routing
+concern.
+
+Runbook verify criterion — "the prod compose has no `@file` reference Hill90 does
+not define":
+
+```
+app references : rate-limit@file  tailscale-only@file
+Hill90 defines : auth@file compress@file cors@file rate-limit@file
+                 security-headers@file tailscale-only@file
+undefined      : none
+```
+
+The runbook said the app referenced three and two existed. That is now two and
+two.
+
+## Step 4 — the deploy script and secrets store
+
+Built in **hill90-app**, per the runbook's own reasoning: Hill90's `deploy.sh` is
+closed over its own stacks by construction, and a `tenant` verb there would need
+a second compose root, a second secrets source, a second backup inventory and a
+second project-name map — a second script inside the first, sharing only the
+parts that make it dangerous.
+
+Followed Hill90's `scripts/deploy.sh` in **shape**, not reinvented:
+
+| Hill90 | hill90-app | Same? |
+|---|---|---|
+| verb dispatcher with closed allowlist | same, `db auth api ai knowledge mcp minio ui all verify teardown preflight` | yes |
+| `cmd_verify` polling loop, dumps logs on timeout | same loop, same log dump | yes |
+| refuses `auth` if postgres is not queryable | same, plus refuses `ai`/`knowledge` if `agent_sandbox` is absent | extended |
+| project-scoped `down`, volumes kept, `--remove-orphans` banned | same, and the ban is kept even though every app stack has its own project | yes |
+| SOPS + age, temp file with `%q` quoting | same mechanism, own key | yes |
+| OpenBao first, SOPS fallback | SOPS only — the app has no AppRole yet | diverges, noted |
+
+Three deliberate divergences:
+
+1. **Every stack gets its own Compose project** (`hill90-app-<env>-<stack>`).
+   Hill90 groups several stacks into shared projects. A shared project is exactly
+   what lets a `down` reach a neighbour, and the app has no reason to group.
+2. **The stack table is data, not a case statement repeated per function.**
+   Hill90 repeats its allowlist independently in `cmd_service`, `cmd_teardown`
+   and `cmd_verify`, which is a drift surface it guards by hand.
+3. ~~**The app has its own age key.**~~ **Retracted — the app uses the host's
+   key.** The original reasoning was that reusing Hill90's key would let the app
+   decrypt platform secrets. That argument does not survive contact with the
+   host: both deploys run as the same `deploy` user on the same box, and the key
+   is mode 600 owned by that user, so the app's deploy can read it either way. A
+   second key would add no boundary the OS does not already decline to provide,
+   and one more thing to rotate. See "The age key is shared, deliberately" below.
+
+### The preflight is the tenancy contract, checked before anything changes
+
+`require_infra_networks` turns Compose's
+
+```
+network hill90_edge declared as external, but could not be found
+```
+
+into a statement of which contract term is unmet and who owns it. Exercised both
+ways:
+
+```
+$ NETWORK_PREFIX=hill90 deploy.sh preflight        # production default, absent locally
+✗ Hill90's shared networks are missing:
+    hill90_edge  hill90_internal  hill90_agent_internal
+  These are created by the Hill90 infrastructure repo, not by this one...
+  ...it is currently 'hill90'.
+
+$ NETWORK_PREFIX=hill90dev deploy.sh preflight
+✓ shared networks present: hill90dev_{edge,internal,agent_internal}
+✓ Traefik is running
+✓ preflight complete
+```
+
+`require_file_middlewares` checks that middlewares the app references are
+actually defined by Traefik's file provider. **Verified to be a live check rather
+than a no-op**, which matters — a check that never fires is worse than none:
+
+```
+$ require_file_middlewares rate-limit tailscale-only     -> 0, both found
+$ require_file_middlewares mcp-strip definitely-not-real -> 1
+  ! Traefik does not appear to define: mcp-strip definitely-not-real
+```
+
+It independently rediscovers the step 2 finding.
+
+### Secrets store
+
+`infra/secrets/` with `.sops.yaml`, a fully documented `prod.enc.env.example`,
+and `keys/` gitignored. **No real secret and no key is committed**, and the
+gitignore is written so `*.enc.env` stays committable while `*.env` and `keys/`
+cannot be — verified by `git check-ignore` in both directions.
+
+`.sops.yaml` carries a placeholder public key rather than a real one, because
+generating the app's key is an operator action: the private half must exist on
+the deploying host and nowhere else.
+
+### What this does not do
+
+- **No backup.** Hill90's `deploy.sh` calls `backup.sh` before teardown; the app
+  has no backup inventory. Teardown keeps volumes, so nothing is destroyed, but
+  there is no restore path either. The runbook lists tenant rollback as unbuilt
+  and it remains so.
+- **No CI workflow.** Deploys are manual.
+- **Never executed against the VPS.** Phase A forbids it. The dispatcher,
+  preflight, ordering guards and secrets loader were exercised locally; the
+  `up`/`verify` path against a real host has not been.
+
+## Step 5 — the two dead provision scripts
+
+The runbook says to fix the missing file first because it masks the other. It
+masked **two** others, both only reachable once `scripts/_common.sh` existed
+(created in step 4).
+
+| # | Bug | Script | Visibility |
+|---|---|---|---|
+| 1 | `source _common.sh` for a file never extracted | both | fatal, loud, exit 1 at line 7 |
+| 2 | `docker exec` without `-i` | akm only | **silent** — psql reads EOF, runs nothing, exits 0 |
+| 3 | `--username postgres` | akm only | fatal: `role "postgres" does not exist` |
+| 4 | `docker exec postgres` | both | wrong container — that is Hill90's instance, not the app's |
+
+Bug 4 was not in the runbook and is a consequence of step 1's rename: the app's
+container is `app-postgres`. Both scripts now resolve
+`${PG_CONTAINER:-${CONTAINER_PREFIX:-}app-postgres}` and fail with a usable
+message if it is absent.
+
+### Proving the `-i` fix, given exit 0 was the bug's own signature
+
+Both scripts now exit 0 — but so did the broken one. Exit status is not evidence
+here. The A/B, against the app's live Postgres:
+
+```
+$ docker exec    app-postgres psql ... <<< "SELECT 'STDIN_REACHED_PSQL';"
+  exit: 0  output: ''            <- ran nothing, reported success
+
+$ docker exec -i app-postgres psql ... <<< "SELECT 'STDIN_REACHED_PSQL';"
+  exit: 0
+         marker
+  --------------------
+   STDIN_REACHED_PSQL
+```
+
+And the real script's output is now psql's own (`NOTICE: extension "uuid-ossp"
+already exists, skipping` / `CREATE EXTENSION` / `GRANT`), which the broken
+version could never produce.
+
+One structural fix beyond the four: the original used `\c` to switch database
+inside a single non-interactive `psql` run, which does not behave as it assumed.
+It is now one invocation per target database.
+
+Databases present in the app's Postgres afterwards: `hill90`, `hill90_akm`,
+`hill90_api`, `hill90_litellm`.
+
+## Phase A status
+
+| Step | State |
+|---|---|
+| 1 — name collisions, data-plane decision, delete exporter | done for `container_name`, router name, hostname, service key. **Volumes were NOT checked and were wrong — see step 6** |
+| 2 — `mcp-strip` | done, no undefined `@file` reference remains |
+| 3 — parameterise networks | done earlier (PR #11), re-verified: 23 literals, 0 remaining |
+| 4 — deploy script and secrets store | built and exercised locally, **never run against the VPS** |
+| 5 — provision scripts | done, proven against the live app database |
+| 6 — volume names (not in the runbook) | done, and it was a latent data-loss bug |
+
+**Phase A is complete for the five steps the runbook enumerates, plus volumes as
+a sixth.** That sentence is deliberately narrower than the one it replaces.
+
+### Correction: this section previously said "Phase A is complete" while a data-loss bug sat in the same commit range
+
+The earlier wording was "done, verified across four namespaces" and "Phase A is
+complete." Both were false at the time they were written.
+`docker-compose.db.yml` still hardcoded `name: prod_postgres-data`, which is the
+**exact string Hill90's own volume resolves to** on the VPS with `VOLUME_PREFIX`
+unset. Deploying would have mounted Hill90's live production database directory
+into a second Postgres. Not a name clash anyone notices at startup — two
+databases writing the same files.
+
+The wording is the smaller problem. **A status table asserting "done" is what
+stops the next person looking**, and that is precisely the mechanism by which
+this would have reached the VPS. The lesson is not "be careful with the word
+complete"; it is that a completeness claim must enumerate what was checked so a
+reader can see what was not.
+
+It is also the same bug class already fixed one layer up: network names were
+parameterised and volume names were left literal, in the same files, in the same
+sitting.
+
+## Step 6 — volume names (not in the runbook; a latent data-loss bug)
+
+Reported by review, verified independently before fixing.
+
+```
+Hill90  docker-compose.db.yml:  name: ${VOLUME_PREFIX:-prod}_postgres-data
+app     docker-compose.db.yml:  name: prod_postgres-data          <- hardcoded
+
+resolved on the VPS, VOLUME_PREFIX unset:
+  Hill90 -> prod_postgres-data
+  app    -> prod_postgres-data          IDENTICAL
+```
+
+Deploying would have mounted **Hill90's live production database directory** into
+a second Postgres. Nothing errors at startup. Two databases writing the same
+files.
+
+**Parameterising alone would not have fixed it.** `${VOLUME_PREFIX:-prod}_postgres-data`
+in the app resolves to the same string Hill90 resolves to. The fix is
+parameterise **and** namespace, exactly as containers and service keys were:
+
+| Volume | Before | After | Resolves to |
+|---|---|---|---|
+| postgres | `prod_postgres-data` | `${VOLUME_PREFIX:-prod}_app-postgres-data` | `prod_app-postgres-data` |
+| minio | `minio-data` | `${VOLUME_PREFIX:-prod}_app-minio-data` | `prod_app-minio-data` |
+| akm keys | `akm-keys` | `${VOLUME_PREFIX:-prod}_app-akm-keys` | `prod_app-akm-keys` |
+| akm data | `akm-data` | `${VOLUME_PREFIX:-prod}_app-akm-data` | `prod_app-akm-data` |
+
+Swept rather than fixing only what was reported. `minio-data` matters: Hill90's
+in-flight `feat/restore-minio` declares `${VOLUME_PREFIX:-prod}_minio-data`, so a
+naive parameterisation of the app's would have recreated the identical collision
+against a branch that has not merged yet. Zero overlap now against Hill90 `main`
+**and** `feat/restore-minio`.
+
+### The other knob family the app hardcoded
+
+The sweep asked the broader question — what else does the app hardcode that
+Hill90 parameterises — and found entrypoints and cert resolvers:
+
+```
+before:  routers.app-api.entrypoints=websecure
+         routers.app-api.tls.certresolver=letsencrypt
+after:   routers.app-api.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}
+         routers.app-api.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}
+```
+
+Same knob names and defaults Hill90 uses, so production resolves identically.
+Admin-facing surfaces (litellm, minio console) use `${ADMIN_CERT_RESOLVER:-letsencrypt-dns}`,
+matching Hill90's split. This is why the local override had to fight the prod
+files with `tls=false`.
+
+## `deploy.sh`, exercised end to end — and three bugs of my own it found
+
+`deploy.sh all` now runs the full dependency-ordered bring-up locally:
+
+```
+✓ preflight complete
+✓ hill90dev-app-postgres: healthy    ✓ db ready
+✓ hill90dev-app-keycloak: healthy    ✓ auth ready
+✓ hill90dev-app-api, -docker-proxy   ✓ api ready
+✓ hill90dev-app-ai, -litellm         ✓ ai ready
+✓ hill90dev-app-knowledge            ✓ knowledge ready
+✓ hill90dev-app-mcp                  ✓ mcp ready
+✓ hill90dev-app-minio                ✓ minio ready
+✓ hill90dev-app-ui                   ✓ ui ready
+All stacks deployed
+```
+
+Running it found three defects that reading it did not:
+
+1. **The local escape hatch mangled the PEMs.** `APP_ENV_FILE` naively `source`d
+   the env file, so `AKM_SIGNING_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----...`
+   split on spaces and bash reported `PRIVATE: command not found`. That is
+   exactly what the `%q` indirection in `load_secrets` exists to prevent, and I
+   had bypassed it while documenting why it mattered. Both paths now share one
+   `_export_env_pairs`.
+2. **Every readiness check ignored `CONTAINER_PREFIX`.** They ran
+   `docker exec app-postgres` against a container called
+   `hill90dev-app-postgres`. All container references now resolve through
+   `cname()`.
+3. **Readiness probed paths I guessed.** `ai` was reported as a failed deploy
+   while up, connected to its database, and answering 200 — because the check
+   polled `/health` and the service serves `/health/ready`. This is the same
+   error as calling `api`'s 404 at bare `/` a routing bug. `cmd_verify` now uses
+   each container's **own declared healthcheck** via `docker inspect`, which
+   removes the guess: every service in `deploy/compose/prod` defines one.
+
+Teardown verified project-scoped: `teardown mcp` removed exactly one container,
+25 → 24 running.
+
+### Routes 404 locally, and that is local-only — verified, not assumed
+
+With the app deployed under `deploy.sh`'s per-stack project names
+(`hill90-app-prod-<stack>`), every app hostname 404s locally. The cause is
+Hill90's **local-only** Traefik constraint, whose allowlist contains
+`hill90-local` and `hill90-local-*` and not the app's project names.
+
+**Production is unaffected.** `platform/edge/traefik.yml.tmpl` has no
+`constraints:` key at all — the Docker provider there picks up every container,
+which is what runbook §4.2 describes. So this is a local development gap, not a
+deploy defect.
+
+Two ways to close it locally, and it needs a decision rather than a default:
+add the app's eight project names to Hill90's local allowlist (Traefik v2.11
+cannot do `LabelRegexp`, so each must be listed), or keep `scripts/local.sh` as
+the local path — which already works and routes correctly — and treat `deploy.sh`
+as the production path exercised locally for its logic only.
+
+## What the deploy path has and has not exercised
+
+`deploy.sh` has been run end to end locally, but **only in its override
+configuration** — every local exercise set `USE_LOCAL_OVERRIDE=1`. The default is
+`0`, and that default path has never run.
+
+Specifically unobserved, and all of it exists only in production:
+
+- the `websecure` entrypoint
+- the `letsencrypt` and `letsencrypt-dns` cert resolvers
+- `tailscale-only@file` on `minio` and `litellm` — which the local overrides
+  deliberately swap for `compress@file`, because the real middleware is an IP
+  allowlist that denies local traffic
+
+`cmd_preflight` verifies that `tailscale-only` is **defined** by Traefik's file
+provider, and that check was proven live. But "the middleware is defined" and
+"the routers behind it serve" are different claims and only the first is tested.
+The same holds for the ACME resolvers: every precondition for HTTP-01 was
+measured, and no certificate has been issued, because issuance requires a router,
+which requires a deploy.
+
+So the earlier statement that the `up`/`verify` path has never run against a real
+host is true but incomplete. **The production configuration itself is also
+untested**, not merely the host it would run on.
+
+## The deploy pipeline
+
+The tooling had nothing invoking it. `hill90-app` had `ci.yml` and
+`smoke-auth.yml`, neither of which deploys, so the only way to run
+`scripts/deploy.sh` was a human SSHing to the box.
+
+`.github/workflows/reusable-deploy-service.yml` mirrors Hill90's file of the same
+name step for step — checkout, join the tailnet with `tag:github-actions`, write
+the SSH key, install sops and write the age key, extract `TAILSCALE_IP` from SOPS
+with `add-mask`, verify SSH connectivity as its own step so a network failure is
+distinguishable from a deploy failure, then ssh in and run the deploy against a
+checkout on the VPS. Secret names are Hill90's exactly.
+
+Four steps are added, each because this app has never deployed:
+
+| Step | Why |
+|---|---|
+| Secret preflight | fails before any key is written or connection opened. Without it a missing secret surfaces as an empty SSH key and an auth failure several steps later, which reads as a network problem |
+| `all` confirmation gate | `deploy.sh` implements the runbook's staging rule; the workflow must not be a way around it |
+| VPS checkout check | `/opt/hill90/app` is Hill90's clone despite the name, and this app has no checkout at all |
+| Hill90 baseline check | the tenancy contract runs both ways — a tenant deploy must not degrade the platform |
+
+`deploy.yml` is `workflow_dispatch`-only. Hill90's equivalent also fires on push
+to `main` behind path filters, and its own runbook records that as a risk (§4.5):
+a merge touching a filtered path triggers a production deploy unattended, which
+already caused one Hill90 PR to be held. `ci.yml` here is manual-only on the same
+reasoning, so this matches the repository's existing posture. A push trigger can
+be added once the path has actually run and the deploy is boring. It is not
+boring yet.
+
+### Prerequisites — none of these exist yet
+
+**Secrets, on a `production` environment of this repository.** GitHub secrets are
+write-only, so they cannot be read out of Hill90 and must be re-entered:
+
+| Secret | What |
+|---|---|
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client, `tag:github-actions` |
+| `TS_OAUTH_SECRET` | its secret |
+| `VPS_SSH_PRIVATE_KEY` | private key for `deploy@<vps>` |
+| `SOPS_AGE_KEY` | age private key for **this app's** store, not Hill90's |
+
+`TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET` are not in SOPS and cannot be
+recovered from Hill90, so that pair is blocked on Jon.
+
+**A checkout on the VPS.** There is none. `/opt/hill90` holds `app` (Hill90's
+clone), `agentbox-configs`, `backups` and `secrets`. The workflow defaults to
+`/opt/hill90-app`, overridable with the `VPS_APP_PATH` repository variable.
+
+**The app's age key on the VPS**, default
+`/opt/hill90-app/infra/secrets/keys/age-prod.key`, readable by `deploy` and
+separate from Hill90's — a tenant must not be able to decrypt platform secrets.
+
+**`TAILSCALE_IP` in the app's encrypted store.** Added to
+`infra/secrets/prod.enc.env.example`; the store itself does not exist yet.
+
+### Not run
+
+**No part of this workflow has executed.** The YAML parses, every `run` block
+passes `bash -n`, and the secret preflight was exercised directly — it fails
+naming the missing secrets with no secrets set, names the single missing one when
+three of four are present, and passes when all four are. Nothing beyond that is
+proven, and nothing was created on the VPS.
+
+
+## The age key is shared, deliberately
+
+> Decided and recorded in full in
+> [shared-age-key.md](shared-age-key.md), including the rotation consequence:
+> rotating Hill90's age key breaks this app's secrets, and whoever rotates must
+> re-encrypt both stores.
+
+The deploy workflow originally defaulted `VPS_AGE_KEY` to
+`/opt/hill90-app/infra/secrets/keys/age-prod.key`. **That file could never
+exist.** Age private keys are not committed, and Hill90's own checkout on the VPS
+carries only `age-dev.pub`, `age-prod.pub` and a `.gitkeep` at the equivalent
+path — verified read-only on the box.
+
+The real mechanism, also verified:
+
+```
+/opt/hill90/secrets/keys/keys.txt      -rw------- deploy deploy    the only key
+~deploy/.bashrc:28                     export SOPS_AGE_KEY_FILE=...keys.txt
+```
+
+Hill90's reusable workflow exports it inline in the ssh invocation as well,
+rather than relying on the profile, because a non-interactive ssh does not
+reliably source `.bashrc`. This workflow now does the same. (Measured here: a
+non-interactive ssh *did* inherit it on this host — which makes the inline export
+belt-and-braces rather than redundant, and that is the point of it.)
+
+**So the app reads Hill90's key.** That is a coupling someone will otherwise read
+as a mistake, so: it is deliberate, one key serves the host, and duplicating it
+would create a second thing to rotate for no isolation gain — the OS already
+gives both deploys the same user.
+
+The price, stated: this repository's `SOPS_AGE_KEY` GitHub secret therefore holds
+a key that can also decrypt Hill90's store. It never sees Hill90's ciphertext,
+but the capability exists. The app's `infra/secrets/.sops.yaml` encrypts to that
+key's public half, `age1p30vk2qpvlkj5pzh72f0wwvlqgmedvr204nldmpskmptgy9ryg8qg9qd5v`,
+taken from Hill90's committed `age-prod.pub`.
+
+### VPS checkout — now exists
+
+`/opt/hill90-app`, owned by `deploy`, on `main` at `4a09320`, with a read-only
+deploy key generated on the host so the private half never left it. `git fetch`
+works and push is rejected, which is correct for a deploy target.
+
+## The secrets store
+
+`infra/secrets/prod.enc.env` now exists — the last blocker on the deploy path.
+Only `.sops.yaml` and the example were committed before, so the workflow stopped
+correctly at "Get Tailscale IP".
+
+28 keys, matching the template exactly: no key missing, none extra, verified by
+decrypting and diffing the key sets rather than counting by eye.
+
+Encrypted to `age1p30vk...qg9qd5v` — the key `.sops.yaml` already specified, the
+one Hill90 uses, and the one at `/opt/hill90/secrets/keys/keys.txt` on the VPS.
+One key per host, as recorded above.
+
+### How each value was produced
+
+| Category | Keys | Method |
+|---|---|---|
+| Confirmed config | `TAILSCALE_IP`, `NETWORK_PREFIX`, `BASE_DOMAIN`, `APP_AUTH_HOST`, `CONTAINER_PREFIX`, `AUTH_KEYCLOAK_ISSUER`, `AUTH_URL`, `DB_USER`, `DB_NAME`, `KC_ADMIN_USERNAME`, `MINIO_ROOT_USER`, `AUTH_KEYCLOAK_ID` | set to what the prod compose files resolve against |
+| Generated | 9 passwords and tokens | `openssl rand`, 48–64 chars, all URL-safe so they survive `DATABASE_URL` |
+| Generated, constrained | `PROVIDER_KEY_ENCRYPTION_KEY` | exactly 64 hex, asserted |
+| Generated, real keypairs | `AKM_SIGNING_PRIVATE_KEY`, `MODEL_ROUTER_SIGNING_PRIVATE_KEY` | `openssl genpkey -algorithm ed25519`, inlined as single-line PEM with `\n` escapes. Verified by parsing them back: both report `ED25519 Private-Key` |
+| Carried across | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | decrypted from Hill90's store and confirmed byte-identical |
+| **Deliberately empty** | `TAVILY_API_KEY`, `DISCORD_BOT_TOKEN` | not present in Hill90 and not invented — see below |
+
+URL-safety is not cosmetic: `DATABASE_URL` is assembled as
+`postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/...`, and a `+` or `/`
+from base64 would corrupt it in a way that reads as an authentication failure.
+
+### Verified by running, not by inspection
+
+All eight prod stacks were rendered against the decrypted store:
+
+```
+db auth api ai knowledge mcp minio ui   -> all resolve, 0 unset-variable warnings
+placeholders remaining (=REPLACE)       -> 0
+empty values                            -> TAVILY_API_KEY, DISCORD_BOT_TOKEN,
+                                           CONTAINER_PREFIX (empty in prod by design)
+```
+
+And the committed file is genuinely encrypted — probed for `sk-ant`, `sk-proj`,
+the Tailscale IP, `BEGIN PRIVATE KEY` and `hill90.com`; none appear. The
+plaintext was written with `umask 077`, never left the working tree, and was
+shredded.
+
+### The public key halves
+
+`infra/secrets/public.pem` and `infra/secrets/model-router-public.pem` are
+committed. They are public halves and safe to commit, but they are **not yet
+where the services need them**: production mounts the `akm-keys` volume at
+`/etc/akm`, and `knowledge` reads `/etc/akm/public.pem` while `ai` reads
+`/etc/akm/model-router-public.pem`. **That volume is empty and nothing populates
+it** — the local override bind-mounts the keys instead, so this path has never
+been exercised. `ai` and `knowledge` will crash-loop on
+`FileNotFoundError: /etc/akm/public.pem` until it is seeded.
+
+This does not block a `ui`-only first deploy. It blocks `ai` and `knowledge`.
+
+### Still required before those services work
+
+- `TAVILY_API_KEY` — the agent web-search tool
+- `DISCORD_BOT_TOKEN` — `services/discord-bot`, which has never been in any
+  automated deploy
+
+Both are empty rather than plausible-looking placeholders, deliberately: a fake
+value that looks real fails at runtime with an authentication error from a third
+party, which is harder to diagnose than an obviously absent one.

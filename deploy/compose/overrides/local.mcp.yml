@@ -16,6 +16,13 @@ services:
   mcp:
     ports:
       - "${PORT_MCP:-18001}:8001"
+    environment:
+      # Locally Traefik terminates plain http on ${HTTP_PORT}, so the issuer must
+      # be http and carry the port. Without this, mcp inherits the production
+      # form (https, no port) and the value no longer matches the `iss` Keycloak
+      # actually stamps, so every token it validates is rejected. api and ui
+      # already override this; mcp was the one that did not.
+      KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-hill90}
     labels:
       - "traefik.http.routers.app-mcp.entrypoints=${APP_ENTRYPOINT:-web}"
       - "traefik.http.routers.app-mcp.tls=false"

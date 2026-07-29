@@ -26,8 +26,9 @@ services:
     environment:
       - ENVIRONMENT=production
       - PORT=8001
-      - KEYCLOAK_ISSUER=https://auth.hill90.com/realms/hill90
-      - KEYCLOAK_JWKS_URI=https://auth.hill90.com/realms/hill90/protocol/openid-connect/certs
+      # See docker-compose.api.yml: front-channel issuer, back-channel JWKS.
+      - KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
+      - KEYCLOAK_JWKS_URI=http://app-keycloak:8080/realms/${KC_REALM:-hill90}/protocol/openid-connect/certs
       - OTEL_SERVICE_NAME=mcp
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
@@ -42,7 +43,20 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app-mcp.rule=Host(`${AI_HOST:-ai}.${BASE_DOMAIN:-hill90.com}`) && PathPrefix(`/mcp`)"
-      - "traefik.http.routers.app-mcp.entrypoints=websecure"
-      - "traefik.http.routers.app-mcp.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.app-mcp.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.app-mcp.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}"
       - "traefik.http.services.app-mcp.loadbalancer.server.port=8001"
-      - "traefik.http.routers.app-mcp.middlewares=mcp-strip@file"
+      # mcp-strip is declared HERE as a label, not referenced as @file.
+      #
+      # Hill90 used to define mcp-strip in platform/edge/dynamic/middlewares.yml
+      # and removed it in JON-27 as app-specific -- correctly, since only this
+      # service used it. A router naming a middleware the provider does not
+      # define does not degrade gracefully: Traefik errors the router and it
+      # serves nothing, so this would have been a 100% outage of the MCP gateway
+      # with no obvious cause.
+      #
+      # The service serves /health and /me at its root, so the /mcp prefix has to
+      # come off. Owning the middleware here is also the correct boundary: it is
+      # an app routing concern, which is why Hill90 was right to drop it.
+      - "traefik.http.middlewares.app-mcp-strip.stripprefix.prefixes=/mcp"
+      - "traefik.http.routers.app-mcp.middlewares=app-mcp-strip"

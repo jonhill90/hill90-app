@@ -1,0 +1,73 @@
+name: Manual Deploy App (Prod)
+
+# Manual-only, deliberately.
+#
+# Named "Manual Deploy App (Prod)" to Hill90's convention: it reserves the
+# unprefixed "Deploy ..." for its automatic push-triggered path and prefixes
+# every manually dispatched one with "Manual". If this ever gains a push trigger,
+# the name should lose the prefix at the same time.
+#
+# Hill90's deploy.yml also triggers on push to main behind path filters. This one
+# does not, for two reasons:
+#
+#   1. This app has never been deployed. The first run of a deploy path should be
+#      someone choosing to run it, not a merge doing it.
+#   2. Hill90's own runbook records an unattended push-triggered deploy as a risk
+#      (§4.5): a PR touching a filtered path fires a production deploy on merge,
+#      and one of Hill90's PRs was held for exactly that reason.
+#
+# ci.yml in this repo is workflow_dispatch-only on the same reasoning, so this
+# matches the repository's existing posture rather than introducing a new one.
+#
+# A push trigger can be added once the path has actually run and the deploy is
+# boring. It is not boring yet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Stack to deploy'
+        type: choice
+        options:
+          - ui
+          - db
+          - auth
+          - api
+          - ai
+          - knowledge
+          - mcp
+          - minio
+          - all
+        default: 'ui'
+      confirm_public_deploy:
+        description: >-
+          Required only for "all". Confirms ui was deployed and its certificate
+          checked first, per the runbook.
+        type: boolean
+        default: false
+      dry_run:
+        description: >-
+          Run every guard against the real host and STOP before deploying.
+          Use this first — it is the only way to test the pipeline without
+          deploying.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Shares a group with Hill90's deploy workflows would be wrong — different repo,
+# different runner — but two concurrent deploys of this app into one host is
+# exactly the collision container_name cannot survive.
+concurrency:
+  group: deploy-prod-hill90-app
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/reusable-deploy-service.yml
+    with:
+      service: ${{ inputs.service }}
+      confirm_public_deploy: ${{ inputs.confirm_public_deploy }}
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit

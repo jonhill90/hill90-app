@@ -19,7 +19,7 @@ networks:
 
 volumes:
   akm-keys:
-    name: akm-keys
+    name: ${VOLUME_PREFIX:-prod}_app-akm-keys
 
 services:
   # LiteLLM — stateless proxy for provider API routing
@@ -50,8 +50,8 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app-litellm.rule=Host(`${LITELLM_HOST:-litellm}.${BASE_DOMAIN:-hill90.com}`)"
-      - "traefik.http.routers.app-litellm.entrypoints=websecure"
-      - "traefik.http.routers.app-litellm.tls.certresolver=letsencrypt-dns"
+      - "traefik.http.routers.app-litellm.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.app-litellm.tls.certresolver=${ADMIN_CERT_RESOLVER:-letsencrypt-dns}"
       - "traefik.http.routers.app-litellm.middlewares=tailscale-only@file"
       - "traefik.http.services.app-litellm.loadbalancer.server.port=4000"
 

@@ -1,0 +1,18 @@
+# Local override: make the app-owned networks creatable in a single merged
+# invocation.
+#
+# Production deploys one stack at a time, and docker-compose.api.yml is the sole
+# creator of agent_sandbox while ai and knowledge consume it as external. That is
+# correct there. But merging every file into one `docker compose` call collapses
+# the two declarations, external wins, and nothing creates the network — so a
+# single-invocation local bring-up fails with agent_sandbox not found.
+#
+# scripts/local.sh --infra brings the whole app up at once, deliberately, because
+# a single Compose project is what keeps the app's routers inside the project
+# allowlist in Hill90's local Traefik config. This file reconciles the two.
+#
+# It is local-only and is never passed in production.
+networks:
+  agent_sandbox:
+    external: false
+    name: ${NETWORK_PREFIX:-hill90}_agent_sandbox
