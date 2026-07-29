@@ -3,8 +3,8 @@
 An AI agent platform that runs locally in Docker and, since 2026-07-29, in
 production as a tenant of the [Hill90](https://github.com/jonhill90/Hill90)
 platform. [hill90.com](https://hill90.com) serves the UI on a Let's Encrypt
-certificate. Four of eight stacks are deployed and healthy — `ui`, `db`, `auth`
-and `api`. See [Production](#production) for what is not.
+certificate. Six of the eight stacks are deployed and healthy; `mcp` and `minio`
+have never been deployed. See [Production](#production).
 
 ```bash
 ./scripts/local.sh up
@@ -247,14 +247,24 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
 `confirm_public_deploy`. `dry_run` runs every guard — secrets, tenancy contract,
 host paths — and stops before deploying anything.
 
-| Stack | State as of 2026-07-29 |
+**Verified against the host 2026-07-29 05:40 UTC** — 21 containers running, 0
+unhealthy, of which 13 are Hill90's platform baseline and 8 are this app.
+
+| Stack | State |
 |---|---|
-| `ui`, `db`, `auth`, `api` | deployed, healthy |
-| `knowledge` | crash-looping; fix merged to `main`, not yet deployed |
-| `ai` | deployed, unhealthy |
+| `db`, `auth`, `api`, `ui`, `knowledge`, `ai` | deployed, healthy |
 | `mcp`, `minio` | never deployed |
 
-Do not read the table as a roadmap. It is the state of the host.
+Do not read the table as a roadmap. It is the state of the host at the timestamp
+above, and it goes stale — re-check before relying on it.
+
+`knowledge` and `ai` both failed on first deploy and looked like two unrelated
+problems: `knowledge` crash-looped on `FileNotFoundError: /etc/akm/public.pem`
+while `ai` came up but never went healthy. **One cause.** Nothing seeded the
+`prod_app-akm-keys` volume, which both services mount at `/etc/akm`; the
+signing keys are generated locally by `scripts/local.sh` and there was no
+equivalent step in the deploy path. Once the volume held `public.pem` and
+`model-router-public.pem`, both recovered with no further change.
 
 ### Signing in
 
