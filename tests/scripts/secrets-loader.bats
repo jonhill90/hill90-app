@@ -355,3 +355,15 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"ONE_SOURCE_OF_TRUTH"* ]]
 }
+
+# --- app-keycloak must not follow APP_AUTH_HOST -----------------------------
+
+@test "app-keycloak's hostname and router rule are pinned, not APP_AUTH_HOST-derived" {
+    # Guards a latent production hazard: Traefik labels bake at container creation,
+    # so an APP_AUTH_HOST-derived rule would not fail at migration time — it would
+    # fail on a later unrelated `deploy.sh auth`, by claiming Hill90's own
+    # auth.<domain> hostname and taking Grafana/Portainer/OpenBao SSO with it.
+    run bash "$BATS_TEST_DIRNAME/keycloak-host-pin-check.sh" "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PIN_HOLDS"* ]]
+}

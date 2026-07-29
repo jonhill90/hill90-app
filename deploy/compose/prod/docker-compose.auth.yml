@@ -29,7 +29,17 @@ services:
       - KC_DB_URL=jdbc:postgresql://app-postgres:5432/keycloak
       - KC_DB_USERNAME=${DB_USER}
       - KC_DB_PASSWORD=${DB_PASSWORD}
-      - KC_HOSTNAME=${KC_HOSTNAME:-https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}}
+      # PINNED to the literal app-auth, deliberately NOT ${APP_AUTH_HOST}.
+      #
+      # APP_AUTH_HOST is the knob that repoints the APP's CONSUMERS (api, mcp, ui)
+      # at a different Keycloak. It must never move THIS container, which is the
+      # thing being migrated away from and the rollback target.
+      #
+      # If this followed APP_AUTH_HOST, flipping it to "auth" would make
+      # app-keycloak stamp `iss` as https://auth.hill90.com while still serving
+      # realm hill90 — so the fallback Keycloak would advertise an identity that is
+      # not its own, and the rollback would be broken at the moment it was needed.
+      - KC_HOSTNAME=${KC_HOSTNAME:-https://app-auth.${BASE_DOMAIN:-hill90.com}}
       - KC_PROXY_HEADERS=xforwarded
       - KC_HTTP_ENABLED=true
       - KC_HEALTH_ENABLED=true
@@ -62,10 +72,22 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.services.app-keycloak.loadbalancer.server.port=8080"
-      # All Keycloak traffic on ${APP_AUTH_HOST:-app-auth}.<domain> (admin
-      # protected by KC credentials + MFA). NOT auth.<domain> — that is
-      # Hill90's Keycloak and its OpenBao/Grafana/Portainer SSO.
-      - "traefik.http.routers.app-keycloak.rule=Host(`${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}`)"
+      # All Keycloak traffic on app-auth.<domain> (admin protected by KC
+      # credentials + MFA). NOT auth.<domain> — that is Hill90's Keycloak and its
+      # OpenBao/Grafana/Portainer SSO.
+      # PINNED to the literal app-auth. See KC_HOSTNAME above for why.
+      #
+      # This label is the dangerous one. Traefik labels bake at container creation,
+      # so this does not fail when APP_AUTH_HOST is flipped — it fails on some
+      # LATER, unrelated `deploy.sh auth`, long after the migration was called
+      # verified. At that point this router's rule becomes Host(`auth.hill90.com`):
+      # the identical rule, on the identical entrypoint, on the same Traefik, with
+      # both Keycloaks on hill90_edge. Traefik then picks between them
+      # non-deterministically, and app-keycloak has NO platform realm — so Grafana,
+      # Portainer and OpenBao SSO, which all live on
+      # auth.hill90.com/realms/platform, break with no change having been deployed
+      # to them.
+      - "traefik.http.routers.app-keycloak.rule=Host(`app-auth.${BASE_DOMAIN:-hill90.com}`)"
       - "traefik.http.routers.app-keycloak.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.app-keycloak.tls.certresolver=${PUBLIC_CERT_RESOLVER:-letsencrypt}"
       - "traefik.http.routers.app-keycloak.service=app-keycloak"
