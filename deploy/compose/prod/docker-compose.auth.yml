@@ -1,3 +1,17 @@
+# RETIRED IN PRODUCTION — 2026-07-30.
+#
+# app-keycloak was stopped and removed from the VPS. The app authenticates against
+# Hill90's Keycloak at auth.hill90.com, realm `platform`, and a human has completed a
+# sign-in there. app-auth.hill90.com is no longer routed and returns 404.
+#
+# This file is deliberately NOT deleted. deploy/compose/overrides/local.auth.yml layers
+# on it, and LOCAL development still runs the app's own Keycloak — deleting it would
+# break local while gaining nothing in production, where scripts/deploy.sh now refuses
+# the `auth` stack and has dropped it from DEPLOY_REST.
+#
+# Realm hill90 was exported WITH users before removal; the export lives on the VPS at
+# /opt/hill90/backups/app-realm-final/. See docs/decisions/retiring-app-keycloak.md.
+#
 version: '3.9'
 
 # Keycloak identity provider
