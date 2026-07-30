@@ -6,6 +6,43 @@
 const AKM_SERVICE_URL = process.env.AKM_SERVICE_URL || 'http://knowledge:8002';
 const AKM_INTERNAL_SERVICE_TOKEN = process.env.AKM_INTERNAL_SERVICE_TOKEN;
 
+/**
+ * Read an AKM response body without letting the parser replace the real fault.
+ *
+ * This used to be `await resp.json()` at every call site. FastAPI's default 500 body is
+ * the plain text "Internal Server Error", so a genuine AKM failure made the parser
+ * throw, and the throw propagated out past the cause. What reached the log was
+ * `SyntaxError: Unexpected token 'I', "Internal S"... is not valid JSON`, while the
+ * AKM's actual error — a frontmatter validation failure, in the case that found this —
+ * was nowhere.
+ *
+ * A non-JSON body is now returned AS the error, with the upstream status preserved, so
+ * the caller sees what the knowledge service actually said.
+ */
+async function readBody(resp: Response): Promise<unknown> {
+  let text: string;
+  try {
+    text = await resp.text();
+  } catch {
+    return { error: `Knowledge service response could not be read (HTTP ${resp.status})` };
+  }
+
+  if (!text) return {};
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Truncated: an upstream that returns a page of HTML should not put a page of HTML
+    // into our logs, but the first few hundred characters are where the cause lives.
+    return {
+      error: `Knowledge service returned a non-JSON response (HTTP ${resp.status})`,
+      upstream_status: resp.status,
+      upstream_body: text.slice(0, 500),
+    };
+  }
+}
+
+
 export interface ProxyResponse {
   status: number;
   data: unknown;
@@ -36,7 +73,7 @@ async function proxyGet(path: string, params?: Record<string, string>): Promise<
     return { status: 502, data: { error: 'Knowledge service unavailable' } };
   }
 
-  const data = await resp.json();
+  const data = await readBody(resp);
   return { status: resp.status, data };
 }
 
@@ -81,7 +118,7 @@ export async function createEntry(agentId: string, path: string, content: string
     return { status: 502, data: { error: 'Knowledge service unavailable' } };
   }
 
-  const data = await resp.json();
+  const data = await readBody(resp);
   return { status: resp.status, data };
 }
 
@@ -106,6 +143,6 @@ export async function appendJournal(agentId: string, content: string): Promise<P
     return { status: 502, data: { error: 'Knowledge service unavailable' } };
   }
 
-  const data = await resp.json();
+  const data = await readBody(resp);
   return { status: resp.status, data };
 }
