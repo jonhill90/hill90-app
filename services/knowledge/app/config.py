@@ -6,7 +6,16 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     port: int = 8002
-    database_url: str = "postgresql://postgres:postgres@postgres:5432/hill90_akm"
+    # REQUIRED. No default, deliberately.
+    #
+    # The old default was postgresql://postgres:postgres@postgres:5432/hill90_akm.
+    # Its host and database are already correct for the platform Postgres, so after
+    # the cutover it would be right except for the credentials -- failing only
+    # because role `postgres` does not exist there. A default that is wrong today
+    # and nearly right later turns a missing variable into a puzzle instead of an
+    # error. Same family as the retired auth.hill90.com/realms/hill90 issuer
+    # fallback.
+    database_url: str
     public_key_path: str = "/etc/akm/public.pem"
     private_key_path: str = "/etc/akm/private.pem"
     data_dir: str = "/data/knowledge"

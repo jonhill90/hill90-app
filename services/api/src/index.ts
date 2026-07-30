@@ -42,7 +42,14 @@ async function start() {
       console.error('[startup] Agent reconciliation failed:', err);
     }
   } else {
-    console.log('[startup] DATABASE_URL not set, skipping migrations');
+    // Was: log and carry on. During a cutover, where the variable name itself is
+    // changing, that turns a typo into a GREEN container with no schema — a healthy
+    // process serving an empty database, which no health check can see. Fail, so the
+    // deploy fails instead.
+    throw new Error(
+      '[startup] DATABASE_URL is not set. Refusing to start: migrations would be ' +
+      'skipped and the service would report healthy against an empty database.',
+    );
   }
 
   // Ensure MinIO avatar bucket exists (safe-fail: log error but continue)

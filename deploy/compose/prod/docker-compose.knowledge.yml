@@ -41,7 +41,7 @@ services:
       - akm-keys:/etc/akm:ro
     environment:
       - AKM_PORT=8002
-      - AKM_DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_akm
+      - AKM_DATABASE_URL=postgresql://${PLATFORM_DB_USER}:${PLATFORM_DB_PASSWORD}@${PLATFORM_DB_HOST}:5432/hill90_akm
       - AKM_PUBLIC_KEY_PATH=/etc/akm/public.pem
       - AKM_DATA_DIR=/data/knowledge
       - AKM_CONTEXT_TOKEN_BUDGET=2000
