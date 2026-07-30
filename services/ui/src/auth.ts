@@ -1,6 +1,7 @@
 import NextAuth from "next-auth"
 import Keycloak from "next-auth/providers/keycloak"
 import type { JWT } from "next-auth/jwt"
+import { rolesFromAccessToken } from "./auth-roles"
 
 function requireEnv(name: string): string {
   const value = process.env[name]
@@ -103,10 +104,6 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     async jwt({ token, account }) {
       // Initial sign-in: persist tokens and roles from Keycloak
       if (account) {
-        const decoded = account.access_token
-          ? JSON.parse(Buffer.from(account.access_token.split(".")[1], "base64url").toString())
-          : {}
-
         return {
           ...token,
           accessToken: account.access_token,
@@ -114,8 +111,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           refreshToken: account.refresh_token,
           accessTokenExpires: account.expires_at ? account.expires_at * 1000 : Date.now() + 300_000,
           // Client roles on hill90-ui, not realm roles: realm roles in the shared
-          // platform realm grant Grafana Admin and OpenBao access.
-          roles: decoded.resource_access?.[process.env.AUTH_KEYCLOAK_ID || 'hill90-ui']?.roles ?? [],
+          // platform realm grant Grafana Admin and OpenBao access. An absent claim is
+          // logged rather than silently becoming an empty role set — see auth-roles.ts.
+          roles: rolesFromAccessToken(account.access_token),
         }
       }
 
