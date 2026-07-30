@@ -395,7 +395,7 @@ or, if it came from the local tenant path:
             if [ "${ALLOW_CLIENT_SECRET_MISMATCH:-0}" = "1" ]; then
                 warn "ALLOW_CLIENT_SECRET_MISMATCH=1 — not checking that ${AUTH_KEYCLOAK_ID:-hill90-ui}'s secret matches the running Keycloak. Login may fail after the password is accepted."
             else
-                require_client_secret_matches \
+                require_client_secret_works \
                     || die "Refusing to deploy ${stack}: the client secret in the running Keycloak does not match the store, so logins will fail at the token exchange even though every container reports healthy.
 Repair procedure: docs/runbooks/one-keycloak-migration.md (the client-secret section).
 To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"

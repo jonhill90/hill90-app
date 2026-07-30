@@ -440,154 +440,95 @@ require_file_middlewares() {
 }
 
 # ---------------------------------------------------------------------------
-# The client secret in the running Keycloak must equal AUTH_KEYCLOAK_SECRET.
+# The app's client secret must AUTHENTICATE against the platform Keycloak.
 #
 # WHY THIS EXISTS
 #
 # On 2026-07-29 production login had been broken since the app was first deployed,
-# and every health check passed the whole time. Keycloak authenticated the user,
-# then refused the code-for-token exchange:
+# and every health check passed the whole time. Keycloak authenticated the user, then
+# refused the code-for-token exchange with `unauthorized_client`, one redirect further
+# on than any probe had gone.
 #
-#   [auth][details]: { "error": "unauthorized_client",
-#                      "error_description": "Invalid client or Invalid client credentials" }
+# WHY IT IS AN AUTHENTICATION TEST AND NOT A COMPARISON
 #
-# app-ui was healthy, /api/auth/signin returned 200, and the failure was one
-# redirect further on than any probe had gone. Keycloak held a 32-char secret it had
-# MINTED at realm import; the store held a 64-char value that was never applied.
+# The first version read the secret out of Keycloak over the ADMIN API and compared it
+# to the store. That worked while the Keycloak was the app's own. It cannot work now:
+# the app is a tenant of the platform realm, and a tenant has no business holding the
+# platform IdP's admin credentials. It failed closed on the first ui deploy with
+# admin_token_status=401 — right behaviour, permanently unsatisfiable.
 #
-# platform/auth/keycloak/hill90-realm.json declares the confidential clients with no
-# `secret` field, and app-keycloak runs `start --import-realm`, so Keycloak mints one
-# every time it imports. It will do so again on ANY re-import — including the
-# one-Keycloak migration, whose §5 depends on secrets surviving.
+# Token introspection requires CLIENT authentication, so the client's own secret is
+# sufficient: 200 means it authenticated, 401 means it did not. That is also a
+# stronger property than string equality — two matching strings prove storage agrees,
+# a 200 proves the credential works.
 #
-# This guard would have failed on the first deploy.
+# The assertion layer never receives the secret. It takes an HTTP status.
 # ---------------------------------------------------------------------------
 
-# Pure comparison, split out from the fetching so it is testable without a live
-# Keycloak or an age key. Never prints either value.
-assert_client_secret_agrees() {
-    local client="${1:?client id required}" from_kc="${2-}" from_store="${3-}"
-    local kc_len=${#from_kc} store_len=${#from_store}
-    local kc_hash store_hash
-
-    # Pick the tool by EXISTENCE, not by exit status through a pipe.
-    #
-    # The first version was `printf | shasum | cut || printf | sha256sum | cut`.
-    # `||` reads the exit status of the LAST command in the pipeline, which is
-    # `cut`, and cut succeeds even when shasum is missing — so with pipefail off the
-    # fallback never ran and the hash came out EMPTY. The verdict stayed correct
-    # (the comparison uses the raw values) but the diagnostic silently emptied, and
-    # only under one pipefail setting. Same family as the grep-through-a-pipe bug
-    # that made require_compose_interpolation inert.
-    _hash12() {
-        local _h=""
-        if command -v sha256sum >/dev/null 2>&1; then
-            _h="$(printf '%s' "$1" | sha256sum)"
-        elif command -v shasum >/dev/null 2>&1; then
-            _h="$(printf '%s' "$1" | shasum -a 256)"
-        else
-            printf 'nohashtool'
+# Pure, testable: maps an introspection status to a verdict.
+assert_client_auth() {
+    local client="${1:?client id required}" code="${2-}"
+    case "$code" in
+        200)
+            echo "CLIENT_SECRET_WORKS for ${client} (client authenticated against the realm)"
             return 0
-        fi
-        printf '%s' "${_h:0:12}"
-    }
-
-    # Blank is never a match, even against another blank. Two empty strings compare
-    # equal, and a fetch that silently returned nothing plus a store value that
-    # decrypted to nothing would then report success — the exact shape of the
-    # secrets-loader incident, in a different place.
-    if [ "$kc_len" -eq 0 ] || [ "$store_len" -eq 0 ]; then
-        echo "CLIENT_SECRET_UNVERIFIABLE for ${client}"
-        echo "  keycloak-side length: ${kc_len}   store-side length: ${store_len}"
-        echo "  One of them is empty, so they cannot be compared. This is a FAILURE,"
-        echo "  not a match: two blanks are equal and would otherwise pass."
-        echo "  Symptom if wrong: Keycloak returns unauthorized_client at the"
-        echo "  code-for-token exchange, after the login form has already worked."
-        return 1
-    fi
-
-    kc_hash="$(_hash12 "$from_kc")"
-    store_hash="$(_hash12 "$from_store")"
-
-    if [ "$from_kc" = "$from_store" ]; then
-        echo "CLIENT_SECRET_AGREES for ${client} (sha256/12 ${kc_hash}, length ${kc_len})"
-        return 0
-    fi
-
-    echo "CLIENT_SECRET_MISMATCH for ${client}"
-    echo "  keycloak: length ${kc_len}  sha256/12 ${kc_hash}"
-    echo "  store:    length ${store_len}  sha256/12 ${store_hash}"
-    echo "  Values are never printed — compare the hashes."
-    echo ""
-    echo "  Consequence: Keycloak will authenticate the user and then refuse the"
-    echo "  code-for-token exchange with unauthorized_client, so login fails AFTER"
-    echo "  the password has been accepted. Health checks cannot see this."
-    echo ""
-    echo "  Cause is usually a realm import: the committed realm JSON declares the"
-    echo "  confidential clients with no secret, so Keycloak mints a fresh one and"
-    echo "  the store's value is never applied. See the repair in"
-    echo "  docs/runbooks/one-keycloak-migration.md (the client-secret section)."
-    return 1
-}
-
-# Fetch both sides and compare. Requires AUTH_KEYCLOAK_SECRET in the environment
-# (load_secrets provides it) and admin credentials for the app's own Keycloak.
-#
-# Fails closed on every path: an unreachable Keycloak, a failed admin login and a
-# missing client are all failures, not skips. A guard that skips when it cannot look
-# is a guard that reports success on the day it was needed.
-require_client_secret_matches() {
-    local client="${1:-${AUTH_KEYCLOAK_ID:-hill90-ui}}"
-    local realm="${KC_REALM:-platform}"
-    # The PLATFORM Keycloak, not the app's. The app is a tenant of realm `platform`;
-    # app-keycloak is being retired. Overridable so the check can be aimed elsewhere.
-    local kc_container="${2:-${KEYCLOAK_CONTAINER:-keycloak}}"
-    local base="http://localhost:8080"
-
-    if [ -z "${AUTH_KEYCLOAK_SECRET:-}" ]; then
-        die "AUTH_KEYCLOAK_SECRET is not in the environment. Load secrets before calling require_client_secret_matches."
-    fi
-    if [ -z "${KC_ADMIN_USERNAME:-}" ] || [ -z "${KC_ADMIN_PASSWORD:-}" ]; then
-        die "KC_ADMIN_USERNAME/KC_ADMIN_PASSWORD are not in the environment, so the running Keycloak cannot be interrogated."
-    fi
-    docker inspect "$kc_container" >/dev/null 2>&1 \
-        || die "${kc_container} is not running, so its client secret cannot be checked. This is a failure rather than a skip: the one time it matters is the time the container is in an unexpected state."
-
-    # python3 inside the container is not guaranteed, and the Keycloak image has no
-    # curl, so the admin API is called from a --rm helper on the container's own
-    # network namespace. Credentials go in the environment, never in argv.
-    local out
-    out="$(docker run --rm --network "container:${kc_container}" \
-             -e KCU="$KC_ADMIN_USERNAME" -e KCP="$KC_ADMIN_PASSWORD" \
-             -e REALM="$realm" -e CLIENT="$client" -e BASE="$base" \
-             python:3.12-alpine python3 -c '
-import os, json, urllib.request, urllib.parse, urllib.error, sys
-B=os.environ["BASE"]
-def call(p, data=None, tok=None, form=False):
-    h={}; b=None
-    if data is not None:
-        b=urllib.parse.urlencode(data).encode() if form else json.dumps(data).encode()
-        h["Content-Type"]="application/x-www-form-urlencoded" if form else "application/json"
-    if tok: h["Authorization"]="Bearer "+tok
-    try:
-        with urllib.request.urlopen(urllib.request.Request(B+p,data=b,headers=h),timeout=20) as r:
-            raw=r.read(); return r.status,(json.loads(raw) if raw else None)
-    except urllib.error.HTTPError as e: return e.code,None
-    except Exception: return 0,None
-s,t=call("/realms/master/protocol/openid-connect/token",form=True,data={
-    "grant_type":"password","client_id":"admin-cli",
-    "username":os.environ["KCU"],"password":os.environ["KCP"]})
-if s!=200: print("FETCH_FAILED admin_token_status="+str(s)); sys.exit(3)
-s,cs=call("/admin/realms/%s/clients?clientId=%s"%(os.environ["REALM"],os.environ["CLIENT"]),tok=t["access_token"])
-if s!=200 or not cs: print("FETCH_FAILED client_lookup_status="+str(s)); sys.exit(4)
-print(cs[0].get("secret") or "")
-' 2>/dev/null)" || true
-
-    case "$out" in
-        FETCH_FAILED*|"")
-            die "Could not read ${client}'s secret from ${kc_container}: ${out:-no output}. Failing closed."
+            ;;
+        401|403)
+            echo "CLIENT_SECRET_REJECTED for ${client} (HTTP ${code})"
+            echo "  The realm refused this client's credentials, so the secret in the"
+            echo "  store is not the secret the realm holds."
+            echo ""
+            echo "  Consequence: Keycloak will authenticate the USER correctly and then"
+            echo "  refuse the code-for-token exchange with unauthorized_client, so login"
+            echo "  fails AFTER the password is accepted. No health check can see this."
+            echo ""
+            echo "  Repair: docs/runbooks/one-keycloak-migration.md (the client-secret"
+            echo "  section). Do not regenerate the secret — align it."
+            return 1
+            ;;
+        *)
+            echo "CLIENT_SECRET_UNVERIFIABLE for ${client} (HTTP ${code:-<none>})"
+            echo "  Neither 200 nor 401: the realm could not be asked. A wrong realm gives"
+            echo "  404, an unreachable Keycloak gives no status at all."
+            echo "  This is a FAILURE, not a pass. A guard that treats cannot-tell as fine"
+            echo "  reports success on the day it was needed."
+            return 1
             ;;
     esac
+}
 
-    assert_client_secret_agrees "$client" "$out" "$AUTH_KEYCLOAK_SECRET" || return 1
+# Ask the realm whether the store's secret authenticates. Needs no privileges beyond
+# the client's own credentials.
+require_client_secret_works() {
+    local client="${1:-${AUTH_KEYCLOAK_ID:-hill90-ui}}"
+    local realm="${KC_REALM:-platform}"
+    local kc_container="${2:-${KEYCLOAK_CONTAINER:-keycloak}}"
+
+    [ -n "${AUTH_KEYCLOAK_SECRET:-}" ] \
+        || die "AUTH_KEYCLOAK_SECRET is not in the environment. Load secrets before calling require_client_secret_works."
+    docker inspect "$kc_container" >/dev/null 2>&1 \
+        || die "${kc_container} is not running, so ${client}'s secret cannot be verified. Failing closed: the one time this matters is the time the container is in an unexpected state."
+
+    # Runs in the Keycloak container's network namespace so it can reach localhost:8080
+    # without depending on the edge. The secret goes in via the environment, never argv.
+    local code
+    code="$(docker run --rm --network "container:${kc_container}" \
+              -e SEC="$AUTH_KEYCLOAK_SECRET" -e CID="$client" -e REALM="$realm" \
+              python:3.12-alpine python3 -c '
+import os, urllib.request, urllib.parse, urllib.error
+d = urllib.parse.urlencode({"client_id": os.environ["CID"],
+                            "client_secret": os.environ["SEC"],
+                            "token": "probe-not-a-real-token"}).encode()
+u = "http://localhost:8080/realms/%s/protocol/openid-connect/token/introspect" % os.environ["REALM"]
+r = urllib.request.Request(u, data=d, headers={"Content-Type": "application/x-www-form-urlencoded"})
+try:
+    with urllib.request.urlopen(r, timeout=20) as x:
+        print(x.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print("000")
+' 2>/dev/null)" || code=""
+
+    assert_client_auth "$client" "$code" || return 1
 }
