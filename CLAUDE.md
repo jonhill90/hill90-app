@@ -80,39 +80,61 @@ Most of these were bought with a real bug. They are not style preferences.
   `scripts/deploy.sh` deliberately mirrors Hill90's.
 - Never commit a credential, an age key, or a decrypted `.env`.
 
-## Open decisions — do not write these as settled
+## The governing principle
 
-**One Keycloak is the decision; two are running.** Today the platform runs
-`keycloak` (realms `master`, `platform`) and the app runs `app-keycloak` (realms
-`master`, `hill90`) — verified 2026-07-29 05:55 UTC. **Decided:** there will be
-one Keycloak, and the app will stop shipping its own. **Not decided:** whether
-the app's clients land in a new `hill90` realm on the platform Keycloak or in
-the existing `platform` realm — one Keycloak does not mean one realm. **Not
-started:** no migration has happened, and the platform Keycloak has no `hill90`
-realm to consolidate into. Export before delete, never the reverse.
+**The platform provides identity, data and storage. This app consumes them.**
+Every consolidation decision follows from it. Check a new question against this
+before treating it as open.
 
-**Postgres is still two instances** — Hill90's `postgres` and the app's
-`app-postgres`, on separate volumes. **No decision has been recorded.** Note
-that consolidating data is not obviously the same move as consolidating
-identity: Hill90's health check asserts platform-only databases, which is a
-designed boundary.
+## Settled — do not reopen or re-describe as open
 
-**Users.** The app's realm import ships **zero** users while the local realm
-bakes in a `dev` account. Production accounts are created by an operator with
-temporary passwords changed at first login, and they exist only in the app's
-database. No credential belongs in this repo. See `RESURRECTION.md` §10.
+**This is greenfield, not a migration.** The app reached the VPS for the first
+time on 2026-07-29. Realm `hill90` holds two accounts created hours earlier
+which, since login never worked, have never been used. There is no accumulated
+state. Export, import, rollback and cutover are the wrong frame — the realm
+export and the database backup are a **safety net**, not steps in a process.
 
-**Tenancy detachment — proven.** The yank-out test passed on 2026-07-29:
-teardown left Hill90 at exactly its 13-container baseline with all shared
-networks intact, the redeploy brought the app back to 10 healthy containers,
-`hill90.com` answered 200, and both user accounts survived in the database.
-Detachability is no longer an assumption.
+**Keycloak: one Keycloak, one realm, the existing `platform`.** This app's
+clients go into `platform`; there is no new `hill90` realm. The reasoning is an
+Entra analogy — you do not create a second tenant for one organisation; one
+directory, controlled with roles and groups, and infra-versus-app is role and
+client assignment inside it. An earlier version of this file said *"one Keycloak
+does not mean one realm"*; that was wrong and framed a settled question as open.
 
-**Production login does not work and never has** (confirmed 2026-07-29
-09:23 UTC): the `hill90-ui` client secret Keycloak minted at import is not the
-one `app-ui` holds, because `hill90-realm.json` declares clients with no `secret`
-field. **Do not write anything implying a user can sign in.** Reachable is not
-working — that distinction is what let this survive a full deployment.
+**Postgres: `app-postgres` goes.** This app consumes the platform's Postgres. The
+complication is real and is not the Keycloak steps repeated: Hill90's health check
+asserts *platform-only databases*, so that boundary needs revisiting deliberately.
+
+## Genuinely open
+
+**MinIO, and the state is reversed.** Only `app-minio` exists; there is **no
+platform MinIO**. The question is whether storage moves *up* into the platform,
+which the governing principle suggests it should. Never addressed.
+
+## Auth — what is true right now
+
+**The `hill90-ui` client secret is repaired** (~23:50 UTC 2026-07-29; Keycloak and
+the store agree, both 64 chars, matching hash, verified 00:15 UTC 2026-07-30), and
+**client authentication succeeds**.
+
+**That is not login working.** No human has completed a sign-in. Do not write
+anything implying one has. Two distinctions cost this estate a night: *reachable
+is not working*, and *authenticating is not signing in*.
+
+Note when diagnosing: the correct and the wrong secret **both return HTTP 401**.
+The correct one says *Client not enabled to retrieve service account* — the client
+authenticated and that grant is simply not permitted. The wrong one says *Invalid
+client or Invalid client credentials*. Read the body, not the status.
+
+**Users.** The realm import ships **zero** users. `jon` and `hill90admin` were
+created by hand with temporary passwords; `testuser01` has a non-temporary one,
+encrypted at `infra/secrets/test-accounts.enc.env`. No credential belongs in this
+repo in plaintext. See `RESURRECTION.md` §10.
+
+**Tenancy detachment — proven.** The yank-out test passed on 2026-07-29: teardown
+left Hill90 at exactly its 13-container baseline with all shared networks intact,
+the redeploy brought the app back to 10 healthy containers, and both accounts
+survived in the database.
 
 ## Fast facts
 
