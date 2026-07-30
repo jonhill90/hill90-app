@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings
 
 
@@ -13,8 +14,13 @@ class Settings(BaseSettings):
     litellm_url: str = "http://litellm:4000"
     litellm_master_key: str = ""
 
-    # Database (shared hill90_api DB for policy/usage tables)
-    database_url: str = ""
+    # Database (shared hill90_api DB for policy/usage tables).
+    #
+    # REQUIRED, with no default, deliberately. It used to be `= ""`, and main.py
+    # treated the empty case as a warning and served anyway — a process reporting
+    # healthy while the database holding its policy and usage tables was absent. That
+    # is the shape that hid the last three faults in this estate, so it fails closed.
+    database_url: str
 
     # Ed25519 public key for JWT verification
     public_key_path: str = "/etc/akm/public.pem"
@@ -37,7 +43,31 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    """Build Settings, turning a missing variable into an operator-readable failure.
+
+    Pydantic's own error is correct and structured — `database_url`, `type: missing` —
+    but it says the FIELD name in lowercase and cannot know which service it belongs
+    to. What an operator actually sees is a container that exited, and eight services
+    share thirty variables between them. So the message names the variable in the case
+    they set it in, and names the service.
+    """
+    try:
+        return Settings()
+    except ValidationError as e:
+        missing = [
+            ".".join(str(p) for p in err["loc"])
+            for err in e.errors()
+            if err["type"] == "missing"
+        ]
+        if missing:
+            names = ", ".join(m.upper() for m in missing)
+            raise RuntimeError(
+                f"app-ai cannot start: required environment variable(s) not set: "
+                f"{names}. app-ai serves the model router and needs DATABASE_URL for "
+                f"its policy and usage tables; it will not start without one rather "
+                f"than report healthy while unable to read them."
+            ) from e
+        raise
 
 
 def load_public_key(path: str | None = None) -> bytes:
