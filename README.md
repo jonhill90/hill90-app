@@ -269,20 +269,20 @@ signing keys are generated locally by `scripts/local.sh` and there was no
 equivalent step in the deploy path. Once the volume held `public.pem` and
 `model-router-public.pem`, both recovered with no further change.
 
-### Signing in — currently broken
+### Signing in — client authentication works; sign-in unproven
 
-> **Nobody can sign in to production, and nobody has been able to since it was
-> deployed.** Confirmed 2026-07-29 09:23 UTC. The `hill90-ui` client secret
-> Keycloak minted at realm import is not the one `app-ui` holds, so the token
-> exchange fails with `unauthorized_client`.
-> `platform/auth/keycloak/hill90-realm.json` declares its clients with no
-> `secret` field, so Keycloak generates one at import while the secrets store
-> carries a value that was never applied.
+> **The `hill90-ui` client secret is repaired** (~23:50 UTC 2026-07-29). Keycloak
+> and the store agree — both 64 characters, matching hash, verified 00:15 UTC
+> 2026-07-30 — and **client authentication succeeds**.
 >
-> Not a regression — it has never worked. The repair is prepared in
-> [`docs/runbooks/one-keycloak-migration.md`](docs/runbooks/one-keycloak-migration.md).
-> What follows is the intended flow: the redirect chain works and the form
-> renders, but the exchange after it does not.
+> **No human has completed a sign-in.** That is a different claim and it is still
+> unproven. Two distinctions cost this project a night: *reachable is not
+> working*, and *authenticating is not signing in*.
+>
+> Diagnosing note: correct and wrong secrets **both return HTTP 401**. The correct
+> one says *Client not enabled to retrieve service account* — authenticated, that
+> grant simply not permitted. The wrong one says *Invalid client or Invalid client
+> credentials*. Read the body, not the status.
 
 [hill90.com](https://hill90.com) → **Sign in** redirects to
 `app-auth.hill90.com`, the app's own Keycloak, using PKCE and the `hill90-ui`
@@ -292,12 +292,28 @@ published here, and none are seeded — see
 [RESURRECTION.md](RESURRECTION.md#10-the-production-realm-ships-with-no-users--open)
 for why that is a known gap rather than an oversight.
 
-### Two Keycloaks, two Postgres
+### Consolidation — decided, not yet done
+
+**The platform provides identity, data and storage; this app consumes them.**
+Every decision below follows from that.
 
 Production currently runs both Hill90's platform services and the app's own:
 Hill90 holds realm `platform` on `auth.hill90.com`, the app holds realm `hill90`
 on `app-auth.hill90.com`, and each has its own Postgres with separate volumes.
-**Whether these consolidate is an open question and is not decided here.**
+That is the current state, not the target.
+
+- **Keycloak — decided.** One Keycloak, one realm, the **existing `platform`**.
+  No new `hill90` realm. You do not create a second directory for one
+  organisation; infra-versus-app is role and client assignment inside it.
+- **Postgres — decided.** `app-postgres` goes. The complication is real and is
+  not the Keycloak steps repeated: Hill90's health check asserts *platform-only
+  databases*.
+- **MinIO — open**, and reversed: only `app-minio` exists, there is **no platform
+  MinIO**, so the question is whether storage moves *up*.
+
+This is **greenfield configuration, not a migration** — the app first reached the
+VPS on 2026-07-29 and has no accumulated state. The realm export and database
+backup are a safety net, not steps in a process.
 
 The tenancy is detachable, and this has been **tested rather than assumed**. On
 2026-07-29 the app was torn down to a single container and redeployed: Hill90
@@ -306,7 +322,7 @@ intact, the app came back to 10 healthy containers, `hill90.com` answered 200,
 the login form was reachable, and both user accounts survived in the database.
 The yank-out test passed. Note the limit: accounts surviving is a data claim, and
 the login form rendering is a routing claim — neither means a user can sign in.
-See [Signing in](#signing-in--currently-broken).
+See [Signing in](#signing-in--client-authentication-works-sign-in-unproven).
 
 ### Backups
 
