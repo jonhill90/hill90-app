@@ -123,9 +123,9 @@ stack_secrets() {
     case "$1" in
         db)        printf 'DB_USER DB_PASSWORD' ;;
         auth)      printf 'DB_USER DB_PASSWORD KC_ADMIN_USERNAME KC_ADMIN_PASSWORD' ;;
-        api)       printf 'DB_USER DB_PASSWORD AKM_INTERNAL_SERVICE_TOKEN AKM_SIGNING_PRIVATE_KEY ANTHROPIC_API_KEY CHAT_CALLBACK_TOKEN MINIO_ROOT_USER MINIO_ROOT_PASSWORD MODEL_ROUTER_INTERNAL_SERVICE_TOKEN MODEL_ROUTER_SIGNING_PRIVATE_KEY PROVIDER_KEY_ENCRYPTION_KEY' ;;
-        ai)        printf 'DB_USER DB_PASSWORD ANTHROPIC_API_KEY LITELLM_MASTER_KEY MODEL_ROUTER_INTERNAL_SERVICE_TOKEN OPENAI_API_KEY PROVIDER_KEY_ENCRYPTION_KEY' ;;
-        knowledge) printf 'DB_USER DB_PASSWORD AKM_INTERNAL_SERVICE_TOKEN LITELLM_MASTER_KEY MODEL_ROUTER_INTERNAL_SERVICE_TOKEN' ;;
+        api)       printf 'PLATFORM_DB_HOST PLATFORM_DB_USER PLATFORM_DB_PASSWORD AKM_INTERNAL_SERVICE_TOKEN AKM_SIGNING_PRIVATE_KEY ANTHROPIC_API_KEY CHAT_CALLBACK_TOKEN MINIO_ROOT_USER MINIO_ROOT_PASSWORD MODEL_ROUTER_INTERNAL_SERVICE_TOKEN MODEL_ROUTER_SIGNING_PRIVATE_KEY PROVIDER_KEY_ENCRYPTION_KEY' ;;
+        ai)        printf 'PLATFORM_DB_HOST PLATFORM_DB_USER PLATFORM_DB_PASSWORD ANTHROPIC_API_KEY LITELLM_MASTER_KEY MODEL_ROUTER_INTERNAL_SERVICE_TOKEN OPENAI_API_KEY PROVIDER_KEY_ENCRYPTION_KEY' ;;
+        knowledge) printf 'PLATFORM_DB_HOST PLATFORM_DB_USER PLATFORM_DB_PASSWORD AKM_INTERNAL_SERVICE_TOKEN LITELLM_MASTER_KEY MODEL_ROUTER_INTERNAL_SERVICE_TOKEN' ;;
         minio)     printf 'MINIO_ROOT_USER MINIO_ROOT_PASSWORD' ;;
         ui)        printf 'AUTH_SECRET AUTH_KEYCLOAK_ID AUTH_KEYCLOAK_SECRET' ;;
         # NONE is an explicit sentinel, not an empty string. mcp interpolates no
@@ -148,7 +148,7 @@ cname() { printf '%s%s' "${CONTAINER_PREFIX:-}" "$1"; }
 
 stack_summary() {
     case "$1" in
-        db)        printf 'app-postgres — the app'"'"'s own database. Hill90'"'"'s asserts platform-only databases.' ;;
+        db)        printf 'app-postgres — KEPT RUNNING as the rollback target while services cut over to the platform Postgres. No longer the app'"'"'s data path.' ;;
         auth)      printf 'app-keycloak — realm hill90, on ${APP_AUTH_HOST:-app-auth}. Hill90 keeps auth.<domain>.' ;;
         api)       printf 'app-api, app-docker-proxy — control plane; creates agent_sandbox and docker_proxy' ;;
         ai)        printf 'app-ai, app-litellm — model router; internal-only' ;;

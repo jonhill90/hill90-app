@@ -37,7 +37,7 @@ services:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_litellm
+      - DATABASE_URL=postgresql://${PLATFORM_DB_USER}:${PLATFORM_DB_PASSWORD}@${PLATFORM_DB_HOST}:5432/hill90_litellm
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request, sys; r=urllib.request.urlopen('http://localhost:4000/health/liveliness'); sys.exit(0 if r.status < 400 else 1)"]
@@ -79,7 +79,7 @@ services:
       - PORT=8000
       - LITELLM_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_api
+      - DATABASE_URL=postgresql://${PLATFORM_DB_USER}:${PLATFORM_DB_PASSWORD}@${PLATFORM_DB_HOST}:5432/hill90_api
       - PUBLIC_KEY_PATH=/etc/akm/model-router-public.pem
       - MODEL_ROUTER_INTERNAL_SERVICE_TOKEN=${MODEL_ROUTER_INTERNAL_SERVICE_TOKEN}
       - PROVIDER_KEY_ENCRYPTION_KEY=${PROVIDER_KEY_ENCRYPTION_KEY}
