@@ -81,19 +81,34 @@ async def lifespan(app: FastAPI):
 
     settings = get_settings()
 
-    # Init DB pool
-    if settings.database_url:
-        try:
-            _db_pool = await asyncpg.create_pool(settings.database_url, min_size=2, max_size=10)
-            # Preload revoked JTIs
-            async with _db_pool.acquire() as conn:
-                await revocation_manager.preload(conn)
-            revocation_manager.start_cleanup_loop(_db_pool)
-            logger.info("db_connected", pool_size=10)
-        except Exception as e:
-            logger.error("db_connection_failed", error=str(e))
-    else:
-        logger.warning("database_url_not_set")
+    # Init DB pool.
+    #
+    # FAIL CLOSED. There is no branch here that serves without a database.
+    #
+    # The missing-variable case is gone: settings.database_url is required, so
+    # get_settings() above has already raised with a message naming the variable and
+    # the service. What remains is the connection itself, and it used to be
+    # `except Exception: logger.error(...)` followed by serving anyway — which produces
+    # exactly the same healthy-but-useless process as no configuration at all.
+    # "Configured but unreachable" is not a better state than "not configured".
+    #
+    # The consequence is deliberate and worth knowing: a database that is briefly
+    # unavailable at boot now prevents boot instead of yielding a container that is up
+    # and cannot answer. Compose restart policy is the right place to handle a
+    # transient outage, not a swallowed exception.
+    try:
+        _db_pool = await asyncpg.create_pool(settings.database_url, min_size=2, max_size=10)
+        # Preload revoked JTIs
+        async with _db_pool.acquire() as conn:
+            await revocation_manager.preload(conn)
+        revocation_manager.start_cleanup_loop(_db_pool)
+        logger.info("db_connected", pool_size=10)
+    except Exception as e:
+        logger.error("db_connection_failed", error=str(e))
+        raise RuntimeError(
+            f"app-ai cannot start: DATABASE_URL is set but the database could not be "
+            f"reached ({e}). Refusing to serve without the policy and usage tables."
+        ) from e
 
     # Init HTTP client for LiteLLM proxy
     _http_client = httpx.AsyncClient(timeout=120.0)
