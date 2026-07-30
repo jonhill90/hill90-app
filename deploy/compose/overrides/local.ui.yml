@@ -17,10 +17,10 @@ services:
     ports:
       - "${PORT_UI:-13000}:3000"
     environment:
-      AUTH_KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      AUTH_KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
       # Still required: the browser resolves the Traefik hostname, this container
       # cannot, so the back-channel keeps using the service name.
-      KEYCLOAK_INTERNAL_ISSUER: http://app-keycloak:8080/realms/hill90
+      KEYCLOAK_INTERNAL_ISSUER: http://app-keycloak:8080/realms/${KC_REALM:-platform}
       KEYCLOAK_INTERNAL_URL: http://app-keycloak:8080
       AUTH_URL: http://${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
     labels:
