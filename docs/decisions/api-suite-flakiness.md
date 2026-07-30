@@ -69,6 +69,48 @@ and the interleaving becomes likely. That is why it looks like "shared state bet
 files" and is not: the shared state is *within* each file, and parallelism only changes the
 timing that exposes it.
 
+## Measured: no jest setting fixes this, and --runInBand makes it worse
+
+`--runInBand` was the obvious candidate and it is **refuted**. Ten full-suite runs per mode,
+same machine, unmodified `main`:
+
+| Mode | Test files per process | Failures / 10 |
+|---|---|---|
+| `--runInBand` | all 58 | **4** |
+| default (~10 workers) | ~6 | **3** |
+| `--maxWorkers=16` | ~4 | **2** |
+| one file, alone | 1 | **0** |
+
+**The failure rate is monotonic in how many test files share a process.** That is the
+finding. Serialising the suite puts every file in one process and makes leakage *more*
+likely, not less — so the intuitive fix costs wall-clock and buys a worse result.
+
+Two further hypotheses were tested and both failed:
+
+- **"One file poisons the others."** Excluding `routes-agents-events.test.ts`, the only
+  file that opens streaming connections, gives **6/10** — no better. It is not one culprit.
+- **"Cross-file mock pollution."** Jest gives each file its own module registry, so the
+  shared mock queue cannot cross files. The queue explains failures *within* a file; it
+  does not explain this gradient.
+
+## What actually accumulates
+
+`request(app)` creates and destroys **a new HTTP server per call**, and the suite makes
+thousands. The 404-shaped failures are the tell: `expected 501, received 404` and
+`GET /agents returns 401 without auth` failing are not assertion logic going wrong — a 404
+means Express matched no route, i.e. **the request was answered by an app that does not
+mount that route**. That is a request landing on the wrong server, which is what port and
+descriptor reuse across thousands of short-lived listeners produces.
+
+So the fix is to stop creating a server per request: one listening server per file, opened
+in `beforeAll` and closed in `afterAll`, with `request(server)` instead of `request(app)`.
+Mechanical, and it touches every api test file — which is the ordering problem stated
+below: a large mechanical change to the tests, while the suite cannot be trusted to tell
+you whether you broke something.
+
+**Until that lands, `--maxWorkers=16` is the least-bad setting** (2/10 rather than 3/10),
+but it is a mitigation of a symptom and should not be mistaken for a fix.
+
 ## What the fix is, and why it is not in this commit
 
 Per failing test, the assertion must **wait for** the side effect rather than sample it:
