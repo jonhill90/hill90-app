@@ -41,6 +41,7 @@ import {
   deleteAvatar as deleteAvatarFromS3,
   getAvatarStream,
 } from '../services/avatar';
+import { rolesFrom } from '../middleware/keycloak-config';
 
 const router = Router();
 
@@ -1170,7 +1171,7 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
     const elevatedScope = await getAgentElevatedScope(agent.id);
     if (elevatedScope) {
       const ownerRoles: string[] = user.sub === agent.created_by
-        ? (user.realm_roles || [])
+        ? rolesFrom(user)
         : [];
       if (user.sub === agent.created_by && !ownerRoles.includes('admin')) {
         auditLog('principal_ceiling_denied', agent.agent_id, user.sub, 'human', {
@@ -1670,7 +1671,7 @@ async function getRecentInference(
 router.get('/:id/events', requireRole('user'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const roles: string[] = user?.realm_roles || [];
+    const roles: string[] = rolesFrom(user);
     const admin = roles.includes('admin');
 
     const scope = scopeToOwner(req);
@@ -1848,7 +1849,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
 router.get('/:id/events/export', requireRole('user'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const roles: string[] = user?.realm_roles || [];
+    const roles: string[] = rolesFrom(user);
     const admin = roles.includes('admin');
 
     const scope = scopeToOwner(req);

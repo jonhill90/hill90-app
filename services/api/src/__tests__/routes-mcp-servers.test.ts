@@ -18,7 +18,7 @@ jest.mock('../db/pool', () => ({
 
 function makeToken(sub: string, roles: string[]): string {
   return jwt.sign(
-    { sub, realm_roles: roles },
+    { sub, resource_access: { 'hill90-ui': { roles } } },
     privateKey,
     { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '1h' }
   );

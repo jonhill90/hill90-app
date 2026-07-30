@@ -101,7 +101,7 @@ services:
       # Front-channel: must match the `iss` claim Keycloak stamps, so it is
       # the browser-facing host. auth.<domain> is HILL90's Keycloak, serving
       # realm `platform`; the app's is app-auth serving realm `hill90`.
-      - KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
+      - KEYCLOAK_ISSUER=https://${KC_HOST:-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-platform}
       # Back-channel: resolved inside the network, so it uses the app's own
       # service name rather than going out through Traefik and back.
       # KEYCLOAK_JWKS_URI is deliberately NOT set.

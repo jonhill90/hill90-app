@@ -12,14 +12,59 @@
  * decision this refactor makes.
  */
 
-const FALLBACK_ISSUER = 'https://auth.hill90.com/realms/hill90';
-
 /**
- * The OIDC issuer. In every deployed environment `KEYCLOAK_ISSUER` is set from
- * compose, so the fallback is inert there.
+ * The OIDC issuer. Required — there is deliberately NO fallback.
+ *
+ * There used to be one, to `https://auth.hill90.com/realms/hill90`. That realm no
+ * longer exists, and repointing the fallback at the real realm would be worse than
+ * deleting it: it would become silently correct, so a service started with no
+ * KEYCLOAK_ISSUER at all would appear to work. Throwing means the container fails
+ * its healthcheck and the deploy fails, which is the loud early failure this estate
+ * keeps rediscovering it needs. Every compose file that runs this service sets it.
  */
 export function getIssuer(override?: string): string {
-  return override || process.env.KEYCLOAK_ISSUER || FALLBACK_ISSUER;
+  const issuer = override || process.env.KEYCLOAK_ISSUER;
+  if (!issuer) {
+    throw new Error(
+      'KEYCLOAK_ISSUER is not set. It has no default: a default would make a ' +
+      'misconfigured service look healthy. Set it to ' +
+      'https://auth.hill90.com/realms/<realm>.',
+    );
+  }
+  return issuer;
+}
+
+/**
+ * The client whose CLIENT roles carry the app's authorisation.
+ */
+export function getClientId(): string {
+  return process.env.KEYCLOAK_CLIENT_ID || 'hill90-ui';
+}
+
+/**
+ * The app's roles, read from `resource_access.<client>.roles`.
+ *
+ * WHY NOT `realm_roles`, WHICH EVERY CALLER USED TO READ
+ *
+ * The app now lives in the shared `platform` realm, where realm roles `admin` and
+ * `user` already exist and already mean something else: Hill90's
+ * docker-compose.observability.yml:122 maps realm role `admin` to Grafana Admin, and
+ * scripts/vault.sh:420 binds `realm_roles: [admin]` for OpenBao. Reusing realm roles
+ * would make every app admin a platform admin.
+ *
+ * Client roles on `hill90-ui` are a different namespace, so that cannot happen — by
+ * construction rather than by naming convention. The stock `roles` client scope
+ * already emits `resource_access.<client>.roles`, so no custom mapper exists to be
+ * forgotten.
+ *
+ * THERE IS DELIBERATELY NO FALLBACK TO `realm_roles`. It would be a privilege hole,
+ * not a convenience: Hill90's `hill90-vault` client has a mapper that emits
+ * `realm_roles` from REALM roles, so a vault token held by a platform admin would be
+ * read here as app admin.
+ */
+export function rolesFrom(payload: unknown): string[] {
+  const ra = (payload as any)?.resource_access?.[getClientId()]?.roles;
+  return Array.isArray(ra) ? ra : [];
 }
 
 /**

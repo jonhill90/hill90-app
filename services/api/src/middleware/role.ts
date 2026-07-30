@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { rolesFrom } from './keycloak-config';
 
 export function requireRole(role: string) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -8,7 +9,7 @@ export function requireRole(role: string) {
       return;
     }
 
-    const roles: string[] = user.realm_roles || [];
+    const roles: string[] = rolesFrom(user);
     if (!roles.includes(role)) {
       res.status(403).json({ error: `Requires ${role} role` });
       return;

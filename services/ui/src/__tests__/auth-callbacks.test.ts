@@ -33,7 +33,7 @@ const sessionCallback = capturedConfig.callbacks.session
 // Helper to build a mock access_token payload
 function mockAccessToken(claims: Record<string, unknown> = {}): string {
   const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString('base64url')
-  const payload = Buffer.from(JSON.stringify({ sub: 'user1', realm_roles: ['admin', 'user'], ...claims })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({ sub: 'user1', resource_access: { 'hill90-ui': { roles: ['admin', 'user'] } }, ...claims })).toString('base64url')
   return `${header}.${payload}.fake-sig`
 }
 

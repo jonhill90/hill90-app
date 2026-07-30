@@ -1,4 +1,5 @@
 import { Request } from 'express';
+import { rolesFrom } from '../middleware/keycloak-config';
 
 interface ScopeResult {
   where: string;
@@ -7,7 +8,7 @@ interface ScopeResult {
 
 export function scopeToOwner(req: Request): ScopeResult {
   const user = (req as any).user;
-  const roles: string[] = user?.realm_roles || [];
+  const roles: string[] = rolesFrom(user);
 
   if (roles.includes('admin')) {
     return { where: '1=1', params: [] };

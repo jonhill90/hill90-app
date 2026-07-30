@@ -3,7 +3,7 @@ import { app } from './app';
 import { getPool, closePool } from './db/pool';
 import { runMigrations } from './db/migrate';
 import { createJwksKeyResolver } from './middleware/auth';
-import { getIssuer, getJwksUri } from './middleware/keycloak-config';
+import { getIssuer, getJwksUri, rolesFrom } from './middleware/keycloak-config';
 import { reconcileAgentStatuses } from './services/docker';
 import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
 import { attachTerminalProxy } from './services/terminal-proxy';
@@ -84,10 +84,11 @@ async function start() {
         issuer,
       }) as jwt.JwtPayload;
       if (typeof payload.exp !== 'number') return null;
-      const roles: string[] =
-        payload.realm_access?.roles ||
-        payload.resource_access?.['hill90-ui']?.roles ||
-        [];
+      // rolesFrom() reads ONLY resource_access.<client>.roles. This used to read
+      // realm_access.roles FIRST, which in the shared platform realm would honour
+      // a platform admin's realm role `admin` here — and the WebSocket terminal
+      // proxy is the most privileged surface in the app.
+      const roles: string[] = rolesFrom(payload);
       return { sub: payload.sub || '', roles };
     } catch {
       return null;

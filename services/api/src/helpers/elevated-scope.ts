@@ -1,5 +1,6 @@
 import { Request } from 'express';
 import { getPool } from '../db/pool';
+import { rolesFrom } from '../middleware/keycloak-config';
 
 /**
  * Elevated scopes that require admin role for interaction.
@@ -14,7 +15,7 @@ export function isElevatedScope(scope: string): boolean {
 
 export function isAdmin(req: Request): boolean {
   const user = (req as any).user;
-  const roles: string[] = user?.realm_roles || [];
+  const roles: string[] = rolesFrom(user);
   return roles.includes('admin');
 }
 

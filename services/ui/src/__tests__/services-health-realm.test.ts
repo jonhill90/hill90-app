@@ -43,10 +43,10 @@ describe('services health route: Keycloak realm path', () => {
     vi.resetModules()
   })
 
-  it('defaults to realm hill90 when KC_REALM is unset — today behaviour', async () => {
+  it('defaults to realm platform when KC_REALM is unset', async () => {
     const url = await probedKeycloakUrl()
     expect(url).toBe(
-      'http://app-keycloak:8080/realms/hill90/.well-known/openid-configuration',
+      'http://app-keycloak:8080/realms/platform/.well-known/openid-configuration',
     )
   })
 
@@ -54,7 +54,7 @@ describe('services health route: Keycloak realm path', () => {
     process.env.KC_REALM = 'hill90-app'
     const url = await probedKeycloakUrl()
     expect(url).toContain('/realms/hill90-app/')
-    expect(url).not.toContain('/realms/hill90/')
+    expect(url).not.toContain('/realms/platform/')
   })
 
   it('probes openid-configuration, which requires no authentication', async () => {

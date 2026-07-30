@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { detectModelType } from '../helpers/model-type-detect';
+import { rolesFrom } from '../middleware/keycloak-config';
 
 const router = Router();
 
@@ -14,7 +15,7 @@ router.use(requireRole('user'));
 
 function isAdmin(req: Request): boolean {
   const user = (req as any).user;
-  const roles: string[] = user?.realm_roles || [];
+  const roles: string[] = rolesFrom(user);
   return roles.includes('admin');
 }
 
