@@ -526,7 +526,7 @@ assert_client_secret_agrees() {
     echo "  Cause is usually a realm import: the committed realm JSON declares the"
     echo "  confidential clients with no secret, so Keycloak mints a fresh one and"
     echo "  the store's value is never applied. See the repair in"
-    echo "  docs/runbooks/one-keycloak-migration.md section 5."
+    echo "  docs/runbooks/one-keycloak-migration.md (the client-secret section)."
     return 1
 }
 

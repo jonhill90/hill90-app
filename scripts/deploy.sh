@@ -397,7 +397,7 @@ or, if it came from the local tenant path:
             else
                 require_client_secret_matches \
                     || die "Refusing to deploy ${stack}: the client secret in the running Keycloak does not match the store, so logins will fail at the token exchange even though every container reports healthy.
-Repair procedure: docs/runbooks/one-keycloak-migration.md section 5.
+Repair procedure: docs/runbooks/one-keycloak-migration.md (the client-secret section).
 To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"
             fi
             ;;
