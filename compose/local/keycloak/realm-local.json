@@ -1,7 +1,7 @@
 {
-  "realm": "hill90",
+  "realm": "platform",
   "enabled": true,
-  "displayName": "Hill90 (local)",
+  "displayName": "Hill90 platform (local)",
   "sslRequired": "none",
   "registrationAllowed": false,
   "verifyEmail": true,
@@ -20,10 +20,12 @@
   "roles": {
     "realm": [
       {
-        "name": "user"
+        "name": "admin",
+        "description": "PLATFORM admin. Grants Grafana Admin and OpenBao in production. NOT the app's admin role \u2014 nothing here should hold it."
       },
       {
-        "name": "admin"
+        "name": "user",
+        "description": "PLATFORM user. NOT the app's user role."
       }
     ],
     "client": {
@@ -62,18 +64,6 @@
       },
       "protocolMappers": [
         {
-          "name": "realm-roles",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-realm-role-mapper",
-          "config": {
-            "multivalued": "true",
-            "claim.name": "realm_roles",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "userinfo.token.claim": "true"
-          }
-        },
-        {
           "name": "hill90-api-audience",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
@@ -93,7 +83,9 @@
       "publicClient": false,
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false
+      "serviceAccountsEnabled": false,
+      "bearerOnly": true,
+      "description": "Resource server. Audience target only; never authenticates."
     }
   ],
   "users": [
@@ -101,9 +93,10 @@
       "username": "dev",
       "enabled": true,
       "emailVerified": true,
+      "firstName": "Dev",
+      "lastName": "Local",
       "email": "dev@localhost",
-      "firstName": "Local",
-      "lastName": "Developer",
+      "requiredActions": [],
       "credentials": [
         {
           "type": "password",
@@ -111,14 +104,74 @@
           "temporary": false
         }
       ],
-      "realmRoles": [
-        "user",
-        "admin"
+      "clientRoles": {
+        "hill90-ui": [
+          "user",
+          "admin"
+        ]
+      }
+    },
+    {
+      "username": "jon",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Jon",
+      "lastName": "Hill",
+      "email": "jon@localhost",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev",
+          "temporary": false
+        }
       ],
       "clientRoles": {
         "hill90-ui": [
           "user",
           "admin"
+        ]
+      }
+    },
+    {
+      "username": "hill90admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Hill90",
+      "lastName": "Admin",
+      "email": "hill90admin@localhost",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "hill90-ui": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "username": "testuser01",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "User01",
+      "email": "testuser01@localhost",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "hill90-ui": [
+          "user"
         ]
       }
     }
