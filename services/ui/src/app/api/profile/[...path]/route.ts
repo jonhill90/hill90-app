@@ -73,7 +73,37 @@ async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ pa
       return new Response(null, { status: 304 })
     }
 
-    const data = await res.json()
+    // Read as text first. `res.json()` was called unconditionally here, and any
+    // bodiless response threw `SyntaxError: Unexpected end of JSON input` — caught
+    // below and reported as 502, with the real cause only in the log.
+    //
+    // That went live when GET /profile/avatar started answering 204 for "this user has
+    // no avatar" (#32). Measured in production: three consecutive logins, three 502s,
+    // and four of those log lines per page load. It stayed invisible because
+    // AuthButtons treats any non-ok response as "no avatar", so a 502 and a 204 look
+    // identical to the user. 204 with no body is a correct response; parsing it was
+    // the bug.
+    const text = await res.text()
+    if (!text) {
+      return new Response(null, { status: res.status })
+    }
+
+    let data: unknown
+    try {
+      data = JSON.parse(text)
+    } catch {
+      // A non-empty body that is not JSON IS a fault, and must still surface — this
+      // guard must not become "ignore all parse failures". Name what came back
+      // instead of letting a parser's complaint stand in for the cause.
+      console.error(
+        `[profile-proxy] upstream returned non-JSON (HTTP ${res.status}):`,
+        text.slice(0, 200),
+      )
+      return NextResponse.json(
+        { error: 'API request failed', upstream_status: res.status },
+        { status: 502 },
+      )
+    }
     return NextResponse.json(data, { status: res.status })
   } catch (err) {
     console.error('[profile-proxy] Error:', err)
