@@ -45,7 +45,7 @@ Usage: deploy.sh <command> [env]
 
 Stacks (deploy order matters — see 'all'):
   db          PostgreSQL, the app's own instance (NOT Hill90's)
-  auth        Keycloak, the app's own realm (NOT Hill90's)
+  auth        RETIRED 2026-07-30 — refuses. Identity is Hill90's realm `platform`
   api         Control plane. Sole creator of agent_sandbox and docker_proxy
   ai          Model router + LiteLLM
   knowledge   Agent Knowledge Manager
@@ -86,7 +86,11 @@ EOF
 # displace. Everything else follows in dependency order, api before ai and
 # knowledge because it is the sole creator of agent_sandbox and docker_proxy.
 DEPLOY_FIRST="ui"
-DEPLOY_REST="db auth api ai knowledge mcp minio"
+# auth is deliberately ABSENT. app-keycloak was retired on 2026-07-30 — the app
+# authenticates against Hill90's Keycloak, realm `platform`. Leaving `auth` here would
+# let `deploy all` silently recreate a container that has been retired, which is the
+# whole failure mode this line now prevents.
+DEPLOY_REST="db api ai knowledge mcp minio"
 DEPLOY_ORDER="$DEPLOY_FIRST $DEPLOY_REST"
 
 stack_compose()  { printf 'deploy/compose/%s/docker-compose.%s.yml' "${2:-prod}" "$1"; }
@@ -149,7 +153,7 @@ cname() { printf '%s%s' "${CONTAINER_PREFIX:-}" "$1"; }
 stack_summary() {
     case "$1" in
         db)        printf 'app-postgres — KEPT RUNNING as the rollback target while services cut over to the platform Postgres. No longer the app'"'"'s data path.' ;;
-        auth)      printf 'app-keycloak — realm hill90, on ${APP_AUTH_HOST:-app-auth}. Hill90 keeps auth.<domain>.' ;;
+        auth)      printf 'RETIRED 2026-07-30 — app-keycloak removed; identity is Hill90 realm platform on auth.<domain>.' ;;
         api)       printf 'app-api, app-docker-proxy — control plane; creates agent_sandbox and docker_proxy' ;;
         ai)        printf 'app-ai, app-litellm — model router; internal-only' ;;
         knowledge) printf 'app-knowledge — AKM; internal-only' ;;
@@ -322,12 +326,22 @@ cmd_deploy() {
     # into a crash loop, which is what Hill90's deploy.sh does for auth->db.
     case "$stack" in
         auth)
-            # A real query as the real user, not pg_isready -- see stack_assert.
-            docker exec "$(cname app-postgres)" psql -U "${DB_USER:-hill90}" -tAc 'SELECT 1' >/dev/null 2>&1 \
-                || die "Cannot deploy auth: a query against the app's postgres as
-'${DB_USER:-hill90}' failed. Keycloak stores its realm there and would crash-loop
-with a password-authentication error that reads as a secrets problem.
-Deploy the database first:  bash scripts/deploy.sh db ${env}"
+            # RETIRED 2026-07-30. app-keycloak is gone and this must not bring it back.
+            #
+            # The app authenticates against Hill90's Keycloak at auth.hill90.com, realm
+            # `platform`, and a human has completed a sign-in there. app-auth.hill90.com
+            # is no longer routed.
+            #
+            # Realm hill90 was exported WITH users before removal, and the export is on
+            # the VPS at /opt/hill90/backups/app-realm-final/ (0600 in a 0700 directory,
+            # 3 users with credentials, 9 clients). Restoring it means standing a
+            # Keycloak back up against that export, not re-running this deploy.
+            die "The auth stack is RETIRED. app-keycloak was removed on 2026-07-30;
+the app authenticates against Hill90's Keycloak, realm platform.
+
+Refusing to recreate it. If you genuinely need it back, read
+docs/decisions/retiring-app-keycloak.md first — the realm export is on the VPS
+under /opt/hill90/backups/app-realm-final/ and this deploy would NOT restore it."
             ;;
         ai|knowledge)
             local pfx; pfx="$(network_prefix)"
