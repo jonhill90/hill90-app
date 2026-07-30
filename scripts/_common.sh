@@ -217,8 +217,22 @@ infra/secrets/prod.enc.env.example. Silently dropping the body would give you a
 truncated signing key and a deploy that looks entirely successful."
     fi
 
+    # Split on the FIRST '=' with parameter expansion, not `IFS='=' read`.
+    #
+    # `while IFS='=' read -r key value` silently dropped a single trailing '=' in
+    # bash: AUTH_SECRET=YWJjZGVmZ2g= arrived as YWJjZGVmZ2g. Base64 padding is
+    # exactly that shape, and AUTH_SECRET plus both signing keys are base64 -- so a
+    # credential could reach a container one character short, with no error anywhere
+    # and a deploy that reports success. Curiously '==' survived and '=' did not,
+    # which is why this was invisible: half the padded values were fine.
+    #
+    # ${line%%=*} and ${line#*=} have no field-splitting semantics, so a value
+    # keeps every character including '=', quotes, backslashes and '$'. Pinned by
+    # tests/scripts/secret-values-survive-shell.bats.
     grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$temp_file.raw" 2>/dev/null \
-        | while IFS='=' read -r key value; do printf '%s=%q\n' "$key" "$value"; done \
+        | while IFS= read -r line; do
+              printf '%s=%q\n' "${line%%=*}" "${line#*=}"
+          done \
         > "$temp_file"
     rm -f "$temp_file.raw"
 
