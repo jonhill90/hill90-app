@@ -296,7 +296,7 @@ jobs:
             "cd ${VPS_APP_PATH} && \
              git fetch origin && \
              git diff --stat HEAD origin/main && \
-             { [ -f scripts/preflight-checkout.sh ] || { echo '::error::scripts/preflight-checkout.sh is not on the VPS checkout yet. It ships in this repository, so it only exists there AFTER one deploy that includes it. Run: ssh deploy@<host> \\"cd ${VPS_APP_PATH} && git pull\\" once, then re-run this workflow.'; exit 1; }; } && \
+             { [ -f scripts/preflight-checkout.sh ] || { echo '::error::preflight-checkout.sh is missing from the VPS checkout. It ships in this repo, so it only exists there after one deploy that includes it. Fix: ssh to the VPS, cd to the checkout, run git pull, then re-run this workflow.'; exit 1; }; } && \
              bash scripts/preflight-checkout.sh && \
              git reset --hard origin/main && \
              export SOPS_AGE_KEY_FILE=${VPS_AGE_KEY} && \
