@@ -335,12 +335,29 @@ print(" ".join(bad))' 2>/dev/null || echo "unknown")
 # ---------------------------------------------------------------------------
 port_in_use() { (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null; }
 
+# Ports published by containers belonging to OUR compose project.
+#
+# Identified by the project label, not by a container-name prefix. The previous
+# version filtered `name=hill90-`, and `--filter name=` is a substring match, so with
+# CONTAINER_PREFIX=hill90dev the names are `hill90dev-app-ui` — which does not contain
+# `hill90-`. The exclusion matched nothing, every port looked foreign, and `up`
+# against a running stack refused while naming our own containers as the holders.
+# That made `up` non-idempotent for any prefix except the literal `hill90-`.
+#
+# Every container either path creates carries com.docker.compose.project=hill90-local,
+# whatever CONTAINER_PREFIX is, so the label is the prefix-independent answer.
+ours_ports() {
+  local project="${1:-$INFRA_PROJECT}"
+  docker ps --filter "label=com.docker.compose.project=${project}" \
+            --format '{{.Ports}}' 2>/dev/null \
+    | grep -oE '0\.0\.0\.0:[0-9]+' | cut -d: -f2 | sort -u
+}
+
 check_ports() {
   # Ports this stack is already publishing are not conflicts — that is just a
-  # re-run of `up` against a running stack.
+  # re-run of `up` against a running stack. A genuinely foreign holder still refuses.
   local ours
-  ours=$(docker ps --filter 'name=hill90-' --format '{{.Ports}}' 2>/dev/null \
-         | grep -oE '0\.0\.0\.0:[0-9]+' | cut -d: -f2 | sort -u)
+  ours=$(ours_ports "$INFRA_PROJECT")
 
   local conflicts=""
   while IFS='=' read -r var port; do
@@ -419,6 +436,12 @@ cmd_agentbox() {
   docker build -t hill90/agentbox-monitor:latest -f "$ROOT/services/agentbox/Dockerfile.monitor" "$ROOT/services/agentbox"
   echo "Done. hill90/agentbox:latest is what the API launches by default."
 }
+
+# Sourcing this file must not run a command. Without this, a test that sources it to
+# reach a helper silently executes `up`.
+if [ "${1:-}" = "--source-only" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${1:-up}" in
   init)     cmd_init ;;
