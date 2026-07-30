@@ -116,7 +116,10 @@ services:
       # Unset, both services derive it from KEYCLOAK_ISSUER
       # (services/api/src/index.ts, services/mcp/app/main.py), so APP_AUTH_HOST is
       # the single knob and front and back channels cannot diverge.
-      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@app-postgres:5432/hill90_api
+      # The PLATFORM Postgres, via the tenant login the platform provisions.
+      # DB_USER/DB_PASSWORD are app-postgres's superuser and are deliberately NOT
+      # reused: app-postgres and app-keycloak still consume them.
+      - DATABASE_URL=postgresql://${PLATFORM_DB_USER}:${PLATFORM_DB_PASSWORD}@${PLATFORM_DB_HOST}:5432/hill90_api
       - DOCKER_HOST=tcp://docker-proxy:2375
       # services/api attaches agent containers to <prefix>_agent_internal and
       # <prefix>_agent_sandbox BY NAME (services/api/src/services/docker.ts:29,
