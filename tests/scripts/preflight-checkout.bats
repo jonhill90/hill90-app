@@ -152,3 +152,90 @@ setup() {
   done < <(grep -rhoE '^[[:space:]]+- \.\./\.\./\.\./[^:]+' deploy/compose/prod/*.yml \
            | sed -E 's/^[[:space:]]+- //' | sort -u)
 }
+
+# ---------------------------------------------------------------------------
+# The missing-preflight message must survive four levels of parsing.
+#
+# This property is ported from Hill90 #40. It belongs here because THIS is where
+# its absence did damage: #35 added the existence check with an escaped
+# double-quoted example command inside the message —
+#
+#     Run: ssh deploy@<host> \\"cd ${VPS_APP_PATH} && git pull\\"
+#
+# which passes through YAML, the runner's shell, the ssh argument, and finally the
+# remote shell. The escaped quotes came apart on the last one and the remote bash
+# died with `unexpected EOF while looking for matching quote` before running
+# anything. Both api and mcp deploys failed that way: a guard added to make deploys
+# safer prevented them entirely. #42 fixed the message.
+#
+# The quotes were BALANCED, which is why it reads as correct on inspection. Depth of
+# nesting was the defect, not pairing — so the only reliable property is that the
+# message contains no quote character at all.
+#
+# When the same pattern was ported to Hill90 this was made a tested property there
+# and not here. That gap is what these tests close.
+# ---------------------------------------------------------------------------
+
+# The line carrying the guard, extracted once.
+repo_root() { cd "${BATS_TEST_DIRNAME}/../.." && pwd; }
+
+guard_line() {
+  grep -- "-f scripts/preflight-checkout.sh" \
+    "$(repo_root)/.github/workflows/reusable-deploy-service.yml" | head -1
+}
+
+@test "the missing-preflight message contains NO double quote" {
+  line="$(guard_line)"
+  [ -n "$line" ]
+  msg="${line#*::error::}"; msg="${msg%%\'*}"
+  [ -n "$msg" ]
+  [[ "$msg" != *'"'* ]]
+}
+
+@test "the missing-preflight message contains NO backslash escape" {
+  # \" and \\" are the exact shapes that broke. A backslash inside the message is
+  # the warning sign regardless of what follows it.
+  line="$(guard_line)"
+  msg="${line#*::error::}"; msg="${msg%%\'*}"
+  [ -n "$msg" ]
+  [[ "$msg" != *'\'* ]]
+}
+
+@test "the message still names the exact remedy despite carrying no quotes" {
+  # Removing quotes must not have removed the instruction. A message that survives
+  # parsing but says nothing useful is the other failure.
+  line="$(guard_line)"
+  [[ "$line" == *"git pull"* ]]
+  [[ "$line" == *"preflight-checkout.sh"* ]]
+}
+
+@test "the remote payload the workflow sends parses as shell" {
+  # The real property, tested the way the failure actually presented: extract the
+  # remote command the ssh step sends and ask bash to parse it.
+  cd "$(repo_root)"
+  payload="$(awk '/^ *"cd \$\{VPS_APP_PATH\}/,/deploy\.sh/' \
+              .github/workflows/reusable-deploy-service.yml \
+             | sed 's/\\$//' | tr -d '\n')"
+  [ -n "$payload" ]
+  run bash -n <<< "$payload"
+  [ "$status" -eq 0 ]
+}
+
+@test "no ::error:: message in the deploy workflow carries a backslash escape" {
+  # Generalised: every message this workflow echoes crosses the same boundaries, so
+  # the property is not specific to the preflight one.
+  #
+  # The first version of this test extracted each message with `::error::[^\']*`,
+  # which runs past the end of a DOUBLE-quoted message to the next single quote and
+  # swept up `"; exit 1; \` from the unhealthy-containers check. It reported a
+  # finding that was an artefact of its own extraction. Messages are quoted both
+  # ways here, so the terminator has to be either quote character.
+  cd "$(repo_root)"
+  offenders=0
+  while IFS= read -r msg; do
+    case "$msg" in
+      *'\'*) offenders=$((offenders+1)); echo "backslash in: ${msg:0:70}" ;;
+    esac
+  done < <(grep -o -- "::error::[^'\"]*" .github/workflows/reusable-deploy-service.yml)
+  [ "$offenders" -eq 0 ]
+}
