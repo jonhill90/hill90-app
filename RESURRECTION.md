@@ -347,10 +347,15 @@ typo: seeding an account into a committed realm import means deciding what
 credential it carries and how that is rotated, and the local file's answer
 (`dev` / `dev`) is not one production can copy.
 
-## 11. Production login does not work — OPEN
+## 11. The client secret was inert, and login has never been completed — PARTLY RESOLVED
 
-Confirmed 2026-07-29 09:23 UTC. Nobody can sign in to `hill90.com`, and nobody
-has been able to since the app was deployed.
+**Repaired ~23:50 UTC on 2026-07-29.** Keycloak and the store now agree — both 64
+characters, matching hash, verified 00:15 UTC 2026-07-30 — and client
+authentication succeeds. **A completed human sign-in is still unproven**, which is
+why this is partly rather than fully resolved.
+
+What follows is the original finding, kept because the failure mode is worth
+understanding.
 
 The `hill90-ui` client secret Keycloak minted at realm import is 32 characters;
 the one `app-ui` holds is 64. Different values, so the token exchange fails and
