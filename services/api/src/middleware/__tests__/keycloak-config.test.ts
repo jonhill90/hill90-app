@@ -8,7 +8,6 @@
  */
 import { getIssuer, getJwksUri } from '../keycloak-config';
 
-const FALLBACK = 'https://auth.hill90.com/realms/hill90';
 const ORIGINAL = { ...process.env };
 
 describe('keycloak-config', () => {
@@ -33,8 +32,11 @@ describe('keycloak-config', () => {
       expect(getIssuer()).toBe('https://app-auth.hill90.com/realms/hill90');
     });
 
-    it('falls back to the hardcoded issuer only when nothing is set', () => {
-      expect(getIssuer()).toBe(FALLBACK);
+    it('THROWS when nothing is set — there is deliberately no fallback', () => {
+      // The fallback used to be https://auth.hill90.com/realms/hill90. That realm no
+      // longer exists, and repointing it at the live realm would be worse: it would
+      // become silently correct, so a service with no KEYCLOAK_ISSUER would look fine.
+      expect(() => getIssuer()).toThrow(/KEYCLOAK_ISSUER is not set/);
     });
 
     it('ignores an empty override rather than treating it as a choice', () => {

@@ -27,11 +27,14 @@ services:
       - NODE_ENV=production
       - API_URL=http://api:3000
       - AI_URL=http://ai:8000
-      - KEYCLOAK_INTERNAL_URL=http://app-keycloak:8080
+      # The PLATFORM Keycloak container, not the app's.
+      - KEYCLOAK_INTERNAL_URL=http://${KEYCLOAK_CONTAINER:-keycloak}:8080
       # Read by src/app/api/services/health/route.ts to build the realm path it
       # probes. Same knob and same default as the issuer line below, so the two
       # cannot drift apart the way a second hardcoded copy would.
-      - KC_REALM=${KC_REALM:-hill90}
+      # platform, matching Hill90's own default for the same variable. The app is a
+      # tenant of the platform realm; there is no app realm.
+      - KC_REALM=${KC_REALM:-platform}
       - MCP_URL=http://mcp:8001
       - AUTH_KEYCLOAK_ID=${AUTH_KEYCLOAK_ID}
       - AUTH_KEYCLOAK_SECRET=${AUTH_KEYCLOAK_SECRET}
@@ -39,7 +42,7 @@ services:
       # pointed at the app's app-keycloak while this pointed at Hill90's, so
       # the back-channel and front-channel disagreed about which Keycloak the
       # app uses. Auth.js validates `iss` against this value.
-      - AUTH_KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
+      - AUTH_KEYCLOAK_ISSUER=https://${KC_HOST:-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-platform}
       - AUTH_SECRET=${AUTH_SECRET}
       # Composed from BASE_DOMAIN, like the issuer, so one knob moves both. It was
       # hardcoded, which meant a domain change silently left this pointing at the old

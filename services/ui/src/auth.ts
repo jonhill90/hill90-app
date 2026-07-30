@@ -113,7 +113,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           idToken: account.id_token,
           refreshToken: account.refresh_token,
           accessTokenExpires: account.expires_at ? account.expires_at * 1000 : Date.now() + 300_000,
-          roles: decoded.realm_roles ?? [],
+          // Client roles on hill90-ui, not realm roles: realm roles in the shared
+          // platform realm grant Grafana Admin and OpenBao access.
+          roles: decoded.resource_access?.[process.env.AUTH_KEYCLOAK_ID || 'hill90-ui']?.roles ?? [],
         }
       }
 

@@ -538,8 +538,10 @@ assert_client_secret_agrees() {
 # is a guard that reports success on the day it was needed.
 require_client_secret_matches() {
     local client="${1:-${AUTH_KEYCLOAK_ID:-hill90-ui}}"
-    local realm="${KC_REALM:-hill90}"
-    local kc_container="${2:-$(cname app-keycloak)}"
+    local realm="${KC_REALM:-platform}"
+    # The PLATFORM Keycloak, not the app's. The app is a tenant of realm `platform`;
+    # app-keycloak is being retired. Overridable so the check can be aimed elsewhere.
+    local kc_container="${2:-${KEYCLOAK_CONTAINER:-keycloak}}"
     local base="http://localhost:8080"
 
     if [ -z "${AUTH_KEYCLOAK_SECRET:-}" ]; then

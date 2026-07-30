@@ -347,8 +347,11 @@ EOF
             echo 'LITERAL_ISSUER_INTERPOLATED'; exit 1
         fi
         # and all three consumers must compose it from the parts
+          # The host part is KC_HOST now: the app has no auth host of its own, it uses
+          # the platform's. The property being asserted is unchanged — the issuer is
+          # composed, never interpolated as one literal store value.
         for f in docker-compose.api.yml docker-compose.mcp.yml docker-compose.ui.yml; do
-            grep -q 'APP_AUTH_HOST' \"deploy/compose/prod/\$f\" || { echo \"NO_PARTS \$f\"; exit 1; }
+            grep -q 'KC_HOST' \"deploy/compose/prod/\$f\" || { echo \"NO_PARTS \$f\"; exit 1; }
         done
         echo ONE_SOURCE_OF_TRUTH
     "

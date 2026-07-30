@@ -36,7 +36,7 @@ const app = createApp({
 
 function makeToken(sub: string, roles: string[]) {
   return jwt.sign(
-    { sub, realm_roles: roles },
+    { sub, resource_access: { 'hill90-ui': { roles } } },
     privateKey,
     { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '5m' }
   );
@@ -116,7 +116,7 @@ describe('Eligible Models (GET /eligible-models)', () => {
   // C5: Requires user role — 403 without role
   it('returns 403 without user role', async () => {
     const noRoleToken = jwt.sign(
-      { sub: 'no-role-user', realm_roles: [] },
+      { sub: 'no-role-user', resource_access: { 'hill90-ui': { roles: [] } } },
       privateKey,
       { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '5m' }
     );
