@@ -5,8 +5,23 @@ from typing import Any
 import yaml
 
 
-class FrontmatterError(Exception):
-    """Raised when frontmatter parsing or validation fails."""
+class FrontmatterError(ValueError):
+    """Raised when frontmatter parsing or validation fails.
+
+    A ValueError, not a bare Exception, and that base class is load-bearing.
+
+    Malformed frontmatter is bad INPUT, so every writing route already handles it
+    correctly — `except ValueError as e: raise HTTPException(400, detail=str(e))`.
+    While this subclassed `Exception` those handlers could not see it: it escaped the
+    route and Starlette's ServerErrorMiddleware answered with its default body, the
+    plain text `Internal Server Error` under a 500. A client calling
+    `response.json()` got a JSONDecodeError instead of being told what was wrong with
+    its own submission, and the fault was misattributed to the server.
+
+    Saying "this is a value error" once fixes every call site at the same time —
+    entries create and update, journal, and both internal_admin paths — instead of
+    adding `except FrontmatterError` in five places and forgetting the sixth.
+    """
 
 
 VALID_TYPES = frozenset({"plan", "decision", "journal", "research", "context", "note", "notebook"})
