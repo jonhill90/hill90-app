@@ -23,7 +23,7 @@ describe('requireRole middleware', () => {
 
   it('returns 403 when user lacks required role', () => {
     const middleware = requireRole('admin');
-    const { req, res, next } = mockExpress({ sub: 'user1', realm_roles: ['user'] });
+    const { req, res, next } = mockExpress({ sub: 'user1', resource_access: { 'hill90-ui': { roles: ['user'] } } });
     middleware(req, res, next);
     expect(res.status).toHaveBeenCalledWith(403);
     expect(next).not.toHaveBeenCalled();
@@ -31,7 +31,7 @@ describe('requireRole middleware', () => {
 
   it('calls next when user has required role', () => {
     const middleware = requireRole('user');
-    const { req, res, next } = mockExpress({ sub: 'user1', realm_roles: ['user', 'admin'] });
+    const { req, res, next } = mockExpress({ sub: 'user1', resource_access: { 'hill90-ui': { roles: ['user', 'admin'] } } });
     middleware(req, res, next);
     expect(next).toHaveBeenCalled();
     expect(res.status).not.toHaveBeenCalled();

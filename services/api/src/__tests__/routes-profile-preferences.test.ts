@@ -22,7 +22,7 @@ jest.mock('../services/s3', () => ({
 
 function makeToken(sub: string, roles: string[]) {
   return jwt.sign(
-    { sub, realm_roles: roles },
+    { sub, resource_access: { 'hill90-ui': { roles } } },
     privateKey,
     { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '5m' }
   );

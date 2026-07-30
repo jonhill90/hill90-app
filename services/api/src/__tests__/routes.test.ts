@@ -39,7 +39,7 @@ describe('API routes', () => {
 
   it('GET /me returns 200 with valid JWT and decoded claims', async () => {
     const token = jwt.sign(
-      { sub: 'user1', realm_roles: ['admin', 'user'] },
+      { sub: 'user1', resource_access: { 'hill90-ui': { roles: ['admin', 'user'] } } },
       privateKey,
       { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '5m' }
     );
@@ -50,6 +50,8 @@ describe('API routes', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.sub).toBe('user1');
-    expect(res.body.realm_roles).toEqual(['admin', 'user']);
+      // /me echoes the whole payload, so the claim shape shows here: client roles
+      // on hill90-ui, not realm roles.
+      expect(res.body.resource_access['hill90-ui'].roles).toEqual(['admin', 'user']);
   });
 });

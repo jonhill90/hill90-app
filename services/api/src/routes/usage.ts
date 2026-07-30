@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
+import { rolesFrom } from '../middleware/keycloak-config';
 
 const router = Router();
 
@@ -19,7 +20,7 @@ router.use(requireRole('user'));
 router.get('/', async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const roles: string[] = user?.realm_roles || [];
+    const roles: string[] = rolesFrom(user);
     const admin = roles.includes('admin');
 
     const { agent_id, model_name, request_type, status, delegation_id, from, to, group_by } = req.query;

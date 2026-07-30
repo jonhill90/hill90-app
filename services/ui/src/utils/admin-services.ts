@@ -27,7 +27,7 @@ export const ADMIN_SERVICES: AdminService[] = [
     ssoStatus: 'not-applicable',
     healthCheck: {
       internalUrl: 'http://keycloak:8080',
-      path: '/realms/hill90',
+      path: '/realms/platform',
     },
   },
   {

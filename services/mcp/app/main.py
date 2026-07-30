@@ -14,7 +14,10 @@ from app.middleware.auth import make_verify_token
 
 app = FastAPI(title="Hill90 MCP Gateway", version="0.1.0")
 
-KEYCLOAK_ISSUER = os.environ.get("KEYCLOAK_ISSUER", "https://auth.hill90.com/realms/hill90")
+# No default. The old one pointed at a realm that no longer exists, and repointing it
+# at the real realm would be worse: it would become silently correct, so a service
+# started with no KEYCLOAK_ISSUER would appear to work.
+KEYCLOAK_ISSUER = os.environ["KEYCLOAK_ISSUER"]
 KEYCLOAK_JWKS_URI = os.environ.get(
     "KEYCLOAK_JWKS_URI",
     f"{KEYCLOAK_ISSUER}/protocol/openid-connect/certs",

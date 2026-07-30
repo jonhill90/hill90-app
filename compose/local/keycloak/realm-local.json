@@ -25,7 +25,19 @@
       {
         "name": "admin"
       }
-    ]
+    ],
+    "client": {
+      "hill90-ui": [
+        {
+          "name": "admin",
+          "description": "App admin (client-scoped)"
+        },
+        {
+          "name": "user",
+          "description": "App user (client-scoped)"
+        }
+      ]
+    }
   },
   "clients": [
     {
@@ -60,6 +72,16 @@
             "access.token.claim": "true",
             "userinfo.token.claim": "true"
           }
+        },
+        {
+          "name": "hill90-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "hill90-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
         }
       ],
       "secret": "local-dev-secret"
@@ -92,7 +114,13 @@
       "realmRoles": [
         "user",
         "admin"
-      ]
+      ],
+      "clientRoles": {
+        "hill90-ui": [
+          "user",
+          "admin"
+        ]
+      }
     }
   ]
 }

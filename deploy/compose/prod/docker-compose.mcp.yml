@@ -27,7 +27,7 @@ services:
       - ENVIRONMENT=production
       - PORT=8001
       # See docker-compose.api.yml: front-channel issuer, back-channel JWKS.
-      - KEYCLOAK_ISSUER=https://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-hill90}
+      - KEYCLOAK_ISSUER=https://${KC_HOST:-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-platform}
       # KEYCLOAK_JWKS_URI is deliberately NOT set.
       #
       # It was hardcoded to http://app-keycloak:8080/... — which meant flipping
