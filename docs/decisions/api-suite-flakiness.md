@@ -398,6 +398,37 @@ eligible-models, ownership-boundary. A failing workflow dispatch is not on any o
 paths, so it cannot be the thing corrupting their mocks. Reachability kills it, not
 statistics — which is why this entry is inspection rather than another twenty runs.
 
+### The handler-level fix: the leak is real, the fix is not the one proposed, and it is still not a flake fix
+
+Resolved 2026-07-31. Three separate results, and they do not all point the same way.
+
+**1. The leak is real and reachable.** `GET /chat/threads/:id/stream` registered
+`req.on('close')` *after* `await poll()`, and that was its **only** cleanup path. A client
+that goes away during the backfill query — an ordinary page navigation — makes Node emit
+`'close'` with no listener attached. Events are not replayed, so the listener registered a
+moment later never fired and both intervals ran for the lifetime of the process.
+`GET /threads/:id/events` had the same shape. Proven by a test that fails against the old
+code with two leaked timers and passes against the new one.
+
+**2. The `finally` fix proposed in this document was WRONG, and would have been a
+regression.** These handlers return while the stream is still open. Clearing the intervals
+in a `finally` on the handler would have cleared them the instant setup finished, killing
+the poll loop and the heartbeat — a broken feature shipped in the name of a fixed leak.
+The correct fix is to register cleanup *before* the awaits and refuse to create timers for
+a client that has already gone. Anyone reading the earlier proposal should stop there.
+
+**3. It is still not a fix for the flake, and this closes the timer line for good.** Both
+leaked intervals begin with `if (res.writableEnded || res.destroyed) return;`, and so does
+`poll`. A leaked interval therefore performs **no database work at all** — it cannot
+consume a queued mock value or add a `mock.calls` entry. That is the mechanism the timer
+hypothesis needed, and the guard was there the whole time. It is consistent with the
+20-against-20 result rather than explained away by it.
+
+So the timer hypothesis is dead twice over: measured (6/20 with clearing) and now by
+inspection (a leaked timer cannot reach the pool). **The flake rate was not measured after
+this fix and no claim is made about it.** If someone measures it later and it moves, that
+is a surprise to investigate, not a prediction confirmed.
+
 ## Where this leaves it: four hypotheses dead, the defect alive
 
 | Hypothesis | Killed by |
