@@ -102,6 +102,15 @@ services:
       # the browser-facing host. auth.<domain> is HILL90's Keycloak, serving
       # realm `platform`; the app's is app-auth serving realm `hill90`.
       - KEYCLOAK_ISSUER=https://${KC_HOST:-auth}.${BASE_DOMAIN:-hill90.com}/realms/${KC_REALM:-platform}
+      # Origin allowlist for the terminal WebSocket upgrade. Composed from BASE_DOMAIN
+      # like the issuer above and like app-ui's Traefik rule, so one knob moves all of
+      # them and the list cannot drift from where the UI is actually served.
+      #
+      # This is a SECURITY CONTROL and it fails closed: unset or empty refuses every
+      # terminal. WebSockets are not covered by the same-origin policy, so without this
+      # any page a signed-in user visits can open a terminal into their agent container.
+      # Must match app-ui's router: the apex and www.
+      - TERMINAL_ALLOWED_ORIGINS=https://${BASE_DOMAIN:-hill90.com},https://www.${BASE_DOMAIN:-hill90.com}
       # Back-channel: resolved inside the network, so it uses the app's own
       # service name rather than going out through Traefik and back.
       # KEYCLOAK_JWKS_URI is deliberately NOT set.
