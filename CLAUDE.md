@@ -24,6 +24,10 @@ shared VPS, and locally against the same compose files.
 - [`docs/decisions/running-the-app-on-hill90-infra.md`](docs/decisions/running-the-app-on-hill90-infra.md)
   — the long-form record of the tenancy work, including retractions of its own
   earlier claims. Read it before re-litigating a naming or network decision.
+- [`docs/decisions/HANDOFF-2026-07-31.md`](docs/decisions/HANDOFF-2026-07-31.md)
+  — where the tenant stands after the cutover: what it consumes and how that was
+  proven, what remains of its own three services, local's real state, and the open
+  decisions. The estate-level companion is Hill90's handoff of the same date.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — deploy verbs and conventions.
 - Published pages: [docs.hill90.com/ai-app](https://docs.hill90.com/ai-app/overview).
 
@@ -92,8 +96,10 @@ before treating it as open.
 ## Settled — do not reopen or re-describe as open
 
 **This is greenfield, not a migration.** The app reached the VPS for the first
-time on 2026-07-29. Realm `hill90` holds two accounts created hours earlier
-which, since login never worked, have never been used. There is no accumulated
+time on 2026-07-29. Realm `hill90` held two accounts created hours earlier which,
+since login did not then work, were never used; that realm is **gone from the live
+directory** as of 2026-07-31, surviving only in an export and the retained tenant
+volume. There is no accumulated
 state. Export, import, rollback and cutover are the wrong frame — the realm
 export and the database backup are a **safety net**, not steps in a process.
 
@@ -104,15 +110,23 @@ directory, controlled with roles and groups, and infra-versus-app is role and
 client assignment inside it. An earlier version of this file said *"one Keycloak
 does not mean one realm"*; that was wrong and framed a settled question as open.
 
-**Postgres: `app-postgres` goes.** This app consumes the platform's Postgres. The
-complication is real and is not the Keycloak steps repeated: Hill90's health check
-asserts *platform-only databases*, so that boundary needs revisiting deliberately.
+**Postgres: `app-postgres` is gone** (2026-07-31). The app's data lives on the
+platform Postgres as `hill90_api`, `hill90_akm` and `hill90_litellm`, owned by
+`hill90_app`, which is `superuser=false`. The volume and per-table-verified dumps
+were kept.
+
+**MinIO: storage moved up, and this section used to say the opposite.** As of
+2026-07-31 the platform runs `minio`, the app consumes it through the scoped
+`tenant-hill90-app` credential, and `app-minio` is stopped-but-retained until
+2026-08-01 01:41 UTC. This file previously listed it as *genuinely open* with
+"there is no platform MinIO"; both halves are now false.
 
 ## Genuinely open
 
-**MinIO, and the state is reversed.** Only `app-minio` exists; there is **no
-platform MinIO**. The question is whether storage moves *up* into the platform,
-which the governing principle suggests it should. Never addressed.
+**Whether LOCAL development moves onto the platform services.** Production is a
+tenant; local still runs the app's own Keycloak, Postgres and MinIO, so a local
+test proves the realm design and not the tenancy. Deliberate, not drift — see
+[`docs/decisions/local-parity-with-platform-services.md`](docs/decisions/local-parity-with-platform-services.md).
 
 ## Auth — what is true right now
 
@@ -120,9 +134,17 @@ which the governing principle suggests it should. Never addressed.
 the store agree, both 64 chars, matching hash, verified 00:15 UTC 2026-07-30), and
 **client authentication succeeds**.
 
-**That is not login working.** No human has completed a sign-in. Do not write
-anything implying one has. Two distinctions cost this estate a night: *reachable
-is not working*, and *authenticating is not signing in*.
+**Login now works, and that is a change from what this file said for days.** On
+2026-07-31 `testuser01` completed a real **authorization-code** login against realm
+`platform`, and the `LOGIN` row is readable from the platform Postgres. The two
+distinctions that cost this estate a night still stand as habits — *reachable is not
+working*, and *authenticating is not signing in* — but the specific claim "no human
+has completed a sign-in" is now false and should not be repeated.
+
+Login **events are stored** since 2026-07-31, 30-day retention, so "did this user log
+in, and when" is answerable from the host. Nothing exists before that timestamp:
+Keycloak does not backfill, so for an earlier date the honest answer is *not
+recorded*, never *did not happen*.
 
 Note when diagnosing: the correct and the wrong secret **both return HTTP 401**.
 The correct one says *Client not enabled to retrieve service account* — the client
@@ -148,8 +170,10 @@ survived in the database.
 gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
 ```
 
-- Production: `hill90.com` (UI), `app-auth.hill90.com` (the app's Keycloak,
-  realm `hill90`). `auth.hill90.com` is **Hill90's**, realm `platform`.
+- Production: `hill90.com` (UI). Identity is `auth.hill90.com`, **Hill90's**
+  Keycloak, realm `platform` — authorization by **client** roles on `hill90-ui`,
+  not realm roles. `app-auth.hill90.com` was the app's own Keycloak and now
+  **404s**; `app-keycloak` was retired 2026-07-30.
 - Local: UI `http://localhost:13000`, API `:13001`, Keycloak `:18080` — full
   port table in the README.
 - CI (`ci.yml`) runs on every pull request — six suites: api (jest), ui
@@ -157,5 +181,10 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   `workflow_dispatch` only; a merge must not deploy.
 - Backups live in **Hill90**: `bash scripts/backup.sh backup app-db`. Verified
   restorable 2026-07-29. Nothing in this repo backs anything up.
-- Eight stacks: `db auth api ai knowledge mcp minio ui`. `api` creates the two
+- Stacks: `api ai knowledge mcp minio ui`. **`db` and `auth` are RETIRED and
+  `deploy.sh` refuses them** — identity and data are the platform's. Their compose
+  files are kept on purpose because local layers on them. `api` creates the two
   agent networks, so it precedes `ai` and `knowledge`.
+- **A green api-suite run is not evidence.** 7 of 20 runs of `main` fail, measured
+  2026-07-31, cause unknown after seven dead hypotheses — see
+  [`docs/decisions/api-suite-flakiness.md`](docs/decisions/api-suite-flakiness.md).
