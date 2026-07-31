@@ -141,9 +141,22 @@ services:
       - OTEL_TRACES_EXPORTER=otlp
       - OTEL_METRICS_EXPORTER=none
       - OTEL_LOGS_EXPORTER=none
-      - MINIO_ENDPOINT=http://app-minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
-      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      # Object storage moved UP into the platform on 2026-07-31. The S3 API is
+      # internal-only by design, so this is a container-name hop on
+      # hill90_internal, not a public endpoint.
+      #
+      # NOT the root credentials. app-api used to receive ${MINIO_ROOT_USER},
+      # i.e. root on its own MinIO; carrying that over would have handed the
+      # tenant root on the PLATFORM's object store. These are a scoped
+      # credential — MinIO policy `tenant-hill90-app` allows s3 read/write on
+      # exactly agent-avatars, chat-attachments and user-avatars, and refuses
+      # bucket creation, the admin API and .minio.sys. Same shape as the
+      # tenant's Postgres role.
+      #
+      # Hill90's store is authoritative for both values; these are a replica.
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-http://minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_TENANT_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_TENANT_SECRET_KEY}
       - AKM_SIGNING_PRIVATE_KEY=${AKM_SIGNING_PRIVATE_KEY}
       - AKM_INTERNAL_SERVICE_TOKEN=${AKM_INTERNAL_SERVICE_TOKEN}
       - AKM_SERVICE_URL=http://knowledge:8002
