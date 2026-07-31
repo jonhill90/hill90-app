@@ -17,6 +17,14 @@ precise commands rather than `compose down`, so nothing else in the project was 
   currently being **kept deliberately as the rollback target** for the platform-Postgres
   cutover (`scripts/deploy.sh:155`). Anyone reading "we retired the realm" should read
   this paragraph instead.
+
+  **Correction, 2026-07-31.** `app-postgres` has since been retired, and the realm did
+  NOT disappear with it — the prediction above was wrong in the direction that matters.
+  Only the container was removed; the volume `prod_app-postgres-data` was deliberately
+  kept and still holds the `keycloak` database, and the five databases were dumped to
+  `/opt/hill90/backups/app-postgres-final/` with the restore proven (realm `hill90`,
+  3 users, confirmed inside the restored copy). Realm `hill90` therefore still exists
+  in two places. See [retiring-app-postgres.md](retiring-app-postgres.md).
 - **No volume was destroyed, because there was none.** `app-keycloak` had only two
   read-only bind mounts — the realm JSON and the theme directory — both from the
   checkout. Its entire persistent state was in `app-postgres`.
