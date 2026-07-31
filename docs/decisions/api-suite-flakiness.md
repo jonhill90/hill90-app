@@ -216,6 +216,59 @@ the request was misrouted. Reasoning further without that byte of evidence is gu
 explanation 2 is the more parsimonious of the two — it needs no new mechanism beyond one
 already documented here.
 
+### The lead was chased. Explanation 2 is DEAD, and the timer leak is measured
+
+The discriminating experiment above was run: `http.ServerResponse.prototype.end` was wrapped
+in a global setup file to capture every 404 body with the test that received it, then the
+suite was looped until it failed with the instrumentation attached.
+
+**470 404-responses captured across a failing run. 455 were handler-generated JSON. Exactly
+15 were Express's default HTML — and every one of those came from `/nonexistent`, a test
+that deliberately asserts a 404.**
+
+So **no request was answered by an app that did not mount its route.** Explanation 2 —
+requests landing on the wrong short-lived server, the theory in *What actually accumulates*
+above — is not supported by measurement. That section should be read as a hypothesis that
+has now failed a direct test, not as an established mechanism. The corollary is that
+converting all 59 files to one-server-per-file, the fix that section proposes, would be a
+large mechanical change aimed at something that is not happening.
+
+**Explanation 1 also needs narrowing rather than accepting.** The failures are not all
+404-shaped. Captured this session, one per failing run: `403 → 404`, `201 → 400`, and a
+failure *inside* the SSE file itself. What they share is not a status code but a shape:
+**the handler took a different branch than the test set up**, meaning it saw different data
+than the test queued.
+
+**The timer leak is real and now quantified.** A global wrapper on
+`setInterval`/`setTimeout` recorded any timer still pending when the test that created it
+ended. Six runs, **36 leaked timers, a consistent 6 per run**, and the sources are named:
+
+| Count | Kind | Delay | Leaked by |
+|---|---|---|---|
+| 12 | timeout / interval | 50–4000ms | `GET /agents/:id/events T8: SSE inference poll events arrive after initial container event` |
+| 6 | interval | 3000 | `SSE follow forwards a late-arriving event without reconnect` |
+| 6 | interval | 3000 | `Chat SSE stream GET /chat/threads/:id/stream returns SSE headers and initial data` |
+| 6 | timeout | 3000 | `Secrets vault inventory GET /admin/secrets/status returns vault status` |
+| 6 | interval | 3000 | `no duplicate inference events between SSE backfill and first poll` |
+
+These are the SSE poll and heartbeat intervals in `routes/agents.ts` and `routes/chat.ts`,
+plus the abort timeout in `routes/secrets.ts:119`. They are cleared on `req.on('close')` in
+production; under supertest the response ends without that always firing.
+
+**But clearing them did not obviously fix the flake, and that is the next thing to settle.**
+The instrumentation *also* cleared each leaked timer at the end of the test that created it
+— so those six runs ran with the cross-test portion of the leak removed — and failures
+still occurred at **2 of 6**, against 3/6 and 3/8 without it. Six runs cannot separate 2/6
+from 3/6; this is suggestive, not conclusive. **Whoever picks this up should run that
+comparison properly — the same clearing hook, twenty runs against twenty — before
+concluding the timers are or are not the cause.** That is a cheap, decisive experiment and
+it is the single highest-value next step.
+
+If clearing timers does fix it, the fix is not a `beforeEach` added to sixty files: it is to
+make the boundary incapable of holding the state, by clearing the interval in a `finally`
+on the handler rather than only on `close`, so a response that ends without a close event
+still tears its timers down.
+
 ### Environment note for whoever runs this next
 
 `jest` will not run on Node 26 with the committed lockfile: `sharp` has no loadable
