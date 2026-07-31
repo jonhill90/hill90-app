@@ -608,6 +608,6 @@ Knowledge entries are agent-level, not user-level. The JWT `sub` claim contains 
 ## See Also
 
 - [Architecture Overview](./overview.md) — System-level architecture and service inventory
-- [Security Architecture](./security.md) — Agent authentication, token refresh, BYOK encryption, sandboxing
-- [Secrets Architecture](./secrets-model.md) — Vault KV paths for model-router and knowledge secrets
-- [Deployment Guide](../runbooks/deployment.md) — Service deployment procedures
+- Security Architecture — agent authentication, token refresh, BYOK encryption, sandboxing. Lives in the Hill90 infrastructure repository as `docs/architecture/security.md`.
+- Secrets Architecture — vault KV paths for model-router and knowledge secrets. Lives in the Hill90 infrastructure repository as `docs/architecture/secrets-model.md`; this application's own layout is in [secret-layout.md](../reference/secret-layout.md).
+- Deployment Guide — service deployment procedures, in the Hill90 infrastructure repository as `docs/runbooks/deployment.md`. This application's deploy path is in [CONTRIBUTING.md](../../CONTRIBUTING.md#deploying).
