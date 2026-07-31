@@ -1,17 +1,39 @@
+# RETIRED IN PRODUCTION — 2026-07-31.
+#
+# app-postgres was stopped and removed from the VPS. All four services read Hill90's
+# platform Postgres as the tenant role `hill90_app`: app-api and app-ai use
+# hill90_api, app-litellm hill90_litellm, app-knowledge hill90_akm.
+#
+# THE VOLUME WAS KEPT. prod_app-postgres-data still exists, untouched, holding 103MB
+# including the `keycloak` database and realm hill90. All five databases were also
+# dumped to /opt/hill90/backups/app-postgres-final/ and the dump was PROVEN to
+# restore. See docs/decisions/retiring-app-postgres.md.
+#
+# This file is deliberately NOT deleted. deploy/compose/overrides/local.db.yml layers
+# on it and LOCAL development still runs the app's own Postgres — deleting it would
+# break local while gaining nothing in production, where scripts/deploy.sh now refuses
+# the `db` stack and has dropped it from DEPLOY_REST.
+#
 version: '3.9'
 
-# PostgreSQL database — the APP's own instance, not Hill90's.
+# PostgreSQL database — the APP's own instance, not Hill90's. Local only; see above.
 #
-# Hill90's platform Postgres asserts platform-only databases in its own health
-# check and its single role is `hill90` with a different password, so the app
-# cannot use it. See docs/decisions/running-the-app-on-hill90-infra.md.
+# The original reason this existed no longer holds, and the correction matters because
+# it was the whole justification for a second Postgres: Hill90's platform Postgres
+# was described as unusable by the app because it asserts platform-only databases in
+# its health check and has a single role `hill90`. In fact the platform grew a tenant
+# role, `hill90_app` (NOSUPERUSER), with per-database grants, and the app has run on
+# it in production since the cutover. See docs/decisions/retiring-app-postgres.md and
+# docs/decisions/database-credentials-and-inspectability.md.
 #
 # There is deliberately NO postgres-exporter here. Hill90 owns observability and
-# already runs one. Note the consequence, which is real: Hill90's exporter is
-# single-target (DATA_SOURCE_URI=postgres:5432/hill90), so it covers Hill90's
-# database and NOT this one. Until Hill90 adds multi-target scraping — which
-# postgres-exporter v0.17.1 supports via /probe?target= — the app's database has
-# no metrics. Tracked in the tenant deployment runbook, Phase A step 1.
+# already runs one. The metrics gap this used to note is PARTLY closed by the cutover,
+# and the remaining half is worth stating precisely. Hill90's exporter connects to
+# postgres:5432/hill90 (verified 2026-07-31). Cluster-wide views are visible from any
+# database, so pg_stat_database for hill90_api, hill90_akm and hill90_litellm IS now
+# scraped. Per-table views are not — pg_stat_user_tables is per-database, so table and
+# index statistics for the app's databases remain unscraped until Hill90 adds
+# multi-target scraping, which postgres-exporter v0.17.1 supports via /probe?target=.
 
 networks:
   internal:

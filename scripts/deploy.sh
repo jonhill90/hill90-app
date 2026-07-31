@@ -44,7 +44,7 @@ Deploy hill90-app as a tenant of the Hill90 platform.
 Usage: deploy.sh <command> [env]
 
 Stacks (deploy order matters — see 'all'):
-  db          PostgreSQL, the app's own instance (NOT Hill90's)
+  db          RETIRED 2026-07-31 — refuses. Data is Hill90's platform Postgres
   auth        RETIRED 2026-07-30 — refuses. Identity is Hill90's realm `platform`
   api         Control plane. Sole creator of agent_sandbox and docker_proxy
   ai          Model router + LiteLLM
@@ -65,8 +65,9 @@ Commands:
 Environment: defaults to 'prod'
 
 Deploy order is not cosmetic. api creates agent_sandbox and docker_proxy, which
-ai and knowledge consume as external, so api MUST precede them. auth stores its
-realm in the app's postgres, so db MUST precede auth.
+ai and knowledge consume as external, so api MUST precede them. The old db->auth
+ordering is gone with both stacks: Keycloak no longer stores a realm in the app's
+Postgres because neither the app's Keycloak nor the app's Postgres exists.
 EOF
 }
 
@@ -86,11 +87,13 @@ EOF
 # displace. Everything else follows in dependency order, api before ai and
 # knowledge because it is the sole creator of agent_sandbox and docker_proxy.
 DEPLOY_FIRST="ui"
-# auth is deliberately ABSENT. app-keycloak was retired on 2026-07-30 — the app
-# authenticates against Hill90's Keycloak, realm `platform`. Leaving `auth` here would
-# let `deploy all` silently recreate a container that has been retired, which is the
-# whole failure mode this line now prevents.
-DEPLOY_REST="db api ai knowledge mcp minio"
+# `db` and `auth` are deliberately ABSENT, and this is the load-bearing line of both
+# retirements. app-keycloak was retired on 2026-07-30 and app-postgres on 2026-07-31;
+# the app gets identity from Hill90's Keycloak realm `platform` and data from Hill90's
+# platform Postgres. Leaving either stack here would let `deploy all` silently recreate
+# a container that has just been retired — and it would succeed, report healthy, and be
+# read by nothing. See refuse_if_retired, which closes the single-stack path.
+DEPLOY_REST="api ai knowledge mcp minio"
 DEPLOY_ORDER="$DEPLOY_FIRST $DEPLOY_REST"
 
 stack_compose()  { printf 'deploy/compose/%s/docker-compose.%s.yml' "${2:-prod}" "$1"; }
@@ -150,9 +153,60 @@ exists to fail closed." ;;
 # environment with "No such container" — found by running it, not by reading.
 cname() { printf '%s%s' "${CONTAINER_PREFIX:-}" "$1"; }
 
+# ---------------------------------------------------------------------------
+# Retired stacks
+#
+# A stack is retired when its container has been removed from production and the
+# app does not need it. Retirement is NOT deletion: the compose files stay, because
+# scripts/local.sh layers the local overrides on these same prod files and local
+# development still runs both of these services.
+#
+# The hazard being closed is quiet, which is why it needs a guard rather than a
+# note. Recreating either container SUCCEEDS — compose is happy, the image pulls,
+# the healthcheck passes — and leaves a second Postgres or a second Keycloak
+# running that nothing reads. Nothing breaks loudly. It just sits there,
+# accumulating divergent state, until someone points a service at it.
+#
+# Each refusal names three things deliberately: the date, the record, and where the
+# backup is. Whoever hits this message is mid-incident and their real question is
+# "can I get the data back", not "why is this refusing".
+# ---------------------------------------------------------------------------
+refuse_if_retired() {
+    case "$1" in
+        db)
+            die "The db stack is RETIRED. app-postgres was removed on 2026-07-31;
+every service reads Hill90's platform Postgres as the tenant role hill90_app.
+
+Refusing to recreate it — a second Postgres would start cleanly, report healthy
+and be read by nothing, which is why this refuses instead of warning.
+
+All five databases were dumped and the dump was PROVEN to restore before removal:
+/opt/hill90/backups/app-postgres-final/ on the VPS. The data volume
+prod_app-postgres-data was deliberately KEPT and is not touched by this refusal.
+Read docs/decisions/retiring-app-postgres.md before overriding this."
+            ;;
+        auth)
+            # The app authenticates against Hill90's Keycloak at auth.hill90.com, realm
+            # `platform`, and a human has completed a sign-in there. app-auth.hill90.com
+            # is no longer routed.
+            #
+            # Realm hill90 was exported WITH users before removal, and the export is on
+            # the VPS at /opt/hill90/backups/app-realm-final/ (0600 in a 0700 directory,
+            # 3 users with credentials, 9 clients). Restoring it means standing a
+            # Keycloak back up against that export, not re-running this deploy.
+            die "The auth stack is RETIRED. app-keycloak was removed on 2026-07-30;
+the app authenticates against Hill90's Keycloak, realm platform.
+
+Refusing to recreate it. If you genuinely need it back, read
+docs/decisions/retiring-app-keycloak.md first — the realm export is on the VPS
+under /opt/hill90/backups/app-realm-final/ and this deploy would NOT restore it."
+            ;;
+    esac
+}
+
 stack_summary() {
     case "$1" in
-        db)        printf 'app-postgres — KEPT RUNNING as the rollback target while services cut over to the platform Postgres. No longer the app'"'"'s data path.' ;;
+        db)        printf 'RETIRED 2026-07-31 — app-postgres removed; data is Hill90'"'"'s platform Postgres. Volume prod_app-postgres-data KEPT.' ;;
         auth)      printf 'RETIRED 2026-07-30 — app-keycloak removed; identity is Hill90 realm platform on auth.<domain>.' ;;
         api)       printf 'app-api, app-docker-proxy — control plane; creates agent_sandbox and docker_proxy' ;;
         ai)        printf 'app-ai, app-litellm — model router; internal-only' ;;
@@ -296,6 +350,17 @@ cmd_deploy() {
     local env="${2:-prod}"
     local compose_file project_name required
 
+    # FIRST, before anything environment-dependent. A retired stack must refuse on
+    # its own terms, not fall over later for an unrelated reason.
+    #
+    # This used to sit after cmd_preflight, which made the refusal conditional on the
+    # platform networks existing: on any box without them, `deploy auth` died with
+    # "Hill90's shared networks are missing" and never reached the retirement notice.
+    # The retirement then reads as a platform outage, and the obvious next move is to
+    # bring the networks up and retry — which is precisely the path that recreates
+    # what was retired.
+    refuse_if_retired "$stack"
+
     compose_file="$(stack_compose "$stack" "$env")"
     project_name="$(stack_project "$stack" "$env")"
 
@@ -325,24 +390,6 @@ cmd_deploy() {
     # Ordering is a hard dependency, not a preference. Refuse rather than start
     # into a crash loop, which is what Hill90's deploy.sh does for auth->db.
     case "$stack" in
-        auth)
-            # RETIRED 2026-07-30. app-keycloak is gone and this must not bring it back.
-            #
-            # The app authenticates against Hill90's Keycloak at auth.hill90.com, realm
-            # `platform`, and a human has completed a sign-in there. app-auth.hill90.com
-            # is no longer routed.
-            #
-            # Realm hill90 was exported WITH users before removal, and the export is on
-            # the VPS at /opt/hill90/backups/app-realm-final/ (0600 in a 0700 directory,
-            # 3 users with credentials, 9 clients). Restoring it means standing a
-            # Keycloak back up against that export, not re-running this deploy.
-            die "The auth stack is RETIRED. app-keycloak was removed on 2026-07-30;
-the app authenticates against Hill90's Keycloak, realm platform.
-
-Refusing to recreate it. If you genuinely need it back, read
-docs/decisions/retiring-app-keycloak.md first — the realm export is on the VPS
-under /opt/hill90/backups/app-realm-final/ and this deploy would NOT restore it."
-            ;;
         ai|knowledge)
             local pfx; pfx="$(network_prefix)"
             docker network inspect "${pfx}_agent_sandbox" >/dev/null 2>&1 \
