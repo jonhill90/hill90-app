@@ -47,6 +47,17 @@ app compose files, the app database provisioners, the Playwright suites, the
 Mintlify docs site, and the app-specific architecture and runbook documents. Full
 list in [app-paths.txt](app-paths.txt).
 
+**Two of them have never been in an automated deploy**, which is worth knowing before
+someone assumes a compose file implies a deploy path:
+
+- `services/cli` — terminal client. No compose file, no Dockerfile wiring, no CI.
+- `services/discord-bot` — has `deploy/compose/prod/docker-compose.discord-bot.yml` but
+  was never added to the deploy dispatcher or any workflow, and needs
+  `DISCORD_BOT_TOKEN`.
+
+Both are real code and were extracted deliberately. Neither is broken; neither is
+deployed. (Relocated here 2026-07-31 from a status document that expired around it.)
+
 Two documents are copies rather than moves — Hill90 keeps its own:
 `docs/architecture/overview.md` (the only whole-system diagram) and
 `docs/decisions/infra-app-separation.md` (the record of why this split exists).
@@ -130,7 +141,8 @@ The remaining thirteen are genuinely disposable:
   guards (`scripts/deploy.sh`, `Makefile`, `.github/workflows/deploy.yml`,
   `CONTRIBUTING.md`) is a Hill90 path that does not exist here.
 
-The audit also re-checked every path cited in `RESURRECTION.md` against the
+The audit also re-checked every path cited in `RESURRECTION.md` (since removed — see the
+note at the end of this document) against the
 extracted tree and corrected two factual errors in it: the count of Traefik
 routing labels (31 → 37) and the external-network list (two → three, with
 `hill90_agent_internal` added and the self-provided `hill90_agent_sandbox` /
@@ -174,6 +186,30 @@ Caveats, stated plainly:
    `deployments/compose/prod/docker-compose.yml`, which predate the per-service
    split. They were included to preserve the app compose lineage and do not exist
    at `HEAD`.
+
+## Note: RESURRECTION.md was removed on 2026-07-31
+
+The extraction shipped a `RESURRECTION.md` — a checklist of what was broken and what had
+to change. Its items were resolved, and what remained was a status tracker: "here is what
+is still broken tonight" lists, container counts, and notes written to a future self
+mid-crisis. That texture is what a stranger would have read first, so it was removed.
+
+Three parts were **not** spent, and were relocated rather than deleted:
+
+| Was | Now |
+|---|---|
+| §3, the app's secret layout and the two vault KV couplings | [`docs/reference/secret-layout.md`](../reference/secret-layout.md) |
+| §6, the two services never wired into an automated deploy | this document, under [What came across](#what-came-across) |
+| §7, the `fast-xml-parser` pin being load-bearing for storage | [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — the `TARGETARCH` half was already documented in `services/knowledge/Dockerfile` |
+
+**The rule applied, and worth applying next time: decision records preserve, status
+trackers expire.** A record explaining *why* something was decided or rebuilt stays, even
+where its language has aged — `docs/decisions/infra-app-separation.md` still says "the AI
+agent application is shelved", which is a statement of what was decided at the time and
+is correct as such. A tracker describing *what state things were in* does not survive its
+own timestamp.
+
+Nothing was unpublished by this. Every removed line remains in `git log`.
 
 ## Related
 

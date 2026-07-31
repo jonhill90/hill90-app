@@ -87,7 +87,9 @@ The repo ships as an archive, not a working project:
 
 - `README.md` states in its first paragraph: *shelved — not verified runnable
   since June 2026.*
-- `RESURRECTION.md` lists every known-broken thing, each with its file path and
+- `RESURRECTION.md` (**removed 2026-07-31**; its durable content lives in
+  `docs/reference/secret-layout.md` and `docs/extraction/PROVENANCE.md`) listed every
+  known-broken thing, each with its file path and
   what would have to change. This is the deliberate middle path: no time spent
   fixing, but the diagnostic knowledge gathered during extraction is written down
   while it is cheap rather than rediscovered later at high cost. Seed contents:
