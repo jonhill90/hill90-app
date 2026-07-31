@@ -249,7 +249,15 @@ PLATFORM_DB_PASSWORD=hill90
 MINIO_ENDPOINT=http://app-minio:9000
 MINIO_TENANT_ACCESS_KEY=hill90admin
 MINIO_TENANT_SECRET_KEY=hill90admin
+VOLUME_PREFIX=hill90dev
 KEYS
+}
+
+# Keys whose arrival changes where existing data lives, rather than just filling
+# a blank. topup_env warns specifically about these instead of listing them with
+# the rest, because appending them silently relocates a developer's local state.
+tenant_disruptive_keys() {
+  printf 'VOLUME_PREFIX\n'
 }
 
 # gen_env refuses to touch an existing .env.local, which is correct — it holds
@@ -274,6 +282,23 @@ topup_env() {
     printf '%s' "$added"
   } >> "$ENV_FILE"
   echo "  .env.local: added $(printf '%s' "$added" | cut -d= -f1 | tr '\n' ' ')"
+
+  # Some of these relocate state rather than fill a blank. Adding VOLUME_PREFIX
+  # renames every volume the stack looks for, so the existing prod_app-* volumes
+  # stop being used — the data is not deleted, it is orphaned, which looks
+  # identical to "my local database emptied itself" unless somebody says this
+  # out loud.
+  local key
+  while IFS= read -r key; do
+    printf '%s' "$added" | grep -qE "^${key}=" || continue
+    echo ""
+    echo "  NOTE: ${key} was added, which changes the NAMES of the volumes this"
+    echo "  stack uses. Any data in the old prod_app-* volumes is orphaned, not"
+    echo "  deleted, and the stack will come up with empty ones. That is normal"
+    echo "  for local dev. To reclaim the disk:"
+    echo "      docker volume rm prod_app-postgres-data prod_app-minio-data prod_app-akm-data"
+    echo ""
+  done < <(tenant_disruptive_keys)
 }
 
 gen_env() {
