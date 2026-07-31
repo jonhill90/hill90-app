@@ -1,3 +1,7 @@
+// MUST be first: imports are hoisted, so redaction has to be installed by a
+// module that is itself imported before the others. See bootstrap-redaction.ts.
+import './bootstrap-redaction';
+
 import * as jwt from 'jsonwebtoken';
 import { app } from './app';
 import { getPool, closePool } from './db/pool';
