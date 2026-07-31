@@ -106,6 +106,60 @@ This is the good news, and it shrinks the work considerably:
 
 ---
 
+## Proven 2026-07-31: local auth works end to end — against the WRONG Keycloak
+
+The whole flow was driven for the first time: a real authorization-code login as the
+local `dev` user, through the app's own client, landing back in the app with roles
+enforced. It works. **It does not prove tenancy**, and the distinction is the point of
+this record.
+
+**Which components were actually involved.** Local runs *two* Keycloaks, both serving a
+realm named `platform`, which is precisely how this gets confused:
+
+| Hostname | Container | Realm | Users |
+|---|---|---|---|
+| `app-auth.localtest.me` | `hill90dev-app-keycloak` — **the app's own** | `platform` | 4 |
+| `auth.localtest.me` | `hill90dev-keycloak` — the platform's | `platform` | **0** |
+
+The tenant points at the **first**:
+
+```
+app-api  KEYCLOAK_ISSUER=http://app-auth.localtest.me:8080/realms/platform
+app-ui   AUTH_KEYCLOAK_ISSUER=http://app-auth.localtest.me:8080/realms/platform
+```
+
+Production points at the platform's: `KEYCLOAK_ISSUER=https://auth.hill90.com/realms/platform`.
+
+**So a green local login proves the auth design, not the tenancy.** Same realm name,
+different issuer, different directory.
+
+### What the login did prove, from the token's own claims
+
+```
+iss   http://app-auth.localtest.me:8080/realms/platform
+aud   hill90-api
+azp   hill90-ui
+resource_access.hill90-ui.roles   ['admin', 'user']
+realm_access.roles                None
+```
+
+Roles arrive under **`resource_access`**, and `realm_access.roles` is empty — matching
+production's model, where a realm role also named `admin` exists and must *not* grant
+application access. `services/api/src/middleware/keycloak-config.ts` reads
+`resource_access.<client>.roles`, which is correct.
+
+Enforcement was proven by discrimination rather than by a single green call — two users
+through the identical flow, differing only in their client role, against an admin-gated
+route:
+
+| User | client roles | `/me` | `/storage/buckets` |
+|---|---|---|---|
+| `dev` | `admin, user` | 200 | **200** |
+| `testuser01` | `user` | 200 | **403** |
+
+No token at all returns 401. One user passing proves a signature was accepted; the pair
+proves the app resolved the role and acted on it.
+
 ## What parity would actually take
 
 Per service, smallest coherent change first.
@@ -132,9 +186,19 @@ the app's own Keycloak proves nothing about a production that uses the platform'
 - Point `KEYCLOAK_ISSUER` / `KEYCLOAK_JWKS_URI` at `auth.localtest.me:8080` /
   `hill90dev-keycloak:8080` instead of `app-auth.localtest.me` / `app-keycloak:8080`.
   Both live in `deploy/compose/overrides/local.api.yml` and `local.ui.yml`.
-- The local platform realm needs the app's redirect URIs (`http://localhost:13000/...`,
-  `http://app.localtest.me:8080/...`). Hill90's `keycloak.sh tenant-clients` is the right
-  place — this repo must not write to Hill90's realm directly.
+- **Seed users into the local platform realm. It has none.** `Measured 2026-07-31`:
+  realm `platform` on `hill90dev-keycloak` holds **0 users**, against 4 in the app's
+  own Keycloak. The client and its roles are there — `hill90-ui` with client roles
+  `admin` and `user` — but pointing local at it today means nobody can log in at all.
+  This is the largest single cost in option C and it was not previously recorded.
+  Verified with a positive control, because an empty result is exactly the kind this
+  estate has misread before: the same query returns `master: 1 users`.
+- The local platform realm needs the app's **routed** redirect URI. `Measured
+  2026-07-31`: it already has `http://localhost:13000/api/auth/callback/keycloak` and
+  `https://hill90.com/...`, but **not** `http://app.localtest.me:8080/...`, so the
+  direct-port path would work and the Traefik-routed one would not. Hill90's
+  `keycloak.sh tenant-clients` is the right place — this repo must not write to
+  Hill90's realm directly.
 - `compose/local/keycloak/realm-local.json` becomes dead for the tenant path. It stays
   for `--standalone`. **Do not delete it**: `local.auth.yml` bind-mounts it, and a
   missing bind-mount *file* does not error — Docker creates a directory in its place and
