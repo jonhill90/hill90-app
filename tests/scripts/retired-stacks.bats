@@ -3,9 +3,9 @@
 # The deploy path must not resurrect a retired stack.
 #
 # Three stacks have now been retired in production — `auth` (app-keycloak, 2026-07-30),
-# `db` (app-postgres, 2026-07-31) and `minio` (app-minio, 2026-07-31). In both cases the container was stopped and
-# removed on the VPS, and in both cases the stack was still listed in DEPLOY_REST
-# afterwards, which means `deploy all` would have recreated it. That is the failure
+# `db` (app-postgres, 2026-07-31) and `minio` (app-minio, 2026-07-31). In each case the
+# container was stopped on the VPS, and in each case the stack was still listed in
+# DEPLOY_REST afterwards, which means `deploy all` would have recreated it. That is the failure
 # mode these tests exist to prevent, and it is silent: recreating app-postgres would
 # succeed, report healthy, and leave a second Postgres running that nothing reads —
 # so nothing would break loudly enough to notice.
