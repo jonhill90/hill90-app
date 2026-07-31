@@ -39,6 +39,15 @@ jobs:
           sudo npm install -g bats@1.11.0
           bats --version
 
+      # Guards the class, not the instances. Thirteen dead internal links had
+      # accumulated because nothing looked: the extraction brought this repo's
+      # architecture and runbook docs across and left the platform's behind, so
+      # their relative links pointed at siblings that were no longer here. A dead
+      # internal link is the first thing that makes a docs tree look abandoned,
+      # which matters for a repository that may go public.
+      - name: Markdown links resolve
+        run: python3 scripts/checks/check_md_links.py
+
       - name: Shell syntax
         run: |
           for f in scripts/*.sh tests/scripts/*.sh; do

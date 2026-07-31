@@ -209,4 +209,4 @@ useEffect(() => { fetchData() }, [fetchData])
 
 - [Architecture Overview](./overview.md)
 - [Agent Harness Architecture](./agent-harness.md)
-- [Secrets Architecture](./secrets-model.md)
+- Secrets Architecture — lives in the Hill90 infrastructure repository as `docs/architecture/secrets-model.md`; this application's own secret layout is in [secret-layout.md](../reference/secret-layout.md).
