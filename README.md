@@ -305,9 +305,13 @@ That is the current state, not the target.
 - **Keycloak — decided.** One Keycloak, one realm, the **existing `platform`**.
   No new `hill90` realm. You do not create a second directory for one
   organisation; infra-versus-app is role and client assignment inside it.
-- **Postgres — decided.** `app-postgres` goes. The complication is real and is
-  not the Keycloak steps repeated: Hill90's health check asserts *platform-only
-  databases*.
+- **Postgres — DONE, 2026-07-31.** `app-postgres` is retired: container removed,
+  volume `prod_app-postgres-data` deliberately kept, all four services on the
+  platform instance as the tenant role `hill90_app`. The complication turned out to
+  be solvable rather than blocking — the platform grew a NOSUPERUSER tenant role with
+  per-database grants, so the "platform-only databases" health check was never the
+  obstacle it looked like. See
+  [retiring-app-postgres.md](docs/decisions/retiring-app-postgres.md).
 - **MinIO — open**, and reversed: only `app-minio` exists, there is **no platform
   MinIO**, so the question is whether storage moves *up*.
 
@@ -336,6 +340,19 @@ bash scripts/backup.sh backup app-db      # run in the Hill90 checkout, on the V
 That takes a real `pg_dumpall` of the app's databases plus a tar of the
 `prod_app-postgres-data` volume, and refuses rather than warns if the dump cannot
 be produced. `backup-all` includes it on the nightly cron.
+
+**This `app-db` target will now FAIL every night, and that is a Hill90-side change
+that has not been made.** `backup_app_db` dies when `app-postgres` is not found, and
+as of 2026-07-31 it is not: the container was retired. `backup-all` isolates each
+target in a subshell, so `db`, `vault`, `infra` and `observability` still complete —
+but the 03:00 job exits non-zero with `app-db` named.
+
+The app's data is not at risk in the meantime, which is the part worth being precise
+about. Hill90's `db` target runs `pg_dumpall` against the platform instance, and
+since the cutover that dump contains `hill90_api`, `hill90_akm` and `hill90_litellm`
+— verified in `/opt/hill90/backups/db/20260730_030001/database.sql`. So the SQL half
+of `app-db` is now redundant. The volume-tar half is not, and stays useful for as
+long as `prod_app-postgres-data` exists.
 
 **Verified end to end on 2026-07-29.** The dump was restored into a throwaway
 Postgres container and both user accounts came back with their correct realm

@@ -117,8 +117,12 @@ services:
       # (services/api/src/index.ts, services/mcp/app/main.py), so APP_AUTH_HOST is
       # the single knob and front and back channels cannot diverge.
       # The PLATFORM Postgres, via the tenant login the platform provisions.
-      # DB_USER/DB_PASSWORD are app-postgres's superuser and are deliberately NOT
-      # reused: app-postgres and app-keycloak still consume them.
+      # DB_USER/DB_PASSWORD are app-postgres's superuser and are still deliberately
+      # NOT reused here. Their consumers are now LOCAL ONLY — app-postgres was
+      # retired in production on 2026-07-31 and app-keycloak on 2026-07-30, so in
+      # prod nothing reads them, while scripts/local.sh still brings up the app's own
+      # Postgres. Keeping the two credentials separate is what makes the tenant role
+      # hill90_app a NOSUPERUSER account rather than a superuser by inheritance.
       - DATABASE_URL=postgresql://${PLATFORM_DB_USER}:${PLATFORM_DB_PASSWORD}@${PLATFORM_DB_HOST}:5432/hill90_api
       - DOCKER_HOST=tcp://docker-proxy:2375
       # services/api attaches agent containers to <prefix>_agent_internal and
