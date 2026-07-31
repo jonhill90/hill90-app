@@ -160,7 +160,10 @@ everyone out; that is a known gap, not an oversight.
 **Tenancy detachment — proven.** The yank-out test passed on 2026-07-29: teardown
 left Hill90 at exactly its 13-container baseline with all shared networks intact,
 the redeploy brought the app back to 10 healthy containers, and both accounts
-survived in the database.
+survived in the database. **That 13 is the baseline as it was on 2026-07-29 and is
+not the number to check against today** — the platform is now **16 by name**
+(`Verified 2026-07-31 11:20 UTC`; `minio`, then `alertmanager` and
+`blackbox-exporter` arrived after that test). The tenant runs 7, for 23 in total.
 
 ## Fast facts
 
@@ -176,6 +179,10 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   **404s**; `app-keycloak` was retired 2026-07-30.
 - Local: UI `http://localhost:13000`, API `:13001`, Keycloak `:18080` — full
   port table in the README.
+- **The api suite is not the only flaky one — measured 2026-07-31.** `services/ui`
+  (vitest) failed one test on a **docs-only** tree and passed on re-run of the same
+  commit. One observation in two runs is not a rate, but it does retire "only api
+  flakes". Re-run once before investigating a red `services/ui`, and record it.
 - CI (`ci.yml`) runs on every pull request — six suites: api (jest), ui
   (vitest), pytest for ai/knowledge/mcp/agentbox. Deploy (`deploy.yml`) stays
   `workflow_dispatch` only; a merge must not deploy.
@@ -186,5 +193,19 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   files are kept on purpose because local layers on them. `api` creates the two
   agent networks, so it precedes `ai` and `knowledge`.
 - **A green api-suite run is not evidence.** 7 of 20 runs of `main` fail, measured
-  2026-07-31, cause unknown after seven dead hypotheses — see
+  2026-07-31. **Six** hypotheses are dead (this said seven), the fault is localised
+  to half A's 29 files at ~23% with no necessary member and no reproducing subset,
+  and the investigation has a **stop line**: the per-configuration table is the
+  resume point, a deterministic environment audit is the next step, and further
+  bisection is aimed at a minimal pair that probably does not exist. There is a
+  **standing hypothesis**, labelled untested reasoning rather than a finding — read
+  it before forming a seventh. **Nobody should restart from zero:**
   [`docs/decisions/api-suite-flakiness.md`](docs/decisions/api-suite-flakiness.md).
+- **This tenant's public surface is monitored by the platform, and alerts now reach a
+  human** (`Verified 2026-07-31 11:20 UTC`). `PublicSiteDown` watches `hill90.com`;
+  `TenantApiDown` watches `api.hill90.com/health` — added because the first does not
+  cover it, since `hill90.com/api/health` is the **UI's own** route and reports
+  `service: "ui"` rather than proxying to the API. **No `app-*` container is scraped
+  and none exposes `/metrics`**, so nothing sees inside this tenant; `litellm` and
+  `ai/mcp` are unprobed because they return 403 and 404 in normal operation. Detail
+  in the platform's `docs/decisions/tenant-monitoring-coverage.md`.
