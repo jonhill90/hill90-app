@@ -639,6 +639,76 @@ from B — to test whether membership in A's region matters at all, or whether s
 still-unidentified property tracks it. That is a different question from "which file", and
 the table above is the baseline to compare against.
 
+## The standing hypothesis — untested reasoning, not a finding
+
+**Read this before forming a seventh theory.** It is the shape of cause that remains
+consistent with every measurement in this document. It is reasoning, explicitly labelled as
+such: nothing below has been tested, and it should not be cited as a finding.
+
+**The carrier must be per-process mutable state, written at an unpredictable moment, and
+read as a branch condition by a later file's handler.**
+
+Each clause is forced by a measurement rather than chosen:
+
+- **Per-process, not per-file.** Jest gives every file a fresh module registry, so a
+  module-level singleton cannot cross a file boundary. Yet the fault is cross-file — the
+  victim passes 0/20 alone. So the carrier lives *outside* the registry: `process.env`,
+  something on `globalThis`, the filesystem, or an object captured by a callback that is
+  still running.
+- **Written at an unpredictable moment.** The same pinned file list in the same order under
+  `--runInBand` sometimes passes and sometimes fails. Order is therefore not the variable;
+  *when* the write lands is.
+- **Read as a branch condition.** Every observed symptom is a handler taking a different
+  path — `403 → 404`, `201 → 400`, `501 → 404`, `calls[1] undefined` — not a crash, not a
+  timeout, not a connection error. Something the handler consults was different.
+- **Supplied by several files, none of them necessary.** Removing `routes-chat`,
+  `routes-agents-events` or `routes-agents` individually still reproduces, so more than one
+  file can supply the ingredient.
+- **Requiring enough participants to collide.** Every subset tried is quiet while the
+  29-file whole runs at ~23%, which is what a collision between an unpredictable write and a
+  later read looks like when both become likely only at scale.
+
+**One measurement actively supports it.** `--runInBand` was *slightly worse* than default
+workers (4/10 against 3/10). With one process every file shares the store; with workers only
+about six do. A per-process carrier predicts exactly that ordering, and no
+mechanism-in-the-code theory does.
+
+**And the honest limit: this does not explain why half A fails and half B does not.** Every
+quantity measured is *higher* in the silent half — 26 request-making files against 14, 417
+`request(` calls against 192, 473 tests against 301, and 47 `process.env` assignments against
+36. So whatever discriminates A from B is a **specific key or a specific pair of behaviours,
+not a volume**. Any seventh theory has to account for that inversion, which is where the
+previous six each failed.
+
+### What to do first, and why it is cheap
+
+**Audit the carrier deterministically instead of hunting the failure probabilistically.**
+This is the part that makes it affordable: it needs no reproduction at all.
+
+Snapshot `process.env` and the enumerable keys of `globalThis` after every test file in a
+worker, diff each against the snapshot taken before it, and flag any key that (a) changed and
+was not restored, and (b) is read as a branch condition in `src/routes/` or
+`src/middleware/`. That runs once, in a single suite pass, and either produces a list of
+suspects or rules the whole class out. It converts a 23%-probability hunt into a
+deterministic check — which is what every experiment in this document has lacked.
+
+The obvious candidate is `process.env.DATABASE_URL`: read **19 times** in handler code as
+`if (!process.env.DATABASE_URL) → 503`, assigned 21 times and deleted 33 times across half
+A's files alone. **But note the caveat, because it matters:** its absence produces **503**,
+and 503 is *not* among the observed symptoms. So if the carrier is `process.env`, expect a
+different key — and the audit finds it without anyone having to guess which.
+
+## Status: the flake investigation stops here
+
+Taken from "about a third of runs fail, cause unknown" to: a localised region (half A's 29
+files), a measured rate (~23% there, 7/20 on the full suite), six hypotheses eliminated with
+the numbers that eliminated each, a thirteen-row table of every configuration tried, one real
+bug found and fixed along the way, and the standing hypothesis above.
+
+**Nobody should restart from zero.** The per-configuration table is the resume point, and the
+deterministic audit is the next step. Further bisection is expensive and, on this evidence,
+aimed at a minimal pair that probably does not exist.
+
 ## Where this leaves it: four hypotheses dead, the defect alive
 
 | Hypothesis | Killed by |
