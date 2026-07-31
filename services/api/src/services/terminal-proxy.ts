@@ -161,7 +161,13 @@ async function isParticipant(threadId: string, userSub: string): Promise<boolean
  * Attach WebSocket terminal proxy to an HTTP server.
  *
  * Handles upgrade requests matching /chat/threads/:id/terminal.
- * Auth via Keycloak JWT in Authorization header or token query param.
+ *
+ * Auth is a Keycloak JWT carried in the `hill90.bearer.<token>` WebSocket
+ * subprotocol. NOT the query string — that path was removed deliberately (see
+ * the note above), because a URL reaches access logs, proxy logs and browser
+ * history. This docstring said "or token query param" after the removal, which
+ * is how a closed hole gets reopened by someone reading the comment instead of
+ * the code.
  */
 export function attachTerminalProxy(
   server: ReturnType<typeof import('http').createServer>,
