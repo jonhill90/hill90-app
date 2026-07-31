@@ -127,20 +127,34 @@ Expect `0`. This also removes the stale Traefik labels: while the container exis
 `docker start app-minio` recreates the `storage.hill90.com` router collision, and because
 **both backends are MinIO the host answers 200 either way** — it would look fine.
 
-### 2.3 Close the path that recreates it — otherwise the removal is undone
+### 2.3 The path that recreates it is already closed — verify, do not re-do
 
-**This is the step most likely to be skipped, and skipping it silently reverses everything
-above.** `minio` is still in `DEPLOY_REST` in `scripts/deploy.sh`, so **`deploy.sh minio`
-and `deploy.sh all` will both happily recreate `app-minio` in production.** That is exactly
-the failure `refuse_if_retired` was written for after `db` and `auth` — and `minio` was
-never added to it.
+**This step used to say "add a `minio)` branch to `refuse_if_retired()`". That was done
+ahead of the window** (see the retirement PR), because recreating `app-minio` is wrong
+today, not just after 01:41 — the app is already cut over, and leaving the hazard open
+across the intervening window meant one careless `deploy all` would undo everything.
 
-Add a `minio)` branch to `refuse_if_retired()` in the same shape as `db` and `auth`, naming:
-the retirement date, that object storage is the platform's `minio` via the scoped
-`tenant-hill90-app` credential, and that the **local** compose files are untouched by the
-refusal.
+Verify rather than repeat:
 
-Until that lands, treat the removal as provisional: the next `deploy all` reverses it.
+```bash
+bash scripts/deploy.sh minio prod    # must exit 1 with "The minio stack is RETIRED"
+```
+
+If that *succeeds*, the guard has been reverted and **`deploy all` will recreate
+`app-minio`**. Stop and restore it before removing anything, or the removal is undone by
+the next deploy.
+
+**The refusal deliberately does not block removal.** `refuse_if_retired` is called from
+`cmd_deploy` only, so the supported teardown path stays open and is a valid alternative to
+`docker rm` in 2.2:
+
+```bash
+bash scripts/deploy.sh teardown minio prod   # removes the container; volumes KEPT
+```
+
+A bats test asserts `refuse_if_retired` never appears inside `cmd_teardown`, so this
+cannot regress silently. If a future change *does* make teardown refuse, use `docker rm
+app-minio` directly — 2.2 does not depend on `deploy.sh` at all.
 
 ### 2.4 The volume — and the argument against keeping it
 
