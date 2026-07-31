@@ -6,7 +6,7 @@ nothing should be until Jon picks an option. Every claim below was measured on
 local stack's real state and its documented state have already drifted apart once.
 
 **Related:** [running-the-app-on-hill90-infra.md](running-the-app-on-hill90-infra.md),
-`RESURRECTION.md` §2, Hill90's
+the deploy path described in `CONTRIBUTING.md`, Hill90's
 [object-store.md](https://github.com/jonhill90/Hill90/blob/main/docs/decisions/object-store.md).
 
 ---

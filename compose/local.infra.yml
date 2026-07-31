@@ -18,7 +18,7 @@
 # It is left in place rather than deleted because README.md documents it and the
 # evidence for deleting it should be recorded before it goes, not after. What is
 # known: no script, workflow or make target references it, only comments and prose
-# do. If it goes, README.md and RESURRECTION.md need updating in the same change.
+# do. If it goes, README.md needs updating in the same change.
 #
 # What changes:
 #   * the three shared networks become `external` — infra owns them

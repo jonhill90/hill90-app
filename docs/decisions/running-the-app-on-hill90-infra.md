@@ -10,7 +10,9 @@ The app is a **tenant** of Hill90, not a peer. `deploy/compose/prod/*.yml`
 declare `hill90_edge` and `hill90_internal` as `external: true`; Hill90's
 `docker-compose.infra.yml` creates them. Nothing in this repo starts until
 Hill90's infra is up. See [infra-app-separation](infra-app-separation.md) and
-[RESURRECTION.md](../../RESURRECTION.md) §2.
+the extraction record's deploy-path section (`RESURRECTION.md` §2, removed 2026-07-31 —
+its durable content is in [PROVENANCE.md](../extraction/PROVENANCE.md) and
+[secret-layout.md](../reference/secret-layout.md)).
 
 The goal is: app running locally, then on the VPS, then documented. This record
 captures the verification pass that preceded any change, because several
@@ -81,7 +83,7 @@ without DNS. Host `<VPS_PROVIDER_HOSTNAME>`.
 
 This is the baseline to re-verify after every VPS action.
 
-### RESURRECTION.md's "FIXED" items are genuinely fixed
+### The extraction record's "FIXED" items are genuinely fixed
 
 Checked against the tree rather than taken on trust:
 
@@ -216,7 +218,7 @@ ones. Left hardcoded, a local run creates `hill90_agent_sandbox` alongside
 Hill90's `hill90dev_*` naming, and `services/api` attaches agent containers by
 name — so agents would land on the wrong network. That the api stack is the
 sole creator of the sandbox network also means api must start before ai and
-knowledge, as [RESURRECTION.md](../../RESURRECTION.md) §2 states.
+knowledge, as the extraction record stated and as CLAUDE.md invariant 2 now states.
 
 ### Correction: a working override layer already exists
 
@@ -386,7 +388,7 @@ No conflict at all: Hill90 runs no MinIO. Nothing to dedup.
 ### `postgres-exporter` — app keeps its own (this reverses an earlier call)
 
 An earlier version of this record called this "the one genuine deletion", on the
-grounds that Hill90 owns observability ([RESURRECTION.md](../../RESURRECTION.md)
+grounds that Hill90 owns observability (the extraction record,
 §9) and already runs `postgres-exporter`.
 
 **That was wrong,** and looking at the file before deleting it is what caught it.
@@ -1431,7 +1433,8 @@ class as the incident, pointing the other way.
 **`discord-bot` and `agentbox-images` are disowned by the tooling.** Neither has an
 entry in `stack_containers`, `stack_secrets`, `stack_summary`, `DEPLOY_ORDER` or the
 dispatcher allowlist, so neither is deployable through `deploy.sh` at all. That is
-consistent with RESURRECTION.md §6 — neither has ever been in an automated deploy —
+consistent with the extraction record — neither has ever been in an automated deploy,
+now recorded in docs/extraction/PROVENANCE.md —
 but it means the secrets table does not cover them by design rather than by
 oversight.
 
