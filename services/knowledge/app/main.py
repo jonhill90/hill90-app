@@ -60,6 +60,7 @@ def create_app(
             app.state.private_key = None
 
         # Create DB pool if not provided (tests provide their own)
+        owns_pool = pool is None
         if pool is None:
             pool = await asyncpg.create_pool(
                 settings.database_url, min_size=2, max_size=10
@@ -98,7 +99,11 @@ def create_app(
         except asyncio.CancelledError:
             pass
 
-        if pool:
+        # Close ONLY a pool this lifespan created. An injected pool belongs to
+        # whoever injected it — closing it left the caller holding a closed pool,
+        # which surfaced as `InterfaceError: pool is closed` during test teardown
+        # and, worse, silently skipped the per-test cleanup that depends on it.
+        if pool is not None and owns_pool:
             await pool.close()
         logger.info("akm_stopped")
 

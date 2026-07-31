@@ -154,5 +154,15 @@ async def app_client(
 
     app = create_app(settings=test_settings, pool=db_pool)
     transport = ASGITransport(app=app)  # type: ignore[arg-type]
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
+    # Run the app's LIFESPAN. httpx's ASGITransport does not, and create_app sets
+    # app.state.settings (and public_key, revoked_jtis, pool) inside it — so
+    # without this every route that reads state raised
+    # `AttributeError: 'State' object has no attribute 'settings'` and the entire
+    # integration suite failed at the first request.
+    #
+    # It went unnoticed because CI passes --ignore=tests/integration, so these 18
+    # files never ran there. The lifespan is already written for this: it creates
+    # a pool only "if not provided (tests provide their own)".
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
