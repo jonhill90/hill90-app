@@ -52,9 +52,9 @@ Three things are wrong at once:
    and from `.env.local`. Since #61, `ai` **refuses to start without a database**, so
    this is a hard failure, not a degraded one.
 2. **`MINIO_ENDPOINT` already points at `minio:9000`** — the platform container — because
-   it inherits the production default and no local override replaces it. **There is no
-   `hill90dev-minio` container on this machine at all.** Hill90's local `up` does not
-   start its MinIO stack.
+   it inherits the production default and no local override replaces it. **There was no
+   `hill90dev-minio` container on this machine.** (Corrected 2026-07-31 — see the note
+   below. The cause was not what this record first said.)
 3. **Empty MinIO credentials** — `MINIO_TENANT_ACCESS_KEY` / `MINIO_TENANT_SECRET_KEY`
    are not in the local env either.
 
@@ -101,8 +101,8 @@ This is the good news, and it shrinks the work considerably:
   registered, only the callback I probed with was not. Contrast a client that genuinely
   does not exist, which returns `Client not found`. Hill90's `keycloak.sh tenant-clients`
   is what reconciles them and it has evidently run here.
-- **`hill90dev-minio` does not exist.** Hill90's local `up` does not start its MinIO
-  stack. This is the only platform dependency with nothing behind it locally.
+- **`hill90dev-minio` did not exist** — but not for the reason first recorded here.
+  `scripts/local.sh up` *does* start Hill90's MinIO stack. See the correction below.
 
 ---
 
@@ -148,17 +148,61 @@ the app's own Keycloak proves nothing about a production that uses the platform'
 **Risk: high.** Auth is where every previous local/prod divergence has hidden, and the
 failure mode is a login loop that looks like an app bug.
 
-### MinIO — blocked on something outside this repo
+## Correction, 2026-07-31: Hill90's local MinIO was never the blocker
 
-Nothing to point at: **Hill90's local stack does not run MinIO.** Parity here needs
-Hill90's `local.sh` to start its MinIO stack by default, plus a local
-`tenant-hill90-app` credential. Both are Hill90 changes, not this repo's.
+This record originally said *"Hill90's local `up` does not start its MinIO stack"* and
+used that to mark option D blocked on a change in the platform repo. **That was wrong,
+and the error was mine.** I inferred a cause from an absence: there was no
+`hill90dev-minio` container, and I concluded the platform's `up` did not start one.
 
-Note this is *already* half-done by accident and in the wrong direction:
-`MINIO_ENDPOINT` renders as `http://minio:9000` locally today, pointing at a container
-that does not exist, because no local override replaces the production default.
+What was actually true, established by tearing Hill90's local platform stack down
+completely — volumes included — and bringing it up from nothing:
 
-**Risk: medium, and the dependency is external.**
+- `scripts/local.sh up` **does** start the MinIO stack, and it came up healthy.
+- The container was missing because the developer's `.env.local` **predated the MinIO
+  keys**. Hill90's `.env.local.example` gained `MINIO_HOST`, `MINIO_PUBLIC_URL`,
+  `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_OIDC_CLIENT_SECRET`,
+  `MINIO_OIDC_CLAIM_NAME` and `MINIO_TRAEFIK_ENABLE`; the existing `.env.local` did not,
+  because `require_env` only copies the template when the file is **absent**.
+
+That is the same "existing developers are not fixed by fixing the generator" gap this
+repo hit in #71 — in the other repo, and with the opposite mechanism.
+
+**Hill90 already catches it.** `check_env_drift` in its `local.sh` compares the two files
+on every `up` and `status`, and named all seven keys exactly when pointed at the stale
+file:
+
+```
+! .env.local is missing 7 variable(s) present in .env.local.example:
+    MINIO_HOST  MINIO_OIDC_CLAIM_NAME  MINIO_OIDC_CLIENT_SECRET
+    MINIO_PUBLIC_URL  MINIO_ROOT_PASSWORD  MINIO_ROOT_USER  MINIO_TRAEFIK_ENABLE
+  Compose substitutes these as empty strings rather than failing, so the
+  stack may start with those features silently unconfigured.
+```
+
+The mechanism works; the content lagged. It is a warning rather than a failure, and the
+likely reason nobody saw it is simply that `up` had not been re-run since MinIO landed.
+
+**What this changes for the decision.** Option D is *not* blocked on a platform change.
+Bringing local storage onto the platform MinIO needs a local `tenant-hill90-app`
+credential, which is work in this repo. It does not raise D above C in priority — auth is
+still the question that matters — but "blocked elsewhere" was the wrong reason to defer
+it, and deferring for a wrong reason is how something stays deferred after the reason
+expires.
+
+### MinIO — needs a local tenant credential, and nothing else
+
+**Corrected above.** Hill90's local MinIO starts fine; it needs only a complete
+`.env.local`. What parity here actually requires is a local `tenant-hill90-app`
+credential scoped to the three buckets — the local equivalent of the production one —
+and that is **this repo's work, not Hill90's**.
+
+Both halves of that sentence have since changed: #71 set `MINIO_ENDPOINT` explicitly to
+`http://app-minio:9000`, and `hill90dev-minio` now exists and is healthy. So local no
+longer points at a container that is not there — it points, deliberately, at the app's
+own store until this decision is made.
+
+**Risk: medium. The dependency is internal — this repo mints the credential.**
 
 ---
 
@@ -206,10 +250,11 @@ flag, CI has to start that path too, or it will rot exactly as the fork did.
 | **A** | Fix the empty-variable breakage only. Local keeps its own services | Hours | Low | None — but local starts again |
 | **B** | A, plus Postgres parity | ~½ day | Low | Database path matches |
 | **C** | B, plus Keycloak parity | 2–3 days | **High** | The one that matters — auth |
-| **D** | C, plus MinIO (needs a Hill90 change first) | +1 day, blocked | Medium | Full |
+| **D** | C, plus MinIO | +1 day | Medium | Full |
 
 **Recommendation: A now, separately and immediately. Then B. Hold C until the local
-secret-distribution question is answered, and D until Hill90's local stack runs MinIO.**
+secret-distribution question is answered. D is no longer blocked on Hill90 — it needs a
+local `tenant-hill90-app` credential, which is this repo's work.**
 
 A is not really an option, it is a bug fix that A/B/C/D all need — it is listed only so
 the sequencing is explicit. B is cheap and low-risk because the local platform Postgres
