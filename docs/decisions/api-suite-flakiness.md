@@ -269,6 +269,100 @@ make the boundary incapable of holding the state, by clearing the interval in a 
 on the handler rather than only on `close`, so a response that ends without a close event
 still tears its timers down.
 
+### The twenty-against-twenty: clearing leaked timers is NOT the fix
+
+Run because 2/6 against 3/6 separated nothing. **The result does not support the timer fix,
+and the direction is against it.**
+
+**Method**, stated so it can be criticised. Both arms ran **in the same session,
+alternating** — observe, clear, observe, clear — rather than twenty of one then twenty of
+the other, because machine load drifts over half an hour and a block design confounds that
+drift with the treatment. Both arms loaded the *same* setup file with the *same* timer
+wrapper, so instrumentation overhead is identical; the single variable was one `if`, whether
+a leaked timer is cleared. Default worker regime, the same as every earlier measurement in
+this document — jest 29.7.0, no `--randomize`, no explicit seed, no `--runInBand`.
+
+| Pair | observe (no clearing) | clear (clearing) |
+|---|---|---|
+| 1 | FAIL | pass |
+| 2 | pass | pass |
+| 3 | pass | FAIL |
+| 4 | pass | pass |
+| 5 | pass | pass |
+| 6 | pass | pass |
+| 7 | pass | FAIL |
+| 8 | pass | pass |
+| 9 | pass | FAIL |
+| 10 | pass | FAIL |
+| 11 | pass | pass |
+| 12 | pass | pass |
+| 13 | pass | FAIL |
+| 14 | pass | pass |
+| 15 | pass | pass |
+| 16 | FAIL | FAIL |
+| 17 | pass | pass |
+| 18 | pass | pass |
+| 19 | pass | pass |
+| 20 | FAIL | pass |
+
+**Totals: observe 3/20 failed. clear 6/20 failed. Fisher exact two-sided p = 0.451.**
+
+**Manipulation check:** both arms recorded **120 leaked timers over 20 runs, 6.00 per run,
+identical** — confirming the wrapper behaved the same in both and that clearing was the only
+difference.
+
+#### What this settles, and what it does not
+
+**Settled, and it needs no statistics: clearing leaked timers at the test boundary is not a
+fix.** The treatment arm failed 6 times in 20 runs. A change that leaves a third of runs
+failing has not fixed anything, whatever the p-value says. Do not adopt it.
+
+**Not settled: whether clearing makes things worse.** 3/20 against 6/20 with p = 0.451
+cannot separate the arms. It is tempting to read "clearing doubled the failures" — resist
+it; that is exactly the over-reading this experiment was designed to avoid. Separating 15%
+from 30% at 80% power needs roughly **120 runs per arm**, about eight hours of the machine.
+Nobody should spend that to answer a question that does not change what we do next.
+
+**A methodological limit that matters, and it is mine.** The hook cleared timers in
+`afterEach` — *after* the test finished. The fix proposed below clears in a `finally` when
+the handler completes, which is **earlier**, during the test. A timer that fires between
+response-end and `afterEach` still polluted in the treatment arm and would not under the
+real fix. So this experiment refutes *clearing at the test boundary*; it is a weaker test of
+the handler-level fix, which is therefore **unproven rather than disproven**.
+
+#### The fix shape, recorded because it is right even though it is not shipped
+
+Not landing it: shipping a security-adjacent behaviour change on an experiment that trends
+the wrong way would be a fix adopted for the effort spent on it. If someone tests it
+properly and it works, this is the shape:
+
+```ts
+// in the SSE handlers: routes/agents.ts:1730, routes/chat.ts:1115/1118/1282/1295
+const poll = setInterval(...);
+try { /* stream */ } finally { clearInterval(poll); }   // not only req.on('close')
+```
+
+Clear the interval in a `finally` on the handler rather than only on `close`, so a response
+that ends without a close event still tears its timers down. That removes the boundary's
+ability to hold cross-test state instead of asking sixty test files to clean up after it —
+which is the difference between fixing a design and hiding it. **It must ship with a test
+that fails when the `finally` is removed**, or it is unverifiable.
+
+#### The next hypothesis, which no amount of timer clearing would touch
+
+Timers are not the only thing that outlives a response. **An unawaited promise is not a
+timer**, so every experiment above leaves it untouched: a handler that calls the pool
+without `await` finishes its response, the test asserts and ends, and the query resolves
+into the next test. That fits every symptom recorded here — `403 → 404`, `201 → 400`,
+`calls[1] undefined` — and it fits the zero-`Once(` file too, because a late call corrupts
+`mock.calls` counts even when no queued value exists to steal.
+
+The instrumentation for it is per-file rather than global, which is why it was not done
+here: the pool mock is created inside each file's `jest.mock` factory, so a global hook
+cannot see it. Wrapping the mock in **one** representative failing file and logging every
+query with `expect.getState().currentTestName` at call time would show a query arriving
+under a test that did not make it. That is the next experiment.
+
 ### Environment note for whoever runs this next
 
 `jest` will not run on Node 26 with the committed lockfile: `sharp` has no loadable
