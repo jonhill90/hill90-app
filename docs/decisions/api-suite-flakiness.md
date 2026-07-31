@@ -496,6 +496,69 @@ Measured on `main` plus one unrelated local commit touching `compose/local.yml`,
 and a bats test, none of which the api suite reads. The fix was confirmed present in the
 measured tree: two `req.on('close', cleanup)` sites, two early-return guards.
 
+### Isolation instead of mechanism: the first localisation, and why the bisection stopped
+
+Measured 2026-07-31. Every previous hypothesis was a theory about a *mechanism*; this
+attacked it by *interaction* instead — find which files have to run together, and let that
+point at the cause. It produced the first real localisation, and it did **not** produce a
+pair.
+
+**How the file set and order were pinned**, because otherwise this chases a moving target:
+`npx jest --runInBand --runTestsByPath <explicit list>`, with the list built as
+`ls src/__tests__/*.test.ts | sort` — alphabetical, so it is reproducible — and
+`--runInBand` so a single process runs them in exactly that sequence and no worker
+scheduling can reorder anything.
+
+| Set | Files | Result |
+|---|---|---|
+| victim alone (`routes-container-profiles`) | 1 | **0/20** |
+| A1 — `akm-proxy-errors` … `model-type-detect` | 14 | **0/10** |
+| A2 — `openapi-model-aliases` … `routes-chat` | 15 | **2/20** |
+| **half A** — `akm-proxy-errors` … `routes-chat` | 29 | **4/10** |
+| **half B** — `routes-container-profiles` … `tool-installer` | 29 | **0/10** |
+| full set, pinned | 58 | 1/6 |
+
+**Three things this establishes.**
+
+1. **The fault is cross-file, confirmed rather than assumed.** The victim that fails in a
+   full run passes **0 times in 20** alone.
+2. **Half B is quiet.** Twenty-nine files, zero failures in ten runs — including the very
+   file that was the victim in the full run. Whatever interacts is in half A's region.
+3. **It is not a pair, and the arithmetic is the reason.** A1 scores 0/10 and A2 scores
+   2/20, but A1+A2 together score **4/10** — worse than either part. Combining a 0% set
+   with a 10% set produces 40%. A single file poisoning another would keep the rate roughly
+   constant when unrelated files are removed; instead the rate *falls* as the set shrinks
+   and *rises* when the halves are recombined. That is the signature of an interaction
+   needing a quantity of participants, not two named files.
+
+The superadditivity is suggestive rather than proven at this sample size: A 4/10 against
+A2 2/20 gives Fisher p = 0.141, and against A1 0/10 gives p = 0.087. Both point the same
+way and neither clears 0.05. Said plainly: the pattern is consistent and the sample is too
+small to call it significant.
+
+**Why the bisection stopped here, with the numbers.** Continuing means calling subsets
+"negative", and a negative is only as good as the run count behind it. From A2's measured
+10%, at 13s per run:
+
+| If the true rate is | Runs per negative for 95% confidence | Per candidate | Three more levels |
+|---|---|---|---|
+| 10% | 29 | 6.3 min | **~38 min** |
+| 5% | 59 | 12.8 min | ~77 min |
+| 2.5% | 119 | 25.8 min | ~155 min |
+
+The rate has already fallen 40% → 10% at one split, so the 5% and 2.5% rows are the likely
+ones rather than the optimistic first. That is one to two and a half hours of machine time
+for calls that would still be probabilistic — and the superadditive pattern says the thing
+being searched for, a minimal failing pair, **probably does not exist**. Grinding toward an
+artefact the evidence argues against is the wrong trade today.
+
+**What the next person should do instead**, and it is cheap: start from half A's 29 files at
+40%, which is a *higher* rate than the full suite and a third of the runtime. That is the
+best reproduction harness this defect has ever had. Test whether the rate tracks the
+*number* of concurrent supertest servers rather than any particular file — half A is
+route-test heavy and half B is not — because "needs N interacting files" and "needs N
+servers" are the same hypothesis stated two ways, and the second one is measurable.
+
 ## Where this leaves it: four hypotheses dead, the defect alive
 
 | Hypothesis | Killed by |
