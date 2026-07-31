@@ -26,6 +26,25 @@ const SOURCE = readFileSync(
 // implementations under test would be a copy — instead the source is asserted on
 // directly for the properties that matter, then the behaviour is checked through the
 // extracted logic below.
+/**
+ * Extract a function body by lines: from its declaration to the closing brace at
+ * column 0.
+ *
+ * A regex of the form /function name[^}]+}/ does NOT work here, and the first version
+ * of this file used one. `[^}]+` stops at the first `}` in the source, which inside
+ * these functions is the one closing a `${...}` template placeholder — so it captured
+ * the signature and nothing else, and the assertion failed for a reason unrelated to
+ * the code under test. CI caught it, because vitest cannot run on the machine this was
+ * written on.
+ */
+function functionBody(source: string, name: string): string {
+  const lines = source.split('\n')
+  const start = lines.findIndex((l) => l.startsWith(`function ${name}(`))
+  if (start === -1) return ''
+  const end = lines.findIndex((l, i) => i > start && l === '}')
+  return lines.slice(start, end === -1 ? undefined : end + 1).join('\n')
+}
+
 describe('terminal websocket credential handling', () => {
   it('never puts a token in the query string', () => {
     // The precise regression: `?token=` in the URL builder.
@@ -34,9 +53,9 @@ describe('terminal websocket credential handling', () => {
   })
 
   it('builds the terminal path with no query string at all', () => {
-    const m = SOURCE.match(/function terminalWsUrl[^}]+}/s)
-    expect(m).not.toBeNull()
-    const body = m![0]
+    const body = functionBody(SOURCE, 'terminalWsUrl')
+    // Guard the vacuous pass: an empty extraction satisfies every not.toContain below.
+    expect(body).not.toBe('')
     expect(body).toContain('/chat/threads/')
     expect(body).toContain('/terminal')
     // No '?' anywhere in the constructed URL.
@@ -44,9 +63,8 @@ describe('terminal websocket credential handling', () => {
   })
 
   it('offers both the version subprotocol and the bearer subprotocol', () => {
-    const m = SOURCE.match(/function terminalWsProtocols[^}]+}/s)
-    expect(m).not.toBeNull()
-    const body = m![0]
+    const body = functionBody(SOURCE, 'terminalWsProtocols')
+    expect(body).not.toBe('')
     expect(body).toContain('WS_PROTOCOL_VERSION')
     expect(body).toContain('WS_PROTOCOL_BEARER_PREFIX')
   })
