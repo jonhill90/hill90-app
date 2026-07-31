@@ -50,7 +50,7 @@ Stacks (deploy order matters — see 'all'):
   ai          Model router + LiteLLM
   knowledge   Agent Knowledge Manager
   mcp         Model Context Protocol gateway
-  minio       Object storage
+  minio       RETIRED 2026-07-31 — refuses. Object storage is Hill90's platform MinIO
   ui          Next.js frontend
 
 Commands:
@@ -93,7 +93,13 @@ DEPLOY_FIRST="ui"
 # platform Postgres. Leaving either stack here would let `deploy all` silently recreate
 # a container that has just been retired — and it would succeed, report healthy, and be
 # read by nothing. See refuse_if_retired, which closes the single-stack path.
-DEPLOY_REST="api ai knowledge mcp minio"
+#
+# minio joined them on 2026-07-31. app-minio was stopped 01:40:43 UTC and the app reads
+# the platform's MinIO through the scoped tenant-hill90-app credential. This one is worth
+# naming because its recreation is the QUIETEST of the three: both backends are MinIO, so
+# a resurrected app-minio would take storage.hill90.com back and answer 200 — the host
+# would look correct while serving an empty store.
+DEPLOY_REST="api ai knowledge mcp"
 DEPLOY_ORDER="$DEPLOY_FIRST $DEPLOY_REST"
 
 stack_compose()  { printf 'deploy/compose/%s/docker-compose.%s.yml' "${2:-prod}" "$1"; }
@@ -201,6 +207,30 @@ Refusing to recreate it. If you genuinely need it back, read
 docs/decisions/retiring-app-keycloak.md first — the realm export is on the VPS
 under /opt/hill90/backups/app-realm-final/ and this deploy would NOT restore it."
             ;;
+        minio)
+            # Object storage moved UP to the platform on 2026-07-31: app-api reads
+            # MINIO_ENDPOINT=http://minio:9000 through the scoped tenant-hill90-app
+            # credential, proven by a byte-for-byte round trip through app-api's own
+            # S3 client.
+            #
+            # This refusal matters more than its two siblings, not less, because
+            # recreating app-minio is the failure that LOOKS FINE. The stopped
+            # container still carries traefik.enable=true and a router claiming
+            # storage.<domain>; bring it back and it takes that hostname from the
+            # platform's MinIO. Both backends are MinIO, so the host answers 200
+            # either way — a healthy-looking 200 served from an EMPTY store.
+            die "The minio stack is RETIRED. app-minio was stopped on 2026-07-31 01:40:43 UTC;
+object storage is Hill90's platform MinIO, via the scoped tenant-hill90-app credential.
+
+Refusing to recreate it. Recreating app-minio would take storage.<domain> back from
+the platform's MinIO, and because BOTH are MinIO the host would answer 200 while
+serving an empty store — this is the retirement whose resurrection looks healthy.
+
+Read docs/runbooks/retiring-app-minio.md before overriding this. The retained volume
+prod_app-minio-data is NOT touched by this refusal, and this refusal does NOT block
+removing the container: use 'deploy.sh teardown minio' or docker rm directly.
+LOCAL development is unaffected — it still runs app-minio, deliberately."
+            ;;
     esac
 }
 
@@ -212,7 +242,7 @@ stack_summary() {
         ai)        printf 'app-ai, app-litellm — model router; internal-only' ;;
         knowledge) printf 'app-knowledge — AKM; internal-only' ;;
         mcp)       printf 'app-mcp — MCP gateway on ${AI_HOST:-ai}/mcp' ;;
-        minio)     printf 'app-minio — object storage on ${STORAGE_HOST:-storage}' ;;
+        minio)     printf 'RETIRED 2026-07-31 — app-minio stopped; object storage is Hill90'"'"'s platform MinIO. Volume prod_app-minio-data KEPT.' ;;
         ui)        printf 'app-ui — frontend at the apex domain' ;;
     esac
 }

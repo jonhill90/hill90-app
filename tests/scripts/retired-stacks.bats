@@ -2,8 +2,8 @@
 
 # The deploy path must not resurrect a retired stack.
 #
-# Two stacks have now been retired in production — `auth` (app-keycloak, 2026-07-30)
-# and `db` (app-postgres, 2026-07-31). In both cases the container was stopped and
+# Three stacks have now been retired in production — `auth` (app-keycloak, 2026-07-30),
+# `db` (app-postgres, 2026-07-31) and `minio` (app-minio, 2026-07-31). In both cases the container was stopped and
 # removed on the VPS, and in both cases the stack was still listed in DEPLOY_REST
 # afterwards, which means `deploy all` would have recreated it. That is the failure
 # mode these tests exist to prevent, and it is silent: recreating app-postgres would
@@ -31,7 +31,7 @@ deploy_rest() {
   # Guard against the vacuous pass: if DEPLOY_REST parsed as empty, every
   # "does not contain" assertion below would succeed for the wrong reason.
   [ -n "$output" ]
-  for live in api ai knowledge mcp minio; do
+  for live in api ai knowledge mcp; do
     [[ " $output " == *" $live "* ]] || { echo "live stack '$live' missing from DEPLOY_REST: '$output'"; return 1; }
   done
 }
@@ -72,13 +72,35 @@ deploy_rest() {
   # and the retirement notice was never reached — while a naive grep for RETIRED
   # still passed, because the stack SUMMARY line contains that word. A retirement
   # must not be reported as a platform outage.
-  for stack in db auth; do
+  for stack in db auth minio; do
     run bash "$DEPLOY" "$stack" prod
     [ "$status" -ne 0 ]
     [[ "$output" != *"Preflight"* ]] || { echo "$stack reached preflight before refusing: $output"; return 1; }
     [[ "$output" != *"networks are missing"* ]] || { echo "$stack failed as an outage, not a retirement"; return 1; }
     [[ "$output" != *"compose:"* ]] || { echo "$stack printed the deploy banner before refusing"; return 1; }
   done
+}
+
+@test "DEPLOY_REST does not contain the retired minio stack" {
+  run deploy_rest
+  [ -n "$output" ]
+  [[ " $output " != *" minio "* ]] || { echo "minio is still in DEPLOY_REST: '$output' — 'deploy all' would recreate app-minio"; return 1; }
+}
+
+@test "deploying the retired minio stack refuses, and names the hazard that makes it quiet" {
+  run bash "$DEPLOY" minio prod
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Refusing to recreate"* ]] || { echo "expected a refusal, got: $output"; return 1; }
+  [[ "$output" == *RETIRED* ]]
+  [[ "$output" == *app-minio* ]]
+  [[ "$output" == *retiring-app-minio* ]]
+  # The refusal must say WHY this one is worse than a normal resurrection: both
+  # backends are MinIO, so the host answers 200 from an empty store and looks fine.
+  [[ "$output" == *200* ]] || { echo "refusal does not explain that a resurrection still answers 200: $output"; return 1; }
+  # And it must not read as a block on the legitimate removal path, which is the
+  # thing someone will be doing when they hit this.
+  [[ "$output" == *teardown* ]] || { echo "refusal does not say how to remove the container: $output"; return 1; }
+  [[ "$output" == *LOCAL* ]] || { echo "refusal does not say local is unaffected: $output"; return 1; }
 }
 
 @test "deploying the retired auth stack refuses" {
@@ -96,6 +118,30 @@ deploy_rest() {
   [ "$status" -eq 0 ]
   [[ "$output" == *db*RETIRED* ]] || { echo "usage does not mark db as retired"; return 1; }
   [[ "$output" == *auth*RETIRED* ]] || { echo "usage does not mark auth as retired"; return 1; }
+  [[ "$output" == *minio*RETIRED* ]] || { echo "usage does not mark minio as retired"; return 1; }
+}
+
+@test "the minio compose file is kept, because local development still uses it" {
+  # Identical reasoning to the db case: local.sh layers
+  # deploy/compose/overrides/local.minio.yml on the prod file, and
+  # .env.local.example points MINIO_ENDPOINT at http://app-minio:9000.
+  [ -f "$BATS_TEST_DIRNAME/../../deploy/compose/prod/docker-compose.minio.yml" ]
+  [ -f "$BATS_TEST_DIRNAME/../../deploy/compose/overrides/local.minio.yml" ]
+  run grep -c 'RETIRED IN PRODUCTION' "$BATS_TEST_DIRNAME/../../deploy/compose/prod/docker-compose.minio.yml"
+  [ "$output" -ge 1 ]
+  run grep -c 'app-minio' "$BATS_TEST_DIRNAME/../../.env.local.example"
+  [ "$output" -ge 1 ]
+}
+
+@test "teardown is NOT blocked for a retired stack — removal must stay possible" {
+  # refuse_if_retired is called from cmd_deploy only. If it ever moved somewhere
+  # shared, `teardown minio` would start refusing and the documented removal
+  # procedure in docs/runbooks/retiring-app-minio.md would become impossible to
+  # follow through the supported path.
+  run grep -c 'refuse_if_retired' "$DEPLOY"
+  # one definition, one call site, one comment reference — never inside cmd_teardown
+  run bash -c 'sed -n "/^cmd_teardown()/,/^}/p" "$1" | grep -c refuse_if_retired' _ "$DEPLOY"
+  [ "$output" -eq 0 ] || { echo "refuse_if_retired is now called inside cmd_teardown; removal would be blocked"; return 1; }
 }
 
 @test "the db compose file is kept, because local development still uses it" {
