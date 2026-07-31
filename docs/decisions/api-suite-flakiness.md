@@ -371,6 +371,56 @@ catastrophic regression and is not one. `npm install --no-save --include=optiona
 --os=darwin --cpu=arm64 sharp` fixes it locally without touching the lockfile. CI runs
 Node 20 and is unaffected.
 
+### Ruled out: unawaited promises, by reachability
+
+The hypothesis recorded above as "the next experiment" was that an unawaited promise — which
+is not a timer, so no timer clearing touches it — resolves into the following test. It fits
+every symptom here, including the zero-`Once(` file, because a late call corrupts
+`mock.calls` counts even where no queued value exists to steal. It was the best remaining
+theory.
+
+**It does not survive inspection, and the reasoning is the useful part.**
+
+There are **344 `pool.query` / `getPool().query` call sites** in non-test code. **18** have
+no `await` on the same line. On reading them, all but two are members of
+`await Promise.all([...])` — properly awaited, just on a different line. Examples:
+`routes/agents.ts:2234`, `routes/skills.ts:96`, `routes/profile.ts:40`.
+
+**Two are genuinely fire-and-forget:** `routes/workflows.ts:291` and `routes/workflows.ts:501`.
+Both are `pool.query(...)` inside a `.catch()` attached to a dispatch promise, neither
+awaited, both writing `workflow_runs` on failure. They are real instances of the pattern and
+worth fixing on their own merits.
+
+**But neither can be the mechanism, because of where they are.** Both run only when a
+*workflow dispatch fails*, on the workflow routes. The measured victims are elsewhere:
+shared-knowledge, model-policies, agents, container-profiles, skills, user-models,
+eligible-models, ownership-boundary. A failing workflow dispatch is not on any of those code
+paths, so it cannot be the thing corrupting their mocks. Reachability kills it, not
+statistics — which is why this entry is inspection rather than another twenty runs.
+
+## Where this leaves it: four hypotheses dead, the defect alive
+
+| Hypothesis | Killed by |
+|---|---|
+| positional `mockResolvedValueOnce` queues | a file with **zero** `Once(` calls that flakes anyway |
+| requests landing on the wrong supertest server | **455 of 470** captured 404s were handler JSON; all 15 HTML ones came from a test that asserts 404 |
+| leaked timers crossing the test boundary | clearing them still failed **6/20** |
+| unawaited promises | the only two genuine ones are unreachable from the affected paths |
+
+That is a real result and it is worth more than a fifth theory picked because the lane was
+free. **No further hypothesis is currently worth testing.** If someone forms one, it should be
+written here before it is worked on, so the next dead end costs one session rather than two.
+
+**The one candidate that is untested rather than disproven** is the handler-level fix: clear
+the interval in a `finally` on the handler rather than only on `req.on('close')`, so a
+response that ends without a close event still tears its timers down. The 6/20 experiment
+cleared at the *test* boundary, which is later than this would, so it is a weaker test of it.
+**It ships with a test that fails when the `finally` is removed, or it does not ship** —
+otherwise it is an unverifiable change to a suite that cannot verify anything.
+
+**Operational consequence, in one line: a green run of the api suite is not evidence that a
+change is safe, and should not be cited as one until this is fixed.**
+
 ## A correction to an earlier report
 
 I first described this as "roughly one failure per run" and said it "reproduces on main".
