@@ -22,6 +22,32 @@
  * *values of known-sensitive keys*, credentials embedded in URLs, and the one
  * unambiguous literal shape (a JWT) keeps log lines useful. A redactor that
  * eats ordinary words trains people to turn it off.
+ *
+ * TWO LIMITS MEASURED ON 2026-07-31, RECORDED SO NOBODY ASSUMES WIDER COVERAGE
+ *
+ * 1. SENSITIVE_KEY is anchored `^(...)$`, so it matches a key that IS one of the
+ *    listed names and never one that merely contains it. Checked against this
+ *    app's own credential variables: ALL FOURTEEN fail to match —
+ *    ANTHROPIC_API_KEY, OPENAI_API_KEY, LITELLM_MASTER_KEY, AUTH_SECRET,
+ *    AUTH_KEYCLOAK_SECRET, PLATFORM_DB_PASSWORD, CHAT_CALLBACK_TOKEN,
+ *    MINIO_TENANT_ACCESS_KEY, MINIO_TENANT_SECRET_KEY,
+ *    AKM_INTERNAL_SERVICE_TOKEN, AKM_SIGNING_PRIVATE_KEY,
+ *    MODEL_ROUTER_INTERNAL_SERVICE_TOKEN, MODEL_ROUTER_SIGNING_PRIVATE_KEY,
+ *    PROVIDER_KEY_ENCRYPTION_KEY. Logging an object keyed by those names — a
+ *    config dump, `process.env` — would print the values.
+ *
+ * 2. It redacts key/value pairs, not `NAME=value` STRINGS. The agent container
+ *    env in routes/agents.ts is an array of exactly that shape, carrying
+ *    ANTHROPIC_API_KEY, CHAT_CALLBACK_TOKEN, TAVILY_API_KEY and WORK_TOKEN.
+ *
+ * NEITHER IS KNOWN TO LEAK TODAY, and that was checked rather than assumed: no
+ * code path logs `process.env` or a config object, and the container create in
+ * services/docker.ts goes through dockerode, whose errors do not carry the
+ * request body — unlike the axios path this module was built for. So these are
+ * LIMITS OF SCOPE, not an open leak. Widening the key match is deliberately NOT
+ * done here: `^(...)$` is what keeps ordinary words safe, and a redactor that
+ * eats them gets turned off. If a config dump or an env array ever does reach a
+ * log, redact at that call site, or add the specific names above.
  */
 
 /** Keys whose VALUE is a credential, matched case-insensitively on the whole key. */

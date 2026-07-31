@@ -87,8 +87,8 @@ EOF
 # displace. Everything else follows in dependency order, api before ai and
 # knowledge because it is the sole creator of agent_sandbox and docker_proxy.
 DEPLOY_FIRST="ui"
-# `db` and `auth` are deliberately ABSENT, and this is the load-bearing line of both
-# retirements. app-keycloak was retired on 2026-07-30 and app-postgres on 2026-07-31;
+# `db`, `auth` and `minio` are deliberately ABSENT, and this is the load-bearing line of
+# all three retirements. app-keycloak was retired on 2026-07-30 and app-postgres on 2026-07-31;
 # the app gets identity from Hill90's Keycloak realm `platform` and data from Hill90's
 # platform Postgres. Leaving either stack here would let `deploy all` silently recreate
 # a container that has just been retired — and it would succeed, report healthy, and be

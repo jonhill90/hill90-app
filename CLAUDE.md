@@ -183,6 +183,12 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   (vitest) failed one test on a **docs-only** tree and passed on re-run of the same
   commit. One observation in two runs is not a rate, but it does retire "only api
   flakes". Re-run once before investigating a red `services/ui`, and record it.
+- **`services/knowledge/tests/integration` does not run in CI** — 18 files, ~98 tests,
+  excluded because they need a live pgvector Postgres on `localhost:5432`. The
+  exclusion is deliberate and commented in `ci.yml`, but the consequence is worth
+  knowing: the deletion-leaves-SEARCH regression test added in #84 **is in that
+  directory**, so no automated gate protects that behaviour. Run it against the local
+  stack. Giving that job a Postgres service container is the fix and has not been done.
 - CI (`ci.yml`) runs on every pull request — six suites: api (jest), ui
   (vitest), pytest for ai/knowledge/mcp/agentbox. Deploy (`deploy.yml`) stays
   `workflow_dispatch` only; a merge must not deploy.
@@ -192,12 +198,13 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   `deploy.sh` refuses them** — identity and data are the platform's. Their compose
   files are kept on purpose because local layers on them. `api` creates the two
   agent networks, so it precedes `ai` and `knowledge`.
-- **`minio` is a half-retirement and is NOT refused.** Production object storage is
-  the platform's `minio`; the app's `app-minio` has been stopped since 2026-07-31
-  01:40:43 UTC and its removal window opens **2026-08-01 01:41 UTC**. But `minio` is
-  still in `DEPLOY_REST` with no `refuse_if_retired` branch, so **`deploy.sh minio`
-  and `deploy.sh all` would recreate it in production** — and because both backends
-  are MinIO, `storage.hill90.com` would answer 200 either way and look fine.
+- **`minio` is retired and `deploy.sh` refuses it**, like `db` and `auth` — since #91.
+  Production object storage is the platform's `minio`; the app's `app-minio` has been
+  stopped since 2026-07-31 01:40:43 UTC and its removal window opens
+  **2026-08-01 01:41 UTC**. *(This entry said the opposite for about an hour: written
+  when `minio` was still in `DEPLOY_REST`, and left standing when #91 removed it.)*
+  Its resurrection was the quietest of the three — both backends are MinIO, so
+  `storage.hill90.com` would have answered 200 either way and looked fine.
   Procedure, evidence checks and abort conditions:
   [`docs/runbooks/retiring-app-minio.md`](docs/runbooks/retiring-app-minio.md).
   **The local compose files stay regardless** — local runs `app-minio` deliberately.
