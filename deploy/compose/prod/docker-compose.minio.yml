@@ -1,3 +1,25 @@
+# RETIRED IN PRODUCTION — 2026-07-31.
+#
+# app-minio was stopped at 01:40:43 UTC. Object storage is Hill90's platform MinIO,
+# which app-api reaches as MINIO_ENDPOINT=http://minio:9000 using the scoped
+# tenant-hill90-app credential — proven by a byte-for-byte round trip through
+# app-api's own S3 client, with CreateBucket correctly refused as AccessDenied.
+#
+# THE CONTAINER IS STOPPED, NOT YET REMOVED, and its removal window opens
+# 2026-08-01 01:41 UTC. The retained volume prod_app-minio-data was measured on
+# 2026-07-31 and holds three EMPTY buckets and zero objects. Procedure, evidence
+# checks and abort conditions: docs/runbooks/retiring-app-minio.md.
+#
+# THE RESURRECTION HAZARD IS WHY scripts/deploy.sh NOW REFUSES THIS STACK. The
+# stopped container still carries traefik.enable=true and a router claiming
+# storage.<domain>. Starting it takes that hostname back from the platform's MinIO,
+# and because BOTH backends are MinIO the host answers 200 either way — the one
+# retirement whose resurrection looks healthy.
+#
+# This file is deliberately NOT deleted. deploy/compose/overrides/local.minio.yml
+# layers on it and LOCAL development still runs the app's own MinIO — deleting it
+# would break local while gaining nothing in production, where the deploy refuses.
+
 version: '3.9'
 
 networks:
