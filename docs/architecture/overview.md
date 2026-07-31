@@ -154,9 +154,9 @@ See [Agent Harness Architecture](./agent-harness.md) for the full design: agentb
 
 - [UI Component Architecture](./ui-components.md) - AppShell, nav, auth patterns, API proxy
 - [Agent Harness Architecture](./agent-harness.md) - Agentbox, agent lifecycle, model-router, AKM
-- [Certificate Management](./certificates.md) - HTTP-01 vs DNS-01 challenges, DNS Manager implementation
-- [Secrets Architecture](./secrets-model.md) - Vault-first architecture, KV paths, AppRole, sync
-- [Security Architecture](./security.md)
-- [Observability Runbook](../runbooks/observability.md) - LGTM stack operations, dashboards, alerts
-- [Deployment Guide](../runbooks/deployment.md)
-- [VPS Rebuild Runbook](../runbooks/vps-rebuild.md)
+- Certificate Management — HTTP-01 vs DNS-01 challenges. Lives in the Hill90 infrastructure repository as `docs/architecture/certificates.md`; certificates are the platform's concern, not this application's.
+- Secrets Architecture — vault-first, KV paths, AppRole, sync. Lives in the Hill90 infrastructure repository as `docs/architecture/secrets-model.md`. For this application's own secret layout see [secret-layout.md](../reference/secret-layout.md).
+- Security Architecture — lives in the Hill90 infrastructure repository as `docs/architecture/security.md`, and covers the edge, the Tailscale-only surfaces and the network-layer client identity work.
+- Observability Runbook — LGTM stack operations, dashboards, alerts. Lives in the Hill90 infrastructure repository as `docs/runbooks/observability.md`; the platform owns observability.
+- Deployment Guide — the platform's own deploy runbook, in the Hill90 infrastructure repository as `docs/runbooks/deployment.md`. This application's deploy path is in [CONTRIBUTING.md](../../CONTRIBUTING.md#deploying).
+- VPS Rebuild Runbook — lives in the Hill90 infrastructure repository as `docs/runbooks/vps-rebuild.md`.

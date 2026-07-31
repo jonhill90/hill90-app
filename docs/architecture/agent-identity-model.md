@@ -114,7 +114,7 @@ Human User (sub: user-uuid)
 | AKM signing private key | `AKM_SIGNING_PRIVATE_KEY` | API (signer) | Knowledge (verifier via public key) | JWT payload | Key rotation via vault |
 | Model-router signing private key | `MODEL_ROUTER_SIGNING_PRIVATE_KEY` | API (signer) | AI (verifier via public key) | JWT payload | Key rotation via vault |
 
-All secrets are stored in OpenBao vault and injected at deploy time. SOPS serves as bootstrap/DR backup. See [Secrets Architecture](./secrets-model.md).
+All secrets are stored in OpenBao vault and injected at deploy time; an age-encrypted file store serves as bootstrap and disaster-recovery backup. The vault model is documented in the Hill90 infrastructure repository as `docs/architecture/secrets-model.md`; this application's own secret layout is in [secret-layout.md](../reference/secret-layout.md).
 
 ## 6. Anti-Patterns
 
@@ -137,6 +137,6 @@ The `auditLog()` function enforces this by requiring a `principalType` parameter
 
 ## 7. Cross-References
 
-- [Security Architecture](./security.md) — network segmentation, container isolation, service token table
-- [Secrets Architecture](./secrets-model.md) — vault paths, SOPS backup, rotation procedures
+- Security Architecture — network segmentation, container isolation, service token table. Lives in the Hill90 infrastructure repository as `docs/architecture/security.md`.
+- Secrets Architecture — vault paths, encrypted-store backup, rotation procedures. Lives in the Hill90 infrastructure repository as `docs/architecture/secrets-model.md`.
 - [Architecture Overview](./overview.md) — system topology and service interactions
