@@ -69,7 +69,7 @@ poetry run uvicorn app.main:app --reload
 Keycloak runs as a Docker container — no local build needed, and it comes up as
 part of `./scripts/local.sh up`. The local realm import seeds a development
 account; production's does not, which is a deliberate gap recorded in
-[`RESURRECTION.md`](../../RESURRECTION.md) §10.
+[`CLAUDE.md`](../../CLAUDE.md).
 
 Admin console: http://localhost:18080/admin/master/console/
 

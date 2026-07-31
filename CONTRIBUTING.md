@@ -1,9 +1,8 @@
 # Contributing to hill90-app
 
 This repository deploys to production. There is no CI that runs on its own, and
-no workflow fires on merge — deploys are dispatched by hand. Read
-[`RESURRECTION.md`](RESURRECTION.md) before changing anything, particularly §2
-for how the deploy path works and §10 for why nobody may be able to sign in.
+no workflow fires on merge — deploys are dispatched by hand. Read [`CONTRIBUTING.md`](CONTRIBUTING.md#deploying) below for how the deploy path works,
+and the README's status table for what is currently live.
 
 What follows is the working convention inherited from Hill90, kept because it is
 what the 542 commits of history already follow. Hill90's own deploy rules,
@@ -58,9 +57,8 @@ those two moved to GitHub — `AI-258` is now
 <body explaining why, not what>
 ```
 
-## If you resurrect this
+## If you pick this up cold
 
-- Work through `RESURRECTION.md` item by item; each is a self-contained change.
 - Update `services/api/src/openapi/openapi.yaml` when adding or changing API
   routes. Hill90's CI enforced spec-vs-route drift and also diffed that file against
   the published spec; neither check came across. The published copy now lives in
@@ -70,6 +68,17 @@ those two moved to GitHub — `AI-258` is now
   (vitest), `services/mcp` and `services/agentbox` (pytest). End-to-end
   Playwright suites are in `tests/e2e/` and require a running stack.
 - Do not commit real secrets. `.env.example` files are tracked; `.env` is not.
+
+## Dependency pins that are load-bearing
+
+- **`services/api` → `fast-xml-parser` is pinned `~5.6.0` deliberately.** It was pinned
+  to fix S3 XML parsing, so storage depends on it; a dependency bump that lets it float
+  again will break object storage in a way that does not look like a dependency problem.
+  Re-pin it consciously rather than accepting whatever a bump produces. (JSON takes no
+  comments, which is why this note is here rather than beside the line.)
+- `services/knowledge/Dockerfile` builds the Go `akm` binary with BuildKit's
+  `TARGETARCH`. The reason it must not be hardcoded is documented in the Dockerfile
+  itself.
 
 ## History
 

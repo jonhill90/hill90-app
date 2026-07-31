@@ -289,7 +289,7 @@ equivalent step in the deploy path. Once the volume held `public.pem` and
 client. Accounts are created by the operator in the `hill90` realm with
 temporary passwords that must be changed at first login. No credentials are
 published here, and none are seeded — see
-[RESURRECTION.md](RESURRECTION.md#10-the-production-realm-ships-with-no-users--open)
+[CLAUDE.md](CLAUDE.md)
 for why that is a known gap rather than an oversight.
 
 ### Consolidation — decided, not yet done
@@ -370,7 +370,7 @@ for days — the job reported success while producing only a volume tar.
 
 ## History
 
-[`RESURRECTION.md`](RESURRECTION.md) records what was broken when the app was
+[`docs/extraction/PROVENANCE.md`](docs/extraction/PROVENANCE.md) records what was
 extracted and what has since been fixed — worth reading before changing the
 compose or auth wiring, since several of those problems were subtle.
 
@@ -414,6 +414,6 @@ The deploy workflow remains dispatch-only, deliberately: a merge should not
 deploy to production by itself.
 
 **The suites pass** — all six jobs green, **1953 tests, zero failures**. See
-[`RESURRECTION.md`](RESURRECTION.md#8-ci-runs-the-application-tests-on-every-pull-request--resolved)
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 for the breakdown and for what it does and does not prove: these are unit tests,
 and nothing in them demonstrates the services work together.

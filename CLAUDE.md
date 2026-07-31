@@ -16,8 +16,11 @@ shared VPS, and locally against the same compose files.
 - [`README.md`](README.md) — what it is, how to run it locally, and the
   **dated** production status table. That table is the single home for facts
   with a shelf life; this file deliberately does not repeat them.
-- [`RESURRECTION.md`](RESURRECTION.md) — what was broken at extraction and what
-  was done about it. §2 is the deploy path; §10 is the missing-users gap.
+- [`docs/extraction/PROVENANCE.md`](docs/extraction/PROVENANCE.md) — what came across
+  from Hill90 and what deliberately did not, including the two services that have never
+  been in an automated deploy.
+- [`docs/reference/secret-layout.md`](docs/reference/secret-layout.md) — what each secret
+  is for, and the two vault KV couplings that are not visible from the service code.
 - [`docs/decisions/running-the-app-on-hill90-infra.md`](docs/decisions/running-the-app-on-hill90-infra.md)
   — the long-form record of the tenancy work, including retractions of its own
   earlier claims. Read it before re-litigating a naming or network decision.
@@ -129,7 +132,8 @@ client or Invalid client credentials*. Read the body, not the status.
 **Users.** The realm import ships **zero** users. `jon` and `hill90admin` were
 created by hand with temporary passwords; `testuser01` has a non-temporary one,
 encrypted at `infra/secrets/test-accounts.enc.env`. No credential belongs in this
-repo in plaintext. See `RESURRECTION.md` §10.
+repo in plaintext. The realm imports ship **zero** users, so a directory rebuild locks
+everyone out; that is a known gap, not an oversight.
 
 **Tenancy detachment — proven.** The yank-out test passed on 2026-07-29: teardown
 left Hill90 at exactly its 13-container baseline with all shared networks intact,
