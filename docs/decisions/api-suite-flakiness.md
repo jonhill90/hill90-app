@@ -559,6 +559,86 @@ best reproduction harness this defect has ever had. Test whether the rate tracks
 route-test heavy and half B is not — because "needs N interacting files" and "needs N
 servers" are the same hypothesis stated two ways, and the second one is measurable.
 
+### Leave-one-out from half A, and a correction to my own claim
+
+Measured 2026-07-31, ~16 minutes of machine time against a 40-minute budget. Stopped early
+because the signal strength makes further search unproductive, not because time ran out.
+
+**Ordering by suspicion, and why.** Files were ranked by descending `request(` count with
+SSE-touching files promoted, on the reasoning that every surviving cross-file candidate needs
+either a supertest server (accumulation) or a timer, and a file making zero requests can do
+neither. `routes-chat` led on every metric — 74 requests, 82 tests, 467 `Once(` calls, and it
+touches SSE.
+
+**Every configuration measured, so a later session resumes from the table rather than
+restarting.** All runs `--runInBand --runTestsByPath` with an explicit alphabetical list.
+
+| Configuration | Files | Failures | ~s/run |
+|---|---|---|---|
+| full set, pinned | 58 | 1/6 | 19 |
+| full set, default workers (earlier) | 58 | 7/20 | 4 |
+| **half A** — `akm-proxy-errors` … `routes-chat` | 29 | **4/10, then 3/20 → pooled 7/30** | 15 |
+| half B — `routes-container-profiles` … `tool-installer` | 30 | 0/10 | 9 |
+| A1 — first 14 of A | 14 | 0/10 | 3 |
+| A2 — last 15 of A | 15 | 2/20 | 13 |
+| R15 — A's 14 request-making files + auth-boundary | 15 | **0/10** | 15 |
+| U14 — A's 14 zero-request files | 14 | **0/10** | 2 |
+| A minus `routes-chat` | 28 | 2/10 | 14 |
+| A minus `routes-agents-events` | 28 | 1/10 | 6 |
+| A minus `routes-agents` | 28 | 1/10 | 13 |
+| A minus 9 unit-only files | 20 | **0/10** | 13 |
+| victim alone (`routes-container-profiles`) | 1 | 0/20 | 2 |
+
+#### A correction: half A is not a 40% harness, and I over-read n=10
+
+The previous entry called half A "the best reproduction harness this defect has ever had" on
+the strength of 4/10. Twenty further runs gave **3/20**. Pooled, half A is **7/30 ≈ 23%** —
+indistinguishable from the full suite. The 4/10 was a small-sample draw and I presented it as
+a property. **There is no better harness than the full suite**, and the recommendation built
+on that claim was wrong.
+
+#### Hypothesis six is dead: it is not the number of supertest servers
+
+That was the next step this document recommended, and it is now measured and refuted by a
+free observation — no runs required. **Half B has more of everything and never fails:**
+
+| | half A (fails ~23%) | half B (0/10) |
+|---|---|---|
+| files | 29 | 30 |
+| request-making files | 14 | **26** |
+| total `request(` calls | 192 | **417** |
+| total tests | 301 | **473** |
+| SSE-touching files | 2 | 2 |
+
+Two-and-a-bit times the requests, nearly twice the request-making files, 1.6× the tests — and
+zero failures in ten runs. Whatever drives this, it is **not** the count of servers, requests
+or tests. That kills the hypothesis this document was pointing the next person at.
+
+#### No single file is necessary, and every subset is quiet
+
+Removing `routes-chat`, `routes-agents-events` or `routes-agents` individually leaves it
+reproducing. Meanwhile *every* subset tried — A1, A2, R15, U14, A-minus-9-unit-files — scores
+0/10 or near it while the 29-file whole scores ~23%. The shape is: many participants needed,
+no one of them necessary, so several different combinations are probably sufficient.
+
+**That makes minimal-set search combinatorial rather than a bisection**, and at this signal
+strength it is not affordable. At 23% and ~14s per run, a 95%-confidence negative needs 12
+runs ≈ 3 minutes; 29 single-file leave-one-outs is ~87 minutes and would only test the
+necessity of single files — a question the data has already answered *no* to. Pairs and
+triples multiply from there.
+
+#### Where the search actually got to
+
+Localised to half A's 29 files at ~23%, with no necessary member and no reproducing subset.
+That is a narrowing over "somewhere in 58 files", and it is also a boundary: **isolation has
+now produced everything it can cheaply produce.** Six honest dead ends and one real bug.
+
+What is *not* yet tried, and is cheap when someone next has budget: hold the file **count**
+constant and vary composition — for example 29 files drawn only from B, or 15 from A plus 14
+from B — to test whether membership in A's region matters at all, or whether some
+still-unidentified property tracks it. That is a different question from "which file", and
+the table above is the baseline to compare against.
+
 ## Where this leaves it: four hypotheses dead, the defect alive
 
 | Hypothesis | Killed by |
