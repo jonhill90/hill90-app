@@ -135,3 +135,75 @@ EOF
   run bash -c "sed -n '/^gen_env()/,/^}/p' scripts/local.sh | grep -n '[^\\\\]\`'"
   [ "$status" -ne 0 ] || { echo "unescaped backtick inside gen_env's heredoc:"; echo "$output"; return 1; }
 }
+
+# ---------------------------------------------------------------------------
+# Defects found on 2026-07-31 by tearing the tenant stack down WITH VOLUMES and
+# bringing it up from nothing. Neither is visible on a restart — only a genuinely
+# clean start reaches them.
+# ---------------------------------------------------------------------------
+
+@test "litellm's health start_period survives a first-run migration" {
+  # On an empty database litellm applies its whole prisma migration set before
+  # it binds the port. Measured: 172s from container start to first successful
+  # probe. With start_period=15s it was marked unhealthy first, and app-ai's
+  # `condition: service_healthy` aborted the entire `up` — app-ai never left
+  # `Created`. It is invisible afterwards because a migrated database binds in
+  # seconds.
+  #
+  # Parsed as YAML, not with an awk line range: the first version of this test
+  # used `awk '/^  litellm:/,/^  [a-z]/'` and matched nothing, so it failed for
+  # a reason unrelated to the thing it checks.
+  run python3 -c "
+import sys, yaml
+d = yaml.safe_load(open('deploy/compose/prod/docker-compose.ai.yml'))
+hc = (d['services']['litellm'].get('healthcheck') or {})
+raw = str(hc.get('start_period', ''))
+secs = int(raw.rstrip('s') or 0)
+print(secs)
+sys.exit(0 if secs >= 180 else 1)
+"
+  [ "$status" -eq 0 ] || { echo "litellm start_period is ${output}s, below the 172s a first run measured"; return 1; }
+}
+
+@test "app-ai still gates on litellm being healthy" {
+  # The start_period fix is only meaningful while something waits on it. If this
+  # dependency is dropped, app-ai races the proxy instead.
+  run python3 -c "
+import sys, yaml
+d = yaml.safe_load(open('deploy/compose/prod/docker-compose.ai.yml'))
+dep = (d['services']['ai'].get('depends_on') or {})
+sys.exit(0 if dep.get('litellm', {}).get('condition') == 'service_healthy' else 1)
+"
+  [ "$status" -eq 0 ]
+}
+
+@test "local sets VOLUME_PREFIX so it cannot create production volume names" {
+  # Compose declares volumes as ${VOLUME_PREFIX:-prod}_app-*. Unset locally, the
+  # developer's stack created prod_app-postgres-data — a production name on a
+  # laptop. CLAUDE.md invariant 4 calls volumes "the one that nearly caused data
+  # loss" for exactly this reason.
+  grep -qE '^VOLUME_PREFIX=.+' .env.local.example \
+    || { echo "VOLUME_PREFIX is not set in .env.local.example"; return 1; }
+  local v
+  v=$(grep -E '^VOLUME_PREFIX=' .env.local.example | head -1 | cut -d= -f2-)
+  [ "$v" != "prod" ] || { echo "VOLUME_PREFIX=prod locally is the bug, not the fix"; return 1; }
+}
+
+@test "all three parameterised prefixes are set locally, not just two" {
+  # Invariant 3 names three. Two were set and the third silently was not, which
+  # is how the volume naming drifted without anyone noticing.
+  for key in CONTAINER_PREFIX NETWORK_PREFIX VOLUME_PREFIX; do
+    grep -qE "^${key}=.+" .env.local.example \
+      || { echo "${key} missing from .env.local.example"; return 1; }
+  done
+}
+
+@test "a key that relocates state is announced, not applied silently" {
+  # Appending VOLUME_PREFIX renames every volume the stack looks for, so an
+  # existing developer's data is orphaned. That is fine for local dev and NOT
+  # fine to do without saying so.
+  grep -q 'tenant_disruptive_keys' scripts/local.sh \
+    || { echo "no disruptive-key warning path in local.sh"; return 1; }
+  run bash -c "sed -n '/^topup_env()/,/^}/p' scripts/local.sh"
+  [[ "$output" == *"orphaned"* ]] || { echo "topup_env does not warn about orphaned volumes"; return 1; }
+}

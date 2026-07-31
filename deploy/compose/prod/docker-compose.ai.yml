@@ -44,7 +44,27 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      # 15s could not survive a FIRST run, and only a first run exposes it.
+      #
+      # On an empty database litellm applies its whole prisma migration set
+      # before it binds the port. Measured from a genuine from-nothing start on
+      # 2026-07-31: container up at 05:31:32, first successful probe at 05:34:24
+      # — 172 seconds, of which ~37s was `prisma migrate deploy` and the rest
+      # engine download plus the post-migration diff.
+      #
+      # With start_period: 15s the probes at 05:32:18, 05:32:48 and 05:33:20
+      # counted as real failures, the container was marked `unhealthy`, and
+      # `app-ai`'s `condition: service_healthy` aborted the whole `up`. app-ai
+      # never left `Created`. litellm itself recovered on its own a minute
+      # later, which is what makes this invisible on any subsequent run — the
+      # database is already migrated and it binds in seconds.
+      #
+      # 300s is the measured 172s plus headroom for a slower machine or a larger
+      # migration set. It does NOT weaken liveness detection: failures still
+      # count once the period ends, so a genuinely dead litellm is still caught
+      # by interval x retries. It only stops Docker calling a service dead while
+      # it is doing the one-time work it must do before it can answer.
+      start_period: 300s
     mem_limit: 1g
     cpus: 1.0
     labels:
