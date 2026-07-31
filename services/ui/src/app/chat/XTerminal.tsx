@@ -35,8 +35,22 @@ async function getWsBase(): Promise<string> {
   return wsBaseCache as string
 }
 
-function terminalWsUrl(base: string, threadId: string, token: string): string {
-  return `${base.replace(/\/$/, '')}/chat/threads/${threadId}/terminal?token=${encodeURIComponent(token)}`
+// The subprotocols the API expects. The token travels as a WebSocket subprotocol —
+// a request HEADER — because the browser's WebSocket API cannot set Authorization and
+// a token in the URL ends up in access logs, proxy logs and browser history.
+//
+// Both entries are required: the API selects and echoes back only the version string,
+// and reads the credential from the `hill90.bearer.` one. Do not put the token back in
+// the URL; the API no longer accepts it there and will answer 401.
+const WS_PROTOCOL_VERSION = 'hill90.terminal.v1'
+const WS_PROTOCOL_BEARER_PREFIX = 'hill90.bearer.'
+
+function terminalWsUrl(base: string, threadId: string): string {
+  return `${base.replace(/\/$/, '')}/chat/threads/${threadId}/terminal`
+}
+
+function terminalWsProtocols(token: string): string[] {
+  return [WS_PROTOCOL_VERSION, `${WS_PROTOCOL_BEARER_PREFIX}${token}`]
 }
 
 interface Props {
@@ -117,9 +131,9 @@ export default function XTerminal({ threadId }: Props) {
       return
     }
     const wsBase = await getWsBase()
-    const wsUrl = terminalWsUrl(wsBase, threadId, accessToken)
+    const wsUrl = terminalWsUrl(wsBase, threadId)
 
-    const ws = new WebSocket(wsUrl)
+    const ws = new WebSocket(wsUrl, terminalWsProtocols(accessToken))
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
 
@@ -166,8 +180,8 @@ export default function XTerminal({ threadId }: Props) {
         setTimeout(async () => {
           const retryToken = await getFreshToken()
           if (!retryToken) return
-          const retryUrl = terminalWsUrl(await getWsBase(), threadId, retryToken)
-          const retryWs = new WebSocket(retryUrl)
+          const retryUrl = terminalWsUrl(await getWsBase(), threadId)
+          const retryWs = new WebSocket(retryUrl, terminalWsProtocols(retryToken))
           retryWs.binaryType = 'arraybuffer'
           wsRef.current = retryWs
           retryWs.onopen = ws.onopen

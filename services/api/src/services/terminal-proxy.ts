@@ -1,10 +1,38 @@
 /**
  * WebSocket terminal proxy — relays between browser and agentbox PTY.
  *
- * Path: /chat/threads/:threadId/terminal?token=<session-token>
+ * Path: /chat/threads/:threadId/terminal
  *
- * Auth: Validates Keycloak JWT from query param, checks thread
- * participation, then opens a WebSocket to agentbox and relays.
+ * Auth: the caller offers its Keycloak JWT as a WebSocket SUBPROTOCOL,
+ * `hill90.bearer.<token>`, alongside the plain `hill90.terminal.v1`. The Origin is
+ * checked against an allowlist first. Then thread participation, then a WebSocket to
+ * agentbox to relay.
+ *
+ * TWO DEFECTS WERE FIXED HERE ON 2026-07-31, and both are easy to reintroduce.
+ *
+ * 1. THERE WAS NO ORIGIN CHECK. WebSockets are not covered by the same-origin policy:
+ *    the browser will happily open one cross-origin and attach the user's credential.
+ *    So any page a signed-in user visited could open this socket and drive a shell
+ *    inside their agent container. CORS does not help — it does not apply to the
+ *    WebSocket handshake. Checking Origin at the handshake is the only defence.
+ *
+ * 2. THE TOKEN CAME FROM THE QUERY STRING. URLs are recorded in access logs, proxy
+ *    logs and browser history, none of which are places a bearer credential may live,
+ *    and this service wrote it into its own log line on every upgrade.
+ *
+ *    The browser's WebSocket API cannot set an Authorization header, so the token
+ *    moved to `Sec-WebSocket-Protocol` — a request HEADER, which is not logged the way
+ *    URLs are. The alternative, a short-lived single-use ticket minted over a normal
+ *    authenticated request, was rejected for this codebase: it needs server-side
+ *    ticket state, and with more than one api replica that state has to be shared or
+ *    the ticket only works on the replica that issued it. The subprotocol needs no
+ *    state at all.
+ *
+ *    The query-string path is GONE, not deprecated. Accepting both would leave the
+ *    logging exposure exactly as it was.
+ *
+ * The selected subprotocol echoed back to the client is ALWAYS the plain version
+ * string, never the bearer one — a response header is logged too.
  */
 
 import { IncomingMessage } from 'http';
@@ -14,6 +42,71 @@ import { getPool } from '../db/pool';
 const CONTAINER_PREFIX = 'agentbox-';
 const AGENTBOX_PORT = 8054;
 const PING_INTERVAL_MS = 30_000; // 30s keep-alive ping
+
+/** The subprotocol the client and server agree on, and which is echoed back. */
+const PROTOCOL_VERSION = 'hill90.terminal.v1';
+/** Prefix marking the subprotocol entry that carries the bearer token. */
+const PROTOCOL_BEARER_PREFIX = 'hill90.bearer.';
+
+/**
+ * Exact-match origin allowlist from TERMINAL_ALLOWED_ORIGINS (comma-separated).
+ *
+ * Read per request, not once at module load, so a test or a restart-free config change
+ * cannot leave a stale allowlist in place.
+ *
+ * Unset or empty means REFUSE EVERYTHING. This fails closed on purpose: the failure
+ * mode of the alternative is a silently permissive terminal, which is the whole defect
+ * being fixed. A misconfigured deployment loses terminals and says so in the log.
+ */
+function allowedOrigins(): string[] {
+  return (process.env.TERMINAL_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+}
+
+/**
+ * Whether this Origin may open a terminal.
+ *
+ * Exact string comparison, deliberately. Substring or suffix matching would accept
+ * `https://hill90.com.evil.example`, and comparing only the hostname would accept the
+ * wrong scheme or port. An origin is scheme + host + port and all three matter.
+ */
+function isOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return false;
+  return allowedOrigins().includes(origin);
+}
+
+/**
+ * Pull the bearer token out of the offered subprotocols.
+ *
+ * Returns null when no entry carries one, which is treated as "unauthenticated" — the
+ * query string is never consulted.
+ */
+function tokenFromProtocols(header: string | undefined): string | null {
+  if (!header) return null;
+  for (const raw of header.split(',')) {
+    const entry = raw.trim();
+    if (entry.startsWith(PROTOCOL_BEARER_PREFIX)) {
+      const token = entry.slice(PROTOCOL_BEARER_PREFIX.length);
+      if (token.length > 0) return token;
+    }
+  }
+  return null;
+}
+
+/**
+ * A URL safe to log: the path only.
+ *
+ * The query string is dropped rather than escaped. This log line used to print
+ * `?token=<jwt>` on every upgrade, which put the credential in the service's own logs
+ * — the same exposure as having it in the URL in the first place.
+ */
+function safePath(url: string | undefined): string {
+  if (!url) return '<none>';
+  const q = url.indexOf('?');
+  return q === -1 ? url : `${url.slice(0, q)}?<redacted>`;
+}
 
 /**
  * Extract threadId from upgrade path: /chat/threads/:id/terminal
@@ -74,10 +167,15 @@ export function attachTerminalProxy(
   server: ReturnType<typeof import('http').createServer>,
   verifyToken: (token: string) => Promise<{ sub: string; roles?: string[] } | null>,
 ): void {
-  const wss = new WebSocketServer({ noServer: true });
+  // Only ever select the plain version subprotocol. Returning the bearer entry would
+  // echo the token back in the response's Sec-WebSocket-Protocol header.
+  const wss = new WebSocketServer({
+    noServer: true,
+    handleProtocols: (protocols) => (protocols.has(PROTOCOL_VERSION) ? PROTOCOL_VERSION : false),
+  });
 
   server.on('upgrade', async (req: IncomingMessage, socket, head) => {
-    console.log(`[terminal-proxy] Upgrade request: ${req.url} from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
+    console.log(`[terminal-proxy] Upgrade request: ${safePath(req.url)} from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
 
     const threadId = parseThreadId(req.url);
     if (!threadId) {
@@ -87,14 +185,34 @@ export function attachTerminalProxy(
     }
 
     try {
-      // Extract token from query param or Authorization header
-      const url = new URL(req.url || '', `http://${req.headers.host}`);
-      const token = url.searchParams.get('token')
+      // ORIGIN FIRST, before any credential is examined.
+      //
+      // Order matters beyond tidiness: answering 401-vs-403 based on token validity to
+      // a caller that failed the origin check would tell an attacking page whether the
+      // credential it captured is good. A refused origin learns only that it was
+      // refused.
+      const origin = req.headers.origin;
+      if (!isOriginAllowed(origin)) {
+        const configured = allowedOrigins().length;
+        console.warn(
+          `[terminal-proxy] REFUSED upgrade: origin ${origin ? `'${origin}'` : '<absent>'} not in allowlist ` +
+          (configured === 0
+            ? '(TERMINAL_ALLOWED_ORIGINS is unset or empty — this refuses every terminal by design; set it to the UI origin)'
+            : `(${configured} origin(s) configured)`),
+        );
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      // The token comes from a header, never the query string. See the file header.
+      const token = tokenFromProtocols(req.headers['sec-websocket-protocol'] as string | undefined)
         || (req.headers.authorization?.startsWith('Bearer ')
           ? req.headers.authorization.slice(7)
           : null);
 
       if (!token) {
+        console.warn('[terminal-proxy] REFUSED upgrade: no token in Sec-WebSocket-Protocol or Authorization');
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
