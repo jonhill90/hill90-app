@@ -130,6 +130,33 @@ infra_files() {
   printf -- '-f\n%s\n' "$OVERRIDE_DIR/local.networks.yml"
 }
 
+# Refuse to start on a variable Compose cannot interpolate.
+#
+# deploy.sh has had this gate since the incident where hill90.com served app-ui
+# with a blank AUTH_SECRET while the deploy reported success. local.sh never had
+# it, which is exactly why the PLATFORM_DB_* breakage reached main and sat there:
+# production would have refused, local rendered empty strings and said nothing.
+#
+# SOURCED, not copied. The warning compose emits has BACKSLASH-ESCAPED quotes
+# (it is embedded in a logfmt msg="..." field), and a pattern expecting bare
+# quotes matches nothing and makes the gate silently inert. That bug has already
+# happened once here, and it caught me again while investigating this one. One
+# copy of that regex, in _common.sh, tested by tests/scripts/interpolation-gate-check.sh.
+#
+# Run in a SUBSHELL: _common.sh sets `set -euo pipefail` and this script is not
+# written under those options.
+require_interpolation() {
+  local files=()
+  if [ "$INFRA" = "1" ]; then
+    while IFS= read -r line; do files+=("$line"); done < <(infra_files)
+    ( set +u; source "$ROOT/scripts/_common.sh" >/dev/null 2>&1
+      require_compose_interpolation -p "$INFRA_PROJECT" "${files[@]}" --env-file "$ENV_FILE" )
+  else
+    ( set +u; source "$ROOT/scripts/_common.sh" >/dev/null 2>&1
+      require_compose_interpolation -f "$COMPOSE_FILE" --env-file "$ENV_FILE" )
+  fi
+}
+
 compose() {
   if [ "$INFRA" = "1" ]; then
     local files=()
@@ -193,9 +220,66 @@ gen_keys() {
 
 escape_pem() { awk '{printf "%s\\n", $0}' "$1"; }
 
+# Keys the TENANT path needs that pre-2026-07-31 .env.local files predate.
+#
+# When app-keycloak, app-postgres and app-minio were retired in PRODUCTION, the
+# production compose files started reading PLATFORM_DB_* and MINIO_TENANT_*. The
+# local overrides LAYER on those production files, so local started reading them
+# too — and nothing supplied them. Compose does not fail on an unset variable, it
+# substitutes an empty string, so `api`, `ai` and `knowledge` were handed
+# `postgresql://:@:5432/hill90_api`. Since #61 `ai` refuses to start without a
+# database, so a clean `up` failed outright.
+#
+# THE VALUES POINT AT THE APP'S OWN SERVICES, NOT THE PLATFORM'S. Locally
+# "platform Postgres" is played by app-postgres and "platform MinIO" by
+# app-minio. That is a restoration of how local worked before the cutover, NOT
+# the parity conversion — see docs/decisions/local-parity-with-platform-services.md,
+# which is still an open decision for Jon. Do not read these names as a claim
+# that local matches production; it does not, and that is the open question.
+#
+# Setting values rather than overriding in local.*.yml is deliberate: an override
+# replaces the production line, and then the local run stops exercising it
+# (CLAUDE.md invariant 6). This way `DATABASE_URL=postgresql://${PLATFORM_DB_USER}...`
+# is the very line local runs.
+tenant_platform_keys() {
+  cat <<'KEYS'
+PLATFORM_DB_HOST=app-postgres
+PLATFORM_DB_USER=hill90
+PLATFORM_DB_PASSWORD=hill90
+MINIO_ENDPOINT=http://app-minio:9000
+MINIO_TENANT_ACCESS_KEY=hill90admin
+MINIO_TENANT_SECRET_KEY=hill90admin
+KEYS
+}
+
+# gen_env refuses to touch an existing .env.local, which is correct — it holds
+# generated keys and possibly real provider keys. But it also means fixing the
+# generator alone fixes nobody who already has the file. Append what is missing,
+# never overwrite what is there.
+topup_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  local line name
+  local added=""
+  while IFS= read -r line; do
+    name=${line%%=*}
+    grep -qE "^${name}=" "$ENV_FILE" 2>/dev/null || added="${added}${line}"$'\n'
+  done < <(tenant_platform_keys)
+  [ -z "$added" ] && return 0
+  {
+    echo ""
+    echo "# --- added by scripts/local.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) ---"
+    echo "# The production compose files began reading these when app-postgres and"
+    echo "# app-minio were retired in PRODUCTION. Files created before 2026-07-31"
+    echo "# predate them. Values point at the app's OWN local services."
+    printf '%s' "$added"
+  } >> "$ENV_FILE"
+  echo "  .env.local: added $(printf '%s' "$added" | cut -d= -f1 | tr '\n' ' ')"
+}
+
 gen_env() {
   if [ -f "$ENV_FILE" ]; then
-    echo "  .env.local exists — leaving it alone"
+    echo "  .env.local exists — topping up any missing keys"
+    topup_env
     return
   fi
   echo "  writing .env.local"
@@ -208,6 +292,13 @@ gen_env() {
 # --- database ---
 DB_USER=hill90
 DB_PASSWORD=hill90
+
+# --- what production calls the platform services ---
+# Read by the PRODUCTION compose files, which the tenant path layers on. Locally
+# these point at the app's own containers; see tenant_platform_keys() in
+# scripts/local.sh for why, and docs/decisions/local-parity-with-platform-services.md
+# for the open question of whether local should use Hill90's instead.
+$(tenant_platform_keys)
 
 # --- object storage ---
 MINIO_ROOT_USER=hill90admin
@@ -267,8 +358,8 @@ API_HOST=api
 AI_HOST=ai
 STORAGE_HOST=storage
 
-# The app's Keycloak hostname. Deliberately NOT `auth`: Hill90's own Keycloak
-# owns auth.<domain> and serves realm `platform`, so asking for `auth` reaches
+# The app's Keycloak hostname. Deliberately NOT \`auth\`: Hill90's own Keycloak
+# owns auth.<domain> and serves realm \`platform\`, so asking for \`auth\` reaches
 # the wrong Keycloak and the app's realm 404s.
 APP_AUTH_HOST=app-auth
 
@@ -387,10 +478,12 @@ EOF
 
 cmd_up() {
   [ -f "$ENV_FILE" ] || cmd_init
+  topup_env
   [ "$INFRA" = "1" ] && { check_infra_networks || exit 1; }
   check_ports || exit 1
   mkdir -p "$ROOT/.local/agentbox-configs"
   gen_keys
+  require_interpolation || exit 1
   compose build
   compose up -d
   wait_healthy || true
