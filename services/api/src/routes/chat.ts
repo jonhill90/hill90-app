@@ -1108,23 +1108,49 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
       }
     };
 
+    // Cleanup is registered BEFORE the await below, and that ordering IS the fix —
+    // do not move it back down.
+    //
+    // It used to be registered last, after `await poll()`. A client that goes away
+    // during that backfill query — an ordinary page navigation — makes Node emit
+    // 'close' on the request with NO LISTENER ATTACHED. Events are not replayed, so the
+    // listener registered a moment later never fired, and both intervals then ran for
+    // the lifetime of the process. `req.on('close')` is the only cleanup path this
+    // handler has; unlike the agent event stream there is no stream 'end' to catch it.
+    //
+    // Registering early is necessary but not sufficient: if 'close' arrives while the
+    // intervals do not yet exist, cleanup has nothing to clear. Hence `closed`, which
+    // makes the handler decline to create timers for a response nobody is reading.
+    //
+    // NOT a `finally` on the handler. This function returns while the stream is still
+    // open, so clearing in a `finally` would kill the poll loop and the heartbeat the
+    // instant setup finished — a broken feature rather than a fixed leak.
+    let closed = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    const cleanup = () => {
+      closed = true;
+      if (interval) { clearInterval(interval); interval = null; }
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+    };
+    req.on('close', cleanup);
+
     // Initial backfill
     await poll();
 
+    if (closed || res.writableEnded || res.destroyed) return;
+
     // Poll loop
-    const interval = setInterval(poll, 1000);
+    interval = setInterval(poll, 1000);
 
     // Keep-alive heartbeat (every 30s)
-    const heartbeat = setInterval(() => {
+    heartbeat = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
       res.write(': heartbeat\n\n');
     }, 30000);
 
-    // Cleanup on client disconnect
-    req.on('close', () => {
-      clearInterval(interval);
-      clearInterval(heartbeat);
-    });
+    // A close that landed between the guard above and here still gets cleaned up.
+    if (closed) cleanup();
 
   } catch (err) {
     console.error('[chat] SSE stream error:', err);
@@ -1278,8 +1304,27 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
       }
     }
 
+    // Same leak, same shape as /threads/:id/stream above — see the long comment there.
+    // The listener is registered before the timers exist and `closed` stops them being
+    // created for a client that has already gone, because the container-stream setup
+    // above contains awaits during which 'close' can arrive unobserved.
+    let closed = false;
+    let messageRefreshInterval: ReturnType<typeof setInterval> | null = null;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    const cleanup = () => {
+      closed = true;
+      if (messageRefreshInterval) { clearInterval(messageRefreshInterval); messageRefreshInterval = null; }
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+      for (const stream of streams) {
+        (stream as any).destroy?.();
+      }
+    };
+    req.on('close', cleanup);
+
+    if (closed || res.writableEnded || res.destroyed) return;
+
     // Periodically refresh thread message IDs (new messages during conversation)
-    const messageRefreshInterval = setInterval(async () => {
+    messageRefreshInterval = setInterval(async () => {
       if (res.writableEnded || res.destroyed) return;
       try {
         const { rows } = await pool.query(
@@ -1292,19 +1337,13 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     }, 5000);
 
     // Keep-alive heartbeat
-    const heartbeat = setInterval(() => {
+    heartbeat = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
       res.write(': heartbeat\n\n');
     }, 30000);
 
-    // Cleanup on client disconnect
-    req.on('close', () => {
-      clearInterval(messageRefreshInterval);
-      clearInterval(heartbeat);
-      for (const stream of streams) {
-        (stream as any).destroy?.();
-      }
-    });
+    // A close that landed between the guard above and here still gets cleaned up.
+    if (closed) cleanup();
 
   } catch (err) {
     console.error('[chat] Thread events error:', err);
