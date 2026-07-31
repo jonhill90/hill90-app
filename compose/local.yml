@@ -164,7 +164,27 @@ services:
       interval: 15s
       timeout: 10s
       retries: 10
-      start_period: 30s
+      # 30s + 15s x 10 = 180s of budget, against a MEASURED cold start of 172s.
+      # An eight-second margin is not a margin.
+      #
+      # litellm applies its whole prisma migration set on an empty database
+      # before it binds the port. Measured from genuine from-nothing starts on
+      # 2026-07-31: 172s on the first (which also downloads the prisma query
+      # engine) and 96s on a later one with that layer cached. The spread is the
+      # point — the budget has to cover the slow case, and the slow case is
+      # exactly the one a fresh clone or a rebuilt host gets.
+      #
+      # The tenant path hit this as a hard failure (#77) because app-ai gates on
+      # `condition: service_healthy`. Here nothing waits on litellm, so the
+      # symptom is milder: `up` completes and litellm sits `unhealthy` for a
+      # couple of minutes before healing itself. Milder, and more misleading —
+      # a developer reads `unhealthy` and starts debugging a service that is
+      # merely still migrating.
+      #
+      # 300s matches deploy/compose/prod/docker-compose.ai.yml, from the same
+      # measurement. Liveness detection is unchanged: failures still count once
+      # the period ends.
+      start_period: 300s
 
   # ------------------------------------------------------------ services ---
   api:

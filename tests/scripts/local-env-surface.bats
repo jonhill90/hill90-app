@@ -207,3 +207,36 @@ sys.exit(0 if dep.get('litellm', {}).get('condition') == 'service_healthy' else 
   run bash -c "sed -n '/^topup_env()/,/^}/p' scripts/local.sh"
   [[ "$output" == *"orphaned"* ]] || { echo "topup_env does not warn about orphaned volumes"; return 1; }
 }
+
+@test "the standalone fork's litellm has the same cold-start budget as the tenant path" {
+  # Two files declare litellm. #77 fixed the tenant/production one and left the
+  # standalone fork at 30s, whose 180s budget sat 8 seconds above a measured
+  # 172s cold start. Assert they cannot drift apart again.
+  run python3 -c "
+import sys, yaml
+def sp(path, svc):
+    d = yaml.safe_load(open(path))
+    raw = str((d['services'][svc].get('healthcheck') or {}).get('start_period', '0s'))
+    return int(raw.rstrip('s') or 0)
+prod = sp('deploy/compose/prod/docker-compose.ai.yml', 'litellm')
+fork = sp('compose/local.yml', 'litellm')
+print(f'prod={prod}s fork={fork}s')
+sys.exit(0 if fork >= 180 and prod >= 180 else 1)
+"
+  [ "$status" -eq 0 ] || { echo "litellm start_period below the measured cold start: ${output}"; return 1; }
+}
+
+@test "raising a budget never came from interval or retries" {
+  # start_period means "still doing one-time work". interval x retries governs
+  # how fast a genuinely dead service is noticed, so padding those to buy
+  # startup time hides real slowdowns.
+  run python3 -c "
+import sys, yaml
+d = yaml.safe_load(open('deploy/compose/prod/docker-compose.ai.yml'))
+hc = d['services']['litellm']['healthcheck']
+iv = int(str(hc['interval']).rstrip('s')); rt = int(hc['retries'])
+print(f'interval={iv}s retries={rt}')
+sys.exit(0 if iv <= 60 and rt <= 5 else 1)
+"
+  [ "$status" -eq 0 ] || { echo "liveness detection was weakened to buy startup time: ${output}"; return 1; }
+}
