@@ -429,6 +429,73 @@ inspection (a leaked timer cannot reach the pool). **The flake rate was not meas
 this fix and no claim is made about it.** If someone measures it later and it moves, that
 is a surprise to investigate, not a prediction confirmed.
 
+### Measured after the SSE leak was fixed: it did not help
+
+The leak fixed in #76 was real, reachable and worth fixing. It made no difference to this
+defect, and that was measured rather than assumed in either direction — no improvement was
+claimed in advance, and none is claimed now.
+
+Twenty runs of `main` with the fix in the tree, same protocol as the 20-against-20: plain
+`npx jest`, default workers, jest 29.7.0, no `--randomize`, no explicit seed, no
+`--runInBand`. Per-run outcomes, so the next reader can recompute rather than trust a total:
+
+| Run | Result | First failing test |
+|---|---|---|
+| 1 | FAIL | Container Profiles routes › POST /container-profiles |
+| 2 | pass | — |
+| 3 | pass | — |
+| 4 | pass | — |
+| 5 | pass | — |
+| 6 | FAIL | Chat callback › POST /internal/chat/callback tags el |
+| 7 | pass | — |
+| 8 | FAIL | Usage query routes › GET /usage default from-date us |
+| 9 | pass | — |
+| 10 | pass | — |
+| 11 | pass | — |
+| 12 | pass | — |
+| 13 | FAIL | Tasks routes › GET /tasks › filters out tasks for ag |
+| 14 | pass | — |
+| 15 | pass | — |
+| 16 | pass | — |
+| 17 | pass | — |
+| 18 | FAIL | Provider Connections Health › health stats are owner |
+| 19 | FAIL | Skill CRUD routes › Scope-change safety contract › a |
+| 20 | FAIL | User Models CRUD › POST /user-models creates model |
+
+**7 of 20 failed — 35%.** Against every baseline in this document:
+
+| Baseline (same regime) | Rate | Fisher two-sided p |
+|---|---|---|
+| observe arm, 3/20 | 15% | 0.273 |
+| plain default, 3/8 | 38% | 1.000 |
+| pooled default-regime, 6/28 | 21% | 0.339 |
+| clear arm, 6/20 | 30% | 1.000 |
+
+**Nothing moved.** If the true rate were still the pooled 21%, the chance of 7 or more
+failures in 20 runs is **0.117** — an ordinary outcome, not a surprise. Nor is 7/20 evidence
+of *worsening*: none of those comparisons separates, and the two closest baselines land at
+p = 1.000.
+
+**Be as sceptical of the shape of this result as of a clean one.** Had it come out 0/20 that
+would have been suggestive but not conclusive: P(0 failures in 20) is 0.008 at a 21% rate
+and 0.0008 at 30%, so twenty green runs would have been strong evidence of a real change
+while remaining consistent with a flake that happened to be quiet. The distinction did not
+arise, because the result was not clean.
+
+Victims are again spread across files and different every run: container profiles, chat
+callback, usage, tasks, provider connections, skills, user models — the same pattern as
+every earlier measurement.
+
+**This was the most plausible remaining cause, and it is now excluded by experiment as well
+as by inspection.** The inspection argument — a leaked interval guards on
+`res.writableEnded || res.destroyed` and therefore performs no database work — predicted
+exactly this. The prediction was made before the measurement and the measurement agreed
+with it.
+
+Measured on `main` plus one unrelated local commit touching `compose/local.yml`, a runbook
+and a bats test, none of which the api suite reads. The fix was confirmed present in the
+measured tree: two `req.on('close', cleanup)` sites, two early-return guards.
+
 ## Where this leaves it: four hypotheses dead, the defect alive
 
 | Hypothesis | Killed by |
@@ -442,15 +509,17 @@ That is a real result and it is worth more than a fifth theory picked because th
 free. **No further hypothesis is currently worth testing.** If someone forms one, it should be
 written here before it is worked on, so the next dead end costs one session rather than two.
 
-**The one candidate that is untested rather than disproven** is the handler-level fix: clear
-the interval in a `finally` on the handler rather than only on `req.on('close')`, so a
-response that ends without a close event still tears its timers down. The 6/20 experiment
-cleared at the *test* boundary, which is later than this would, so it is a weaker test of it.
-**It ships with a test that fails when the `finally` is removed, or it does not ship** —
-otherwise it is an unverifiable change to a suite that cannot verify anything.
+**That last candidate is now closed too.** The handler-level fix shipped in #76 — not as a
+`finally`, which would have been a regression, but by registering cleanup before the awaits
+— with a test that fails when it is removed. Twenty runs afterwards measured **7/20**. So
+the leak was real, the fix was right, and it did not help this defect. **There is no
+outstanding hypothesis.**
 
 **Operational consequence, in one line: a green run of the api suite is not evidence that a
 change is safe, and should not be cited as one until this is fixed.**
+
+Re-checked against measurement on 2026-07-31 and unchanged: 7 of 20 runs of current `main`
+fail. The sentence is not stale, and it is not there for lack of looking.
 
 ## A correction to an earlier report
 
