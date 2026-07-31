@@ -192,6 +192,15 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   `deploy.sh` refuses them** — identity and data are the platform's. Their compose
   files are kept on purpose because local layers on them. `api` creates the two
   agent networks, so it precedes `ai` and `knowledge`.
+- **`minio` is a half-retirement and is NOT refused.** Production object storage is
+  the platform's `minio`; the app's `app-minio` has been stopped since 2026-07-31
+  01:40:43 UTC and its removal window opens **2026-08-01 01:41 UTC**. But `minio` is
+  still in `DEPLOY_REST` with no `refuse_if_retired` branch, so **`deploy.sh minio`
+  and `deploy.sh all` would recreate it in production** — and because both backends
+  are MinIO, `storage.hill90.com` would answer 200 either way and look fine.
+  Procedure, evidence checks and abort conditions:
+  [`docs/runbooks/retiring-app-minio.md`](docs/runbooks/retiring-app-minio.md).
+  **The local compose files stay regardless** — local runs `app-minio` deliberately.
 - **A green api-suite run is not evidence.** 7 of 20 runs of `main` fail, measured
   2026-07-31. **Six** hypotheses are dead (this said seven), the fault is localised
   to half A's 29 files at ~23% with no necessary member and no reproducing subset,
