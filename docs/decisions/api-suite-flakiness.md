@@ -132,6 +132,98 @@ Two smaller things worth doing alongside, and they are cheap:
 - Repeat the suite N times in CI on a schedule and record the failure rate, so this number
   stops being folklore.
 
+## Second session, 2026-07-31: what is now ruled out, and how
+
+Written down because this is the second session on this defect and a ruled-out list that
+lives only in a terminal is lost when that terminal clears. **Read this before forming a
+theory** — three of the obvious ones are already dead.
+
+**The operational consequence, stated plainly: a green CI run in this suite is not
+evidence.** At roughly a third of runs failing, a green run is a coin toss that landed
+your way. Any claim of the form "the suite passes, therefore my change is safe" is
+unsupported until this is fixed. That is the reason this record exists.
+
+### Reproduced on demand
+
+Unmodified `main`, this machine:
+
+| Mode | Runs | Failures |
+|---|---|---|
+| default workers | 8 | **3** |
+| `--runInBand` | 6 | **3** |
+
+**The flake is order-independent, and that is the new structural finding.** Under
+`--runInBand` jest runs every file sequentially in one process, so the file order is
+fixed — and the failure rate does not drop. Whatever the shared state is, it is not "file
+A must run before file B". The trigger is *timing*: something lands asynchronously.
+
+This refines rather than contradicts the monotonic-in-files-per-process result above.
+More files per process means more asynchronous work in flight; it does not mean a
+particular sequence.
+
+Victims differ every run and are spread across files, which is itself evidence against a
+single culprit: three different `shared-knowledge` tests, `model-policies`, `agents`,
+`knowledge` proxy, and two `container-profiles` audit-emission tests.
+
+### The valuable negative: the mock-queue theory is not the necessary cause
+
+The leading theory in this document is the positional `mockResolvedValueOnce` queue. It is
+widespread — **38 of 59 test files use `Once(`, 1381 calls in total** — so it looked like
+the obvious candidate.
+
+**But `src/__tests__/routes-shared-knowledge.test.ts` contains ZERO `Once(` calls and
+still flakes**, producing two of the failures observed this session.
+
+A file with no positional queue at all cannot be failing because a queued value was stolen
+from it. So the queue is at most *a* mechanism, not *the* mechanism, and a fix aimed only
+at queues will leave this flaking. Do not re-derive this: it cost a session.
+
+### Ruled out this session, with the method
+
+| Candidate | Ruled out how |
+|---|---|
+| stale sweeper / workflow scheduler firing during tests | both are started in `services/api/src/index.ts` only; tests build the app from `app.ts` and never call them. Grepped both files. |
+| asynchronous router mounting causing a missing route | every `app.use` in `app.ts` is synchronous; the only `await import` calls are inside request handlers, not at mount time |
+| fire-and-forget audit **database** writes landing late | `services/api/src/helpers/audit.ts` is a synchronous `console.log` with no pool access and returns `void`. There is no audit DB write to land late. |
+| positional mock queues as the *necessary* cause | the zero-`Once(` file above |
+
+`--runInBand` remains **refuted** and should not be proposed again; this session's 3/6 is
+consistent with the earlier 4/10.
+
+### The open lead, and two competing explanations for it
+
+One failure was captured in full:
+
+```
+● Shared knowledge stats routes › GET /shared-knowledge/stats returns 403 without user role
+  Expected: 403
+  Received: 404
+```
+
+A 404 where 403 was expected has **two** explanations and they are not equivalent:
+
+1. **The handler ran.** `requireRole('user')` did not reject a role-less token, so
+   per-request authorization state was wrong — an identity from another test. This is the
+   more alarming reading.
+2. **The request never reached this app.** Per the section above, `request(app)` creates a
+   server per call and the suite makes thousands; a request landing on a different
+   short-lived server gets Express's default 404 without any authorization involvement.
+
+**The experiment that separates them is cheap and should be run first: capture the response
+body of the failing 404.** Express's default 404 is HTML (`Cannot GET /…`); this route's own
+404 would be JSON from the handler. One tells you the identity leaked; the other tells you
+the request was misrouted. Reasoning further without that byte of evidence is guessing, and
+explanation 2 is the more parsimonious of the two — it needs no new mechanism beyond one
+already documented here.
+
+### Environment note for whoever runs this next
+
+`jest` will not run on Node 26 with the committed lockfile: `sharp` has no loadable
+`darwin-arm64` binary and 40 of 59 suites fail at import, which looks exactly like a
+catastrophic regression and is not one. `npm install --no-save --include=optional
+--os=darwin --cpu=arm64 sharp` fixes it locally without touching the lockfile. CI runs
+Node 20 and is unaffected.
+
 ## A correction to an earlier report
 
 I first described this as "roughly one failure per run" and said it "reproduces on main".
