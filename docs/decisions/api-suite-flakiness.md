@@ -742,3 +742,111 @@ My original evidence was also contaminated: I ran a "baseline" with `git stash`,
 not stash untracked files, so the new test file I suspected was still present in the
 control. I noticed that at the time and described it as "the cleanest control". It was the
 opposite. The rate above comes from clean runs of unmodified `main`.
+
+---
+
+# Round two: the carrier audit was run, and it eliminates the standing hypothesis's named candidates
+
+`Measured 2026-08-01.` The previous section ended by proposing a deterministic carrier
+audit as the next step. **It was built, positive-controlled, and run.** This section records
+what it found. Nothing here re-derives an earlier result.
+
+## The audit
+
+`services/api/jest.audit.js`, enabled with `CARRIER_AUDIT=1` and **off by default** so it
+changes nothing about how CI runs the suite. Per test file it snapshots `process.env` and
+the enumerable keys of `globalThis` before, diffs after, and appends any key that changed
+and was not restored.
+
+**Positive-controlled before being believed.** A test that deliberately leaks
+`process.env.ZZ_CONTROL_LEAK` and a `globalThis` key is caught, naming both. A check that
+has never been seen to fail is not evidence, and this one has been seen to fail.
+
+## Result: `process.env` is not the carrier, and neither is `globalThis`
+
+**20 full-suite runs with the audit enabled. 5 failed, 15 passed — a 25% failure rate**,
+consistent with the 7/20 and ~23% recorded earlier, so the flake was reproducing normally
+throughout.
+
+**Across all 20 runs, including all 5 failing ones, the audit reported exactly one line per
+run**, always the same:
+
+```
+file: src/__tests__/model-router-delegation.test.ts
+env: []
+globals: ['__extends','__assign','__rest','__decorate','__param','__esDecorate']
+```
+
+Those are TypeScript's `tslib` emit helpers — added once, read by nobody as a branch
+condition. **Zero unrestored `process.env` changes across 61 files, on failing and passing
+runs alike.**
+
+The standing hypothesis named `process.env`, `globalThis`, the filesystem, or a captured
+object as the carrier. **The first two are now eliminated by measurement**, on failing runs
+specifically. `DATABASE_URL` — the document's "obvious candidate" — never leaks.
+
+## The symptom set is wider than recorded, and that contradicts the standing hypothesis
+
+The standing hypothesis states its symptoms are *"a handler taking a different path — 403 →
+404, 201 → 400, 501 → 404 … **not a crash, not a timeout**, not a connection error."*
+
+Classifying all five failures from the 20 runs:
+
+| Run | Failing test | Symptom |
+|---|---|---|
+| 2 | `routes-chat` — GET /chat/threads … agent info | **`Exceeded timeout of 5000 ms`** |
+| 5 | `routes-agents-model-ownership` — A10 non-owned model | Expected `400`, received **`404`** |
+| 11 | `routes-shared-knowledge` — POST collections | Expected `201`, received **`404`** |
+| 16 | `routes-notifications` — filters unread only | (assertion, not captured) |
+| 18 | `routes-agents` — S1-S4 network resolution | Expected `200`, received **`404`** |
+
+**A timeout is in the set.** So the premise "not a timeout" is false, and any theory built on
+symptoms being purely logical is built on an incomplete list.
+
+**404 dominates** — three of the four classified failures. These files mock the pool with a
+module-level `jest.fn()` and queue results with `mockResolvedValueOnce`. Both observed
+symptoms fall out of one mechanism: **if anything drains that queue unexpectedly, a handler
+reads the wrong row set and returns 404; if the queue empties, the handler awaits a promise
+that never resolves and the test times out at 5s.** That is a single explanation for two
+symptoms which the earlier write-up treated as one symptom class.
+
+**This is a lead, not a finding.** Nothing here proves an extra caller exists.
+
+## A measurement that did NOT hold up, recorded so nobody repeats it
+
+The audit was extended to census `process._getActiveHandles()` per file. Across 12 further
+runs it reported every request-making file "leaking" **2 handles per run** (`routes-agents-events`,
+3), of types `Server`, `Socket`, `Pipe` — which looked like unclosed supertest servers
+accumulating, and would have explained the resource-pressure gradient neatly.
+
+**It does not survive its own control.** Running `routes-notifications.test.ts` **alone**
+leaks **0** handles. A file that leaks 2 in a full run and 0 in isolation is more likely
+measuring jest's own worker plumbing — IPC pipes and the reporter's sockets — than anything
+the application did. **The census is not trustworthy as written and the "unclosed supertest
+server" theory is NOT supported.** It is written down because it is an attractive wrong
+answer and the next person will otherwise find it again.
+
+## Where this leaves the search space
+
+Eliminated, by measurement rather than argument:
+
+- `process.env` as the carrier — 20 runs, 5 failures, deterministic audit, positive-controlled
+- `globalThis` as the carrier — same runs; only `tslib` helpers ever appear
+- "symptoms are purely logical" — a 5s timeout is in the set
+
+Still open, and now the narrowest description available:
+
+- **The carrier is per-process and is neither `process.env` nor `globalThis`.** The remaining
+  candidates from the standing hypothesis are the filesystem and an object captured by a
+  still-running callback. The second fits the mock-queue mechanism above.
+- **The specific question worth attacking next:** instrument the shared `mockQuery` in one
+  half-A file to record, per test, calls made against `Once` values queued, and flag any test
+  where the counts disagree. That is deterministic in the same way this audit was, and it
+  targets the object the 404s and the timeout both point at.
+
+## Status: still unfixed
+
+**The flake is not fixed and the cause is not known.** A green run of this suite is still not
+evidence. Nothing was disabled, retried or quarantined — the rate is unchanged at 25% (5/20)
+because nothing was done to change it, and converting a known flake into a silent one would
+be worse than leaving it.
