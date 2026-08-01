@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "Load-bearing fields of Hill90's platform-realm.json, extracted so this repo can",
+    "guard its vendored copy WITHOUT needing the Hill90 checkout present. CI here",
+    "cannot assume a sibling clone, so the comparison target is committed.",
+    "",
+    "DO NOT HAND-EDIT. Regenerate:  python3 scripts/checks/check_vendored_realm.py --refresh",
+    "",
+    "WHAT BREAKS THIS: upstream changing without anyone refreshing this file. The",
+    "guard then happily compares against a stale target. `--check-upstream` fetches",
+    "the live file and fails if this extract no longer matches it; run it on a",
+    "schedule or before trusting a green run after upstream work."
+  ],
+  "source": {
+    "repo": "jonhill90/Hill90",
+    "path": "platform/auth/keycloak/platform-realm.json",
+    "url": "https://raw.githubusercontent.com/jonhill90/Hill90/main/platform/auth/keycloak/platform-realm.json",
+    "commit": "6e76e32d3541ece3777a2742fd08b3af043d8c1d",
+    "committed_at": "2026-08-01T02:36:41Z"
+  },
+  "guarded_fields": [
+    "bearerOnly",
+    "publicClient",
+    "standardFlowEnabled",
+    "directAccessGrantsEnabled",
+    "serviceAccountsEnabled",
+    "fullScopeAllowed",
+    "defaultClientScopes",
+    "optionalClientScopes",
+    "protocol"
+  ],
+  "clients": {
+    "hill90-ui": {
+      "bearerOnly": false,
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "email"
+      ],
+      "protocol": "openid-connect"
+    },
+    "hill90-api": {
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "protocol": "openid-connect"
+    }
+  }
+}

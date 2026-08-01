@@ -72,16 +72,22 @@ one is not evidence about production.
 | **`./scripts/local.sh up`** (default, tenant) | **Hill90's** | `platform` — *the realm production uses* | **The tenancy.** Same realm, same clients, same client-role authorisation as production |
 | `./scripts/local.sh up --standalone` | the fork's own | a local realm also named `platform` | **The realm design only.** It does **not** prove the tenancy |
 
-**The standalone fork's realm is a copy, and it has drifted.** Measured 2026-08-01 against
-Hill90's `platform-realm.json`: `hill90-ui` differs on `bearerOnly`,
-`directAccessGrantsEnabled`, `serviceAccountsEnabled`, `fullScopeAllowed` **and
-`defaultClientScopes`**; `hill90-api` differs on `fullScopeAllowed`. `defaultClientScopes`
-is the load-bearing one — it carries the `roles` scope that emits the claim authorisation
-reads.
+**The standalone fork's realm is still a copy, but it is no longer drifting.** The six
+divergences measured on 2026-08-01 — `hill90-ui` on `bearerOnly`,
+`directAccessGrantsEnabled`, `serviceAccountsEnabled`, `fullScopeAllowed` and
+`defaultClientScopes`, plus `hill90-api` on `fullScopeAllowed` — were **reconciled to
+upstream**, not declared acceptable. `defaultClientScopes` was the load-bearing one: it
+carries the `roles` scope that emits the claim authorisation reads, and locally it was not
+set at all.
 
-So: **a green standalone login says the app can talk to a Keycloak. It says nothing about
-whether production's realm will serve it.** Use the default path for anything you intend to
-cite as evidence.
+A guard now holds it there. `scripts/checks/check_vendored_realm.py` compares the
+load-bearing fields against a committed extract of Hill90's realm on every pull request,
+and the copy keeps its localhost redirect URIs, dev secret and seeded users because those
+are declared divergences rather than accidents.
+
+So: **a green standalone login proves the realm design, on clients that now match
+production's on everything that decides authorisation. It still does not prove the
+tenancy** — that needs the default path, which uses Hill90's own Keycloak.
 
 Prove the tenant path end to end at any time:
 
