@@ -142,15 +142,31 @@ services:
     # app-internal URL below uses that name. Traefik is unaffected because it
     # routes by container IP, not by DNS.
     #
-    # KNOWN LIMITATION, not a solved problem. `keycloak` stays ambiguous on edge.
-    # No *app* service relies on the bare name any more, but Hill90's containers
-    # are on edge too, and they now resolve `keycloak` to whichever of the two
-    # answers first — measured 18/30 in favour of the app's. It is latent only
-    # because Hill90's own services reach Keycloak via KC_PUBLIC_URL rather than
-    # the bare name, and Hill90's health check cannot detect it (it probes
-    # auth.<domain>/realms/platform). Running this overlay therefore degrades
-    # Hill90's DNS while it is up. The real fix is the deferred naming decision:
-    # prefix the app's container/service names so they never collide at all.
+    # THE 18/30 COLLISION THIS USED TO DESCRIBE NO LONGER HAPPENS, and the reason
+    # is that nothing drives this file any more. Re-measured 2026-08-01, issue #98.
+    #
+    # It said `keycloak` stayed ambiguous on edge and that running this overlay
+    # degraded Hill90's DNS while it was up. Both were true when written. Neither
+    # is reachable now:
+    #
+    #   - the TENANT path (the default) runs the production compose files plus
+    #     deploy/compose/overrides, and since #96 its stack list carries no `auth`,
+    #     so no app Keycloak starts at all
+    #   - --standalone runs compose/local.yml, whose keycloak sits on a
+    #     project-scoped `default` network and never joins Hill90's edge
+    #   - THIS FILE is referenced by no code path. scripts/local.sh mentions it
+    #     once, in a comment, to say it is not what the tenant path uses
+    #
+    # Measured on the running tenant path: 120 of 120 lookups of `keycloak` from
+    # four app containers resolved to 172.18.0.6, hill90dev-keycloak — 0 wrong,
+    # against 18 of 30 wrong before. Exactly one container answers to `keycloak`
+    # on edge, and no alias on that network is duplicated at all.
+    #
+    # The alias below is kept because it is still correct for this file's own
+    # shape: if anyone revives this overlay by hand, the app's keycloak must not
+    # answer to the bare name on a network Hill90 shares. Reviving it WOULD
+    # reintroduce the collision, which is why this comment records the mechanism
+    # rather than deleting the history.
     networks:
       app_internal:
         aliases: [app-keycloak]
