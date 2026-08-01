@@ -22,10 +22,18 @@
 //                 contextOrFilename.getFilename is not a function
 //
 //    eslint is now ^9.37.0, inside the range the config actually supports.
+import js from '@eslint/js';
 import coreWebVitals from 'eslint-config-next/core-web-vitals';
 import typescript from 'eslint-config-next/typescript';
 
 export default [
+  // eslint-config-next does NOT include the base JS rules. Without this the
+  // resolved config had 113 rules and `no-debugger` was NOT CONFIGURED at all —
+  // a deliberate `debugger;` statement linted clean. Found by positive-control,
+  // not by reading the config. js.recommended goes FIRST so the Next and
+  // TypeScript configs below can still override what TypeScript handles better
+  // (no-undef, no-unused-vars, no-dupe-keys are all switched off downstream).
+  js.configs.recommended,
   ...coreWebVitals,
   ...typescript,
   {
