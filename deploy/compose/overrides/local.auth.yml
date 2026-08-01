@@ -1,3 +1,20 @@
+# UNUSED SINCE 2026-08-01 — kept deliberately, not live.
+#
+# The tenant local path authenticates against HILL90'S Keycloak, realm `platform`
+# — the realm production uses — so `auth` was removed from STACKS in
+# scripts/local.sh and nothing drives this override any more. `--standalone` does
+# not use it either: the fork has its own Keycloak in compose/local.yml.
+#
+# Kept rather than deleted for the same reason the db and auth compose files
+# survived those retirements — a documented, restorable path beats a deletion that
+# needs archaeology to reverse. To bring the app's own local Keycloak back, add
+# `auth` to STACKS and repoint the issuer variables in local.ui.yml, local.api.yml
+# and local.mcp.yml at app-keycloak.
+#
+# Before changing anything here, read the README section "What each local path
+# proves": a login against the app's own realm proves the realm design and NOT the
+# tenancy, which is the whole reason this file is no longer wired up.
+
 # Local override for deploy/compose/prod/docker-compose.auth.yml
 #
 #   docker compose -f deploy/compose/prod/docker-compose.auth.yml \
