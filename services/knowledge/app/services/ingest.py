@@ -14,7 +14,7 @@ import structlog
 
 from app.services import shared_store
 from app.services.text_chunker import MAX_SOURCE_SIZE, Chunk, chunk_markdown, chunk_text
-from app.services.web_page_fetcher import FetchError, fetch_and_extract
+from app.services.web_page_fetcher import fetch_and_extract
 
 logger = structlog.get_logger()
 

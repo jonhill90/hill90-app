@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.auth import AuthError, AgentClaims, verify_model_router_token
-from app.config import Settings, get_settings, load_public_key
+from app.config import get_settings, load_public_key
 from app.crypto import decrypt_provider_key
 from app.delegation import (
     compute_effective_policy,
@@ -34,9 +34,11 @@ from app.delegation import (
 from app.limits import check_rate_limit, check_token_budget
 from app.model_type_detect import detect_model_type
 from app.models import (
+    # Not referenced in this module, but tests patch app.main.is_platform_model,
+    # so the name must exist as an attribute of this module. Removing it as an
+    # unused import breaks 3 tests in tests/test_inference_eligibility.py.
+    is_platform_model,  # noqa: F401
     get_agent_owner,
-    get_fallback_route,
-    is_platform_model,
     resolve_platform_model,
     resolve_route_credentials,
     resolve_router_model,
@@ -47,7 +49,7 @@ from app.models import (
 )
 from app.policy import resolve_agent_policy, resolve_alias, resolve_aliases_list, resolve_model_policy
 from app.proxy import StreamOpenResult, proxy_chat_completion, proxy_embeddings, stream_chat_completion
-from app.revocation import RevocationManager, revocation_manager
+from app.revocation import revocation_manager
 from app.usage import log_usage
 
 logger = structlog.get_logger()
@@ -301,7 +303,7 @@ async def _enforce_policy(
                     status_code=429,
                     content={"error": {
                         "type": "rate_limited",
-                        "message": f"Rate limit exceeded for delegation",
+                        "message": "Rate limit exceeded for delegation",
                         "delegation_id": delegation_id,
                         "limit": rl.limit, "window": "60s", "retry_after": rl.retry_after,
                     }},

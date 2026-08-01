@@ -1,7 +1,7 @@
 """Shared test fixtures for AI service tests."""
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import jwt as pyjwt
 import pytest

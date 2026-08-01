@@ -68,27 +68,22 @@ test-scripts: ## Run the shell test suite (bats)
 # ============================================================================
 # Lint — each of these already exists as a package script or dev dependency
 #
-# BOTH NPM LINT SCRIPTS ARE CURRENTLY BROKEN, and this Makefile is where that
-# became visible. Verified 2026-07-31 by running them:
+# All three were broken until 2026-07-31 and are now fixed:
 #
-#   services/api  `eslint src --ext .ts` — there is NO eslint config anywhere in
-#                 the service and no eslintConfig key in package.json, so eslint
-#                 exits complaining it found none. It cannot ever have worked.
-#   services/ui   `next lint` — removed in Next 16, and this service is on
-#                 16.2.4. `next --help` no longer mentions lint at all, so Next
-#                 parses "lint" as a directory name and fails.
+#   services/api  had NO eslint config of any kind, so `eslint src --ext .ts`
+#                 exited saying it could not find one. Added .eslintrc.cjs.
+#   services/ui   ran `next lint`, removed in Next 16. Migrated to `eslint .`
+#                 with the native flat configs from eslint-config-next, and
+#                 pinned eslint to ^9 because eslint-config-next 16 bundles
+#                 eslint-plugin-react 7.37, whose peer range stops at ^9.7.
+#   python        53 ruff findings across three services, now zero.
 #
-# And `make lint-python` fails too, though for an ordinary reason: ruff reports
-# F401 (`pytest` imported but unused) in services/mcp/tests/test_auth.py.
-#
-# So all three lint entry points are red, and ci.yml runs lint ZERO times, which
-# is why none of it was noticed. The targets are kept because they wrap scripts
-# and tools that really are declared in this repo; fixing them is a separate
-# change with real decisions in it (which eslint config, the Next 16 lint
-# migration, and whether ruff should gate CI at all).
+# ci.yml runs all three in the `lint (api, ui, python)` job, so this is enforced
+# rather than remembered. The npm services carry a documented backlog of demoted
+# rules -- see the configs for counts and reasons.
 # ============================================================================
 
-lint: lint-api lint-ui lint-python ## Lint every service (see note: npm scripts are broken)
+lint: lint-api lint-ui lint-python ## Lint every service
 
 lint-api: ## Lint the api (eslint)
 	cd services/api && npm run lint

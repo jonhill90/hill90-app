@@ -1,9 +1,6 @@
 """Unit tests for PTY shell execution."""
 
-import os
-import sys
 
-import pytest
 
 from app.pty_shell import PtyResult, execute_streaming
 
