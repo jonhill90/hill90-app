@@ -21,7 +21,7 @@
     "realm": [
       {
         "name": "admin",
-        "description": "PLATFORM admin. Grants Grafana Admin and OpenBao in production. NOT the app's admin role \u2014 nothing here should hold it."
+        "description": "PLATFORM admin. Grants Grafana Admin and OpenBao in production. NOT the app's admin role — nothing here should hold it."
       },
       {
         "name": "user",
@@ -58,7 +58,7 @@
         "http://app.localtest.me:8080"
       ],
       "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true,
+      "directAccessGrantsEnabled": false,
       "attributes": {
         "post.logout.redirect.uris": "https://hill90.com/"
       },
@@ -74,7 +74,17 @@
           }
         }
       ],
-      "secret": "local-dev-secret"
+      "secret": "local-dev-secret",
+      "bearerOnly": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "email"
+      ]
     },
     {
       "clientId": "hill90-api",
@@ -85,7 +95,8 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "bearerOnly": true,
-      "description": "Resource server. Audience target only; never authenticates."
+      "description": "Resource server. Audience target only; never authenticates.",
+      "fullScopeAllowed": true
     }
   ],
   "users": [

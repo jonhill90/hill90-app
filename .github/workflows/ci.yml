@@ -213,3 +213,11 @@ jobs:
       # subdirectory would be skipped silently.
       - name: Run bats tests
         run: bats --recursive tests/scripts/
+
+      # The standalone realm is a VENDORED copy of Hill90's platform-realm.json,
+      # and a copy is safe only while something keeps it honest. Compares the
+      # load-bearing fields against a committed extract of upstream, so this needs
+      # neither the Hill90 checkout nor the network — see the script's header for
+      # what that trades away and how staleness is detected.
+      - name: Vendored realm has not drifted from Hill90's
+        run: python3 scripts/checks/check_vendored_realm.py
