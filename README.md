@@ -62,6 +62,37 @@ Architecture, in the depth it was actually written:
 
 ## Running locally
 
+### What each local path proves
+
+`Verified 2026-08-01.` These are not interchangeable, and a green login on the wrong
+one is not evidence about production.
+
+| Path | Keycloak | Realm | Proves |
+|---|---|---|---|
+| **`./scripts/local.sh up`** (default, tenant) | **Hill90's** | `platform` — *the realm production uses* | **The tenancy.** Same realm, same clients, same client-role authorisation as production |
+| `./scripts/local.sh up --standalone` | the fork's own | a local realm also named `platform` | **The realm design only.** It does **not** prove the tenancy |
+
+**The standalone fork's realm is a copy, and it has drifted.** Measured 2026-08-01 against
+Hill90's `platform-realm.json`: `hill90-ui` differs on `bearerOnly`,
+`directAccessGrantsEnabled`, `serviceAccountsEnabled`, `fullScopeAllowed` **and
+`defaultClientScopes`**; `hill90-api` differs on `fullScopeAllowed`. `defaultClientScopes`
+is the load-bearing one — it carries the `roles` scope that emits the claim authorisation
+reads.
+
+So: **a green standalone login says the app can talk to a Keycloak. It says nothing about
+whether production's realm will serve it.** Use the default path for anything you intend to
+cite as evidence.
+
+Prove the tenant path end to end at any time:
+
+```bash
+bash scripts/checks/tenant-login-platform-test.sh
+```
+
+It completes a real authorization-code flow and asserts `resource_access.hill90-ui.roles`,
+`aud` including `hill90-api`, no `admin` in `realm_access.roles`, and that `iss` is realm
+`platform`.
+
 `compose/local.yml` is a purpose-built local stack. It is not the production
 topology: it creates its own Docker networks, skips Traefik entirely, and routes
 by published port instead of the 37 `traefik.*` labels in `deploy/compose/prod/`.

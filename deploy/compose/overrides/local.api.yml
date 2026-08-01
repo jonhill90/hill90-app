@@ -17,7 +17,11 @@ services:
     ports:
       - "${PORT_API:-13001}:3000"
     environment:
-      KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
+      # LOCAL TENANCY PARITY (2026-08-01). This points at HILL90'S Keycloak,
+      # realm `platform` — the same realm production uses — not at the app's own
+      # app-keycloak, which the tenant path no longer starts. A local login now
+      # exercises the tenancy, not just the realm design.
+      KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
       # Mirrors local.ui.yml's Traefik rule, which accepts the apex, www and app — plus
       # the published UI port for the standalone stack. Every origin the local UI can be
       # reached on has to be here or the terminal breaks locally only, which is the kind
@@ -29,7 +33,9 @@ services:
       # same reason local.ui.yml sets KEYCLOAK_INTERNAL_ISSUER. In PRODUCTION the
       # two must not diverge, and no override is permitted there; see
       # tests/scripts/issuer-jwks-agree-check.sh.
-      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/${KC_REALM:-platform}/protocol/openid-connect/certs
+      # Fetched over the internal network from Hill90's Keycloak. The issuer
+      # above stays the PUBLIC URL, because that is what lands in `iss`.
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/${KC_REALM:-platform}/protocol/openid-connect/certs
       # services/api attaches agent containers to <prefix>_agent_{internal,sandbox}
       # by name. Under this overlay the prefix is Hill90's, not the default.
       AGENT_NETWORK_PREFIX: ${NETWORK_PREFIX:-hill90}
