@@ -51,7 +51,7 @@ class RevocationManager:
     async def cleanup_expired(self, conn: Any) -> int:
         """Remove expired rows from DB and in-memory set. Returns count removed."""
         now = int(time.time())
-        result = await conn.execute(
+        result = await conn.execute(  # noqa: F841 - unused while cleanup_expired returns 0; see "Phase 1" note below
             "DELETE FROM model_router_revoked_tokens WHERE expires_at <= $1",
             now,
         )

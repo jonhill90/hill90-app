@@ -165,7 +165,6 @@ class TestWebSearch:
     async def test_web_search_success(self):
         """Successful search returns formatted results."""
         import httpx
-        from unittest.mock import MagicMock
 
         tavily_response = {
             "results": [

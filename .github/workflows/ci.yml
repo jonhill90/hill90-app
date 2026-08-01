@@ -90,6 +90,62 @@ jobs:
       - run: poetry install --no-interaction
       - run: poetry run pytest ${{ matrix.args }}
 
+  # Lint had NEVER run here. `grep -c lint ci.yml` returned 0 while all three
+  # services declared a lint entry point, and all three were broken:
+  # services/api had no eslint config at all, services/ui called `next lint`
+  # which Next 16 removed, and ruff failed across three of the four Python
+  # services. A declared-but-uninvoked guard is the same dead shape as a rule
+  # that cannot fire.
+  #
+  # One job rather than steps bolted onto the test jobs, so a lint failure is
+  # legible as a lint failure in the checks list rather than hiding inside
+  # "services/api (jest)".
+  lint:
+    name: lint (api, ui, python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Lint services/api (eslint)
+        working-directory: services/api
+        run: |
+          npm ci
+          npm run lint
+
+      - name: Lint services/ui (eslint)
+        working-directory: services/ui
+        run: |
+          npm ci
+          npm run lint
+
+      - name: Install poetry
+        run: pipx install poetry
+
+      # Every Python service, not just the first to fail. The `make lint-python`
+      # loop exits on the first bad service, which is why an earlier report said
+      # the Python problem was one F401 in services/mcp when it was 53 findings
+      # across three services.
+      - name: Lint Python services (ruff)
+        run: |
+          failed=""
+          for s in services/mcp services/agentbox services/ai services/knowledge; do
+            echo "::group::$s"
+            (cd "$s" && poetry install --no-interaction --quiet && poetry run ruff check .) || failed="$failed $s"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::ruff failed in:$failed"
+            exit 1
+          fi
+
   # Folded in from validate-scripts.yml, which was deleted in the same change.
   #
   # That workflow existed because ci.yml was once workflow_dispatch-only, so a

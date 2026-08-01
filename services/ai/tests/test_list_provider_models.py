@@ -1,10 +1,8 @@
 """Tests for POST /internal/list-provider-models endpoint."""
 
-import hmac
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-from httpx import Response
 
 from app.model_type_detect import detect_model_type
 

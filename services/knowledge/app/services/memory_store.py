@@ -10,7 +10,6 @@ import hashlib
 import json
 import logging
 from typing import Any
-from uuid import UUID
 
 import asyncpg
 

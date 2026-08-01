@@ -248,7 +248,7 @@ async def fetch_and_extract(url: str) -> dict[str, Any]:
         raise FetchError(f"Could not extract readable content from URL '{hostname}'")
 
     # Try to get title from trafilatura metadata
-    metadata = trafilatura.extract(html, output_format="xmltei", include_comments=False)
+    metadata = trafilatura.extract(html, output_format="xmltei", include_comments=False)  # noqa: F841 - title falls back to hostname without reading this; looks unfinished
     title = hostname  # fallback
 
     logger.info(

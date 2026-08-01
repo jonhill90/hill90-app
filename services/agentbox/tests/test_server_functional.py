@@ -6,10 +6,7 @@ works correctly after the FastMCP-to-Starlette migration.
 """
 
 import json
-import os
-from unittest.mock import MagicMock
 
-import pytest
 from starlette.testclient import TestClient
 
 from app.config import AgentConfig

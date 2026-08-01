@@ -17,7 +17,6 @@ import httpx
 import pytest
 
 from app.services.web_page_fetcher import (
-    BLOCKED_HOSTNAMES,
     FetchError,
     MAX_RESPONSE_BYTES,
     _is_blocked_ip,

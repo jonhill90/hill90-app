@@ -1,6 +1,5 @@
 """Unit tests for quality scoring and classification."""
 
-import pytest
 
 from app.services.quality import (
     classify_score,

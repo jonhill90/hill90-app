@@ -229,7 +229,7 @@ class TestSharedStats:
         """Verify ingest.error_rate = failed / total_jobs."""
         # Insert known jobs directly for deterministic test
         pool = app_client._transport.app.state.pool  # type: ignore[union-attr]
-        cid = await _create_collection(app_client, "Error Rate Col", "user-er")
+        await _create_collection(app_client, "Error Rate Col", "user-er")
 
         async with pool.acquire() as conn:
             src_id = await conn.fetchval(

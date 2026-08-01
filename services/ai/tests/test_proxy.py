@@ -1,10 +1,8 @@
 """Tests for chat completion proxy, DB policy lookup, usage logging, and parsing."""
 
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
 
 from app.policy import resolve_agent_policy, resolve_model_policy
 from app.proxy import parse_cost, parse_usage, proxy_chat_completion

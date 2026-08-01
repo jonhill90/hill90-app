@@ -1,9 +1,7 @@
 """Unit tests for the text chunker service."""
 
-import pytest
 
 from app.services.text_chunker import (
-    Chunk,
     chunk_markdown,
     chunk_text,
     estimate_tokens,

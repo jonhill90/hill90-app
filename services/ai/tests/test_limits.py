@@ -1,6 +1,5 @@
 """Tests for rate limiting and token budget enforcement."""
 
-from unittest.mock import AsyncMock
 
 import pytest
 

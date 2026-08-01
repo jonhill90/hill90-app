@@ -6,7 +6,7 @@ from the response, and returns enriched results.
 
 import json as json_mod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx

@@ -1,14 +1,11 @@
 """Tests for streaming chat completion proxy and SSE event parsing."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
 from app.proxy import (
-    StreamOpenResult,
-    StreamingResult,
     _extract_usage_from_event,
     _parse_sse_events,
     stream_chat_completion,

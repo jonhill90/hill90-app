@@ -1,13 +1,10 @@
 """Tests for BYOK model resolution — user-owned models and platform catalog."""
 
-import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
-import pytest_asyncio
 
 from app.models import (
-    UserModelInfo,
     clear_owner_cache,
     get_agent_owner,
     is_platform_model,
