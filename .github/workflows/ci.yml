@@ -6,7 +6,9 @@ name: Validate Repository
 # target, so nothing should fire on push". That rationale died the moment the
 # pipeline started deploying to production, and it outlived it by long enough to
 # be actively misleading: for a stretch, `validate-scripts.yml` was the ONLY
-# workflow gating a pull request, so bats was the entire quality bar. Pull
+# workflow gating a pull request, so bats was the entire quality bar. (That
+# workflow has since been folded in here as the `scripts` job and deleted, so
+# there is no longer a second file to drift.) Pull
 # requests changed `services/api` and `services/ui` source — and added tests to
 # both — without a single jest or vitest test executing in CI. The tests existed;
 # nothing ran them.
@@ -87,3 +89,55 @@ jobs:
       - run: pipx install poetry
       - run: poetry install --no-interaction
       - run: poetry run pytest ${{ matrix.args }}
+
+  # Folded in from validate-scripts.yml, which was deleted in the same change.
+  #
+  # That workflow existed because ci.yml was once workflow_dispatch-only, so a
+  # shell job added here would never have run on a pull request. ci.yml now runs
+  # on every pull request (see the header), so the reason for a second workflow
+  # is gone, and two files triggering on the same events is just somewhere for
+  # them to drift apart.
+  #
+  # The job name is kept byte-identical to the old one so the check reads the same
+  # in the PR list. Confirmed before deleting: nothing referenced the workflow by
+  # `uses:` or by name, and no branch protection rule could require its check —
+  # branch protection and rulesets are both unavailable on this repository's plan
+  # (private, and the API returns "Upgrade to GitHub Pro or make this repository
+  # public"). Verified as a real answer rather than a failed call by running the
+  # same request against the public Hill90 repo, where it succeeds and returns
+  # required_status_checks.contexts = ["Run Tests"].
+  scripts:
+    name: scripts (bats)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned rather than `apt-get install bats`. The apt version is 1.2.1 on
+      # ubuntu-22.04, which predates BATS_TEST_TMPDIR (bats 1.4.0) — the suite
+      # would break on a runner-image change rather than on a code change.
+      - name: Install bats (pinned)
+        run: |
+          # sudo: the runner's global npm prefix is /usr/local, which the runner
+          # user cannot write. Caught by this job's own first run.
+          sudo npm install -g bats@1.11.0
+          bats --version
+
+      # Guards the class, not the instances. Thirteen dead internal links had
+      # accumulated because nothing looked: the extraction brought this repo's
+      # architecture and runbook docs across and left the platform's behind, so
+      # their relative links pointed at siblings that were no longer here. A dead
+      # internal link is the first thing that makes a docs tree look abandoned,
+      # which matters for a repository that may go public.
+      - name: Markdown links resolve
+        run: python3 scripts/checks/check_md_links.py
+
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh tests/scripts/*.sh; do
+            bash -n "$f" && echo "ok  $f"
+          done
+
+      # Recursive: `bats tests/scripts/` is non-recursive, so a test added in a
+      # subdirectory would be skipped silently.
+      - name: Run bats tests
+        run: bats --recursive tests/scripts/
