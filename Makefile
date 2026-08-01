@@ -1,4 +1,4 @@
-.PHONY: help test test-api test-ui test-python test-scripts lint lint-api lint-ui lint-python check check-links check-shell up down status logs reset deploy
+.PHONY: help test test-api test-ui test-python test-scripts lint lint-api lint-ui lint-python lint-selftest check check-links check-shell up down status logs reset deploy
 
 # A single front door for a repository whose real entry points are spread across
 # scripts/, two npm packages and four poetry projects. Every target below wraps
@@ -90,6 +90,9 @@ lint-api: ## Lint the api (eslint)
 
 lint-ui: ## Lint the ui (next lint)
 	cd services/ui && npm run lint
+
+lint-selftest: ## Prove each lint arm can actually FAIL
+	bash scripts/checks/lint-selftest.sh
 
 lint-python: ## Lint every Python service (ruff)
 	@for s in $(PY_SERVICES) services/knowledge; do \

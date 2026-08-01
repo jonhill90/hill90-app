@@ -146,6 +146,22 @@ jobs:
             exit 1
           fi
 
+      # Proves the three arms above can actually FAIL, by injecting a violation
+      # into each and asserting it is reported. This runs last because it reuses
+      # the installs the steps above already did.
+      #
+      # It exists because the ui arm shipped in #95 unable to catch anything:
+      # eslint-config-next omits eslint:recommended, so `no-debugger` was not
+      # configured and a deliberate `debugger;` linted clean. That was found by
+      # injecting a violation BY HAND, and it survived review because the check
+      # was a one-off that ran after the pull request had already merged.
+      #
+      # A non-zero exit is not accepted as proof: the arm must also NAME the rule
+      # that was supposed to fire, so missing dependencies or a broken config
+      # cannot masquerade as a working guard.
+      - name: Prove the lint arms can fail
+        run: bash scripts/checks/lint-selftest.sh
+
   # Folded in from validate-scripts.yml, which was deleted in the same change.
   #
   # That workflow existed because ci.yml was once workflow_dispatch-only, so a
