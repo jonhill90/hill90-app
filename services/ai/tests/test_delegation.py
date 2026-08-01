@@ -1,6 +1,5 @@
 """Tests for delegation management and subagent narrowing."""
 
-import json
 import time
 import uuid
 

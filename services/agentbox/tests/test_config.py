@@ -1,12 +1,10 @@
 """Tests for app.config — Pydantic models for agent.yml."""
 
-import tempfile
-from pathlib import Path
 
 import pytest
 import yaml
 
-from app.config import AgentConfig, FilesystemConfig, ShellConfig, ToolsConfig
+from app.config import AgentConfig, FilesystemConfig, ShellConfig
 
 
 class TestAgentConfig:

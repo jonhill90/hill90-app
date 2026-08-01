@@ -11,10 +11,12 @@ terminal view. Falls back to plain subprocess (execute_command) otherwise.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import subprocess
 import threading
+import urllib.parse
 import uuid
 from typing import TYPE_CHECKING
 
@@ -693,9 +695,6 @@ async def _execute_search_shared_knowledge(args: dict) -> str:
         return json.dumps({"success": False, "error": str(exc)[:200]})
 
 
-import ipaddress
-import urllib.parse
-
 _BLOCKED_CIDRS = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -971,7 +970,7 @@ async def _execute_git(args: dict) -> str:
         elif action == "log":
             count = min(args.get("count", 10) or 10, 50)
             proc = await asyncio.create_subprocess_exec(
-                "git", "log", f"--oneline", f"-{count}", cwd=WORKSPACE,
+                "git", "log", "--oneline", f"-{count}", cwd=WORKSPACE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()

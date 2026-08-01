@@ -1,7 +1,6 @@
 """Tests for app.chat — chat work handler (inference + callback + tool loop)."""
 
 import json
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest

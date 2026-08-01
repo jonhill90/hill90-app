@@ -6,7 +6,6 @@ import pytest
 
 from app.models import (
     RouterModelInfo,
-    UserModelInfo,
     get_fallback_route,
     resolve_route_credentials,
     resolve_router_model,

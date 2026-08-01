@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "test": "vitest run"
   },
   "dependencies": {
@@ -29,7 +29,6 @@
     "dompurify": ">=3.4.0"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "3.3.3",
     "@tailwindcss/postcss": "4.1.18",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
@@ -38,7 +37,7 @@
     "@types/react-dom": "19.2.3",
     "@types/swagger-ui-react": "^5.18.0",
     "axios": "^1.15.0",
-    "eslint": "10.0.0",
+    "eslint": "^9.37.0",
     "eslint-config-next": "16.1.6",
     "jsdom": "^25.0.1",
     "tailwindcss": "4.1.18",

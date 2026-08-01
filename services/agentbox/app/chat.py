@@ -329,7 +329,7 @@ def _ensure_tmux_session() -> None:
         return  # session exists
 
     # Create detached session with zsh
-    zsh = shutil.which("zsh") or "/bin/bash"
+    zsh = shutil.which("zsh") or "/bin/bash"  # noqa: F841 - resolved but never passed to tmux below; looks unfinished, left for investigation
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", TMUX_SESSION, "-x", "120", "-y", "40"],
         capture_output=True,

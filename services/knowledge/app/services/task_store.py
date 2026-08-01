@@ -107,7 +107,7 @@ async def update_task(
         params.append(value)
         idx += 1
 
-    set_clauses.append(f"updated_at = NOW()")
+    set_clauses.append("updated_at = NOW()")
     params.append(task_id)
 
     row = await pool.fetchrow(
