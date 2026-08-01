@@ -110,7 +110,7 @@ check-links: ## Verify every internal markdown link resolves
 	python3 scripts/checks/check_md_links.py
 
 check-shell: ## Parse every shell script (bash -n)
-	@for f in scripts/*.sh tests/scripts/*.sh; do \
+	@for f in scripts/*.sh scripts/checks/*.sh tests/scripts/*.sh; do \
 		bash -n "$$f" && echo "ok  $$f"; \
 	done
 

@@ -205,7 +205,7 @@ jobs:
 
       - name: Shell syntax
         run: |
-          for f in scripts/*.sh tests/scripts/*.sh; do
+          for f in scripts/*.sh scripts/checks/*.sh tests/scripts/*.sh; do
             bash -n "$f" && echo "ok  $f"
           done
 
