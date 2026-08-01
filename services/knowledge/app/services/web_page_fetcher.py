@@ -28,6 +28,10 @@ CONNECT_TIMEOUT = 10.0  # seconds
 READ_TIMEOUT = 30.0  # seconds
 USER_AGENT = "Hill90-KnowledgeService/1.0"
 ALLOWED_PORTS = {80, 443}
+# shared_sources.title and shared_documents.title are both varchar(512). A page
+# with a longer <title> would otherwise turn a successful fetch into a database
+# error at insert time, which is a worse failure than a truncated title.
+MAX_TITLE_LENGTH = 512
 
 # Docker service hostnames that must never be fetched
 BLOCKED_HOSTNAMES = frozenset({
@@ -247,9 +251,27 @@ async def fetch_and_extract(url: str) -> dict[str, Any]:
     if not extracted or not extracted.strip():
         raise FetchError(f"Could not extract readable content from URL '{hostname}'")
 
-    # Try to get title from trafilatura metadata
-    metadata = trafilatura.extract(html, output_format="xmltei", include_comments=False)  # noqa: F841 - title falls back to hostname without reading this; looks unfinished
-    title = hostname  # fallback
+    # Title from the page's own metadata, falling back to the hostname.
+    #
+    # This used to call trafilatura.extract(html, output_format="xmltei") and
+    # never read the result, so `title` was ALWAYS the hostname. ingest.py
+    # consumes this value whenever the caller supplied no title or passed the URL
+    # as one, so the fallback was reachable from the UI — it just had not been hit
+    # yet. `extract_metadata` is the API that returns a document with .title;
+    # xmltei returns TEI XML with the title buried inside it.
+    title = hostname
+    try:
+        metadata = trafilatura.extract_metadata(html)
+    except Exception:
+        # A page whose metadata cannot be parsed should not fail an ingest whose
+        # content extracted cleanly a few lines above. Logged rather than silent.
+        metadata = None
+        logger.warning("web_page_metadata_extraction_failed", url=url, hostname=hostname)
+
+    if metadata is not None:
+        extracted_title = (metadata.title or "").strip()
+        if extracted_title:
+            title = extracted_title[:MAX_TITLE_LENGTH]
 
     logger.info(
         "web_page_fetched",

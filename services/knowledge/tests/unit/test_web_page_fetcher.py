@@ -19,6 +19,7 @@ import pytest
 from app.services.web_page_fetcher import (
     FetchError,
     MAX_RESPONSE_BYTES,
+    MAX_TITLE_LENGTH,
     _is_blocked_ip,
     _validate_url,
     fetch_and_extract,
@@ -437,11 +438,73 @@ class TestFetchAndExtract:
             mock_client_cls.return_value = _make_mock_client(resp)
 
             mock_traf.extract.return_value = "Hello world paragraph."
+            mock_traf.extract_metadata.return_value = MagicMock(title="Test Page")
 
             result = await fetch_and_extract("https://example.com/page")
 
             assert result["content"] == "Hello world paragraph."
             assert result["url"] == "https://example.com/page"
+            # The docstring promised a title and this assertion was missing, which
+            # is how the fetcher shipped returning the hostname for every page.
+            assert result["title"] == "Test Page"
+
+    async def _fetch_with_metadata(self, metadata: object) -> dict:
+        """Run a successful fetch with trafilatura's metadata mocked."""
+        html = "<html><head><title>ignored, trafilatura is mocked</title></head><body><p>Body.</p></body></html>"
+        with (
+            patch("app.services.web_page_fetcher.socket.getaddrinfo") as mock_dns,
+            patch("app.services.web_page_fetcher.httpx.AsyncClient") as mock_client_cls,
+            patch("app.services.web_page_fetcher.trafilatura") as mock_traf,
+        ):
+            mock_dns.return_value = PUBLIC_DNS
+            resp = _make_streaming_response(
+                headers={"content-length": "200", "content-type": "text/html"},
+                body=html.encode(),
+            )
+            mock_client_cls.return_value = _make_mock_client(resp)
+            mock_traf.extract.return_value = "Body."
+            if isinstance(metadata, Exception):
+                mock_traf.extract_metadata.side_effect = metadata
+            else:
+                mock_traf.extract_metadata.return_value = metadata
+            return await fetch_and_extract("https://example.com/page")
+
+    @pytest.mark.asyncio
+    async def test_title_comes_from_page_metadata(self) -> None:
+        """THE REGRESSION TEST. The title must be the page's, not the hostname.
+
+        The fetcher used to call trafilatura with output_format="xmltei" and never
+        read the result, so this returned "example.com" for every page ingested.
+        ingest.py adopts this value whenever the caller supplied no title, so the
+        wrong answer reached stored, user-visible content.
+        """
+        result = await self._fetch_with_metadata(MagicMock(title="What is Azure DevOps?"))
+        assert result["title"] == "What is Azure DevOps?"
+        assert result["title"] != "example.com"
+
+    @pytest.mark.asyncio
+    async def test_title_falls_back_to_hostname_when_page_has_none(self) -> None:
+        """A page with no usable title still gets a sensible one."""
+        assert (await self._fetch_with_metadata(MagicMock(title=None)))["title"] == "example.com"
+        assert (await self._fetch_with_metadata(MagicMock(title="   ")))["title"] == "example.com"
+        assert (await self._fetch_with_metadata(None))["title"] == "example.com"
+
+    @pytest.mark.asyncio
+    async def test_long_title_is_truncated_to_the_column_width(self) -> None:
+        """shared_sources.title and shared_documents.title are varchar(512).
+
+        Without the cap, a page with a longer <title> turns a successful fetch
+        into a database error at insert — a worse failure than a shortened title.
+        """
+        result = await self._fetch_with_metadata(MagicMock(title="T" * 900))
+        assert len(result["title"]) == MAX_TITLE_LENGTH == 512
+
+    @pytest.mark.asyncio
+    async def test_metadata_failure_does_not_fail_the_fetch(self) -> None:
+        """Content extracted cleanly; a metadata parse error must not lose it."""
+        result = await self._fetch_with_metadata(ValueError("malformed"))
+        assert result["content"] == "Body."
+        assert result["title"] == "example.com"
 
     @pytest.mark.asyncio
     async def test_web_page_fetcher_timeout(self) -> None:
