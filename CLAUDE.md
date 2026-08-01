@@ -123,10 +123,17 @@ were kept.
 
 ## Genuinely open
 
-**Whether LOCAL development moves onto the platform services.** Production is a
-tenant; local still runs the app's own Keycloak, Postgres and MinIO, so a local
-test proves the realm design and not the tenancy. Deliberate, not drift — see
-[`docs/decisions/local-parity-with-platform-services.md`](docs/decisions/local-parity-with-platform-services.md).
+**Local now runs on the platform's Keycloak — this entry used to say it did not.**
+`Verified 2026-08-01` by a completed authorization-code login: the default local path
+(`./scripts/local.sh up`) authenticates against **Hill90's** Keycloak, realm `platform`,
+and the token carries `resource_access.hill90-ui.roles`, `aud` including `hill90-api`, and
+no `admin` in `realm_access.roles`. `bash scripts/checks/tenant-login-platform-test.sh`
+re-proves it. The `auth` stack is gone from `local.sh`'s `STACKS`.
+
+**What is still open is the rest of it:** local Postgres and MinIO are still the app's own,
+and `--standalone` still runs the fork's Keycloak against a *copy* of the platform realm
+that has measurably drifted — so a standalone login proves the realm design, not the
+tenancy. See the follow-up issue on vendoring with a guard.
 
 ## Auth — what is true right now
 

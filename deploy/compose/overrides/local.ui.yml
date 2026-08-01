@@ -17,11 +17,18 @@ services:
     ports:
       - "${PORT_UI:-13000}:3000"
     environment:
-      AUTH_KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
+      # LOCAL TENANCY PARITY (2026-08-01). This points at HILL90'S Keycloak,
+      # realm `platform` — the same realm production uses — not at the app's own
+      # app-keycloak, which the tenant path no longer starts. A local login now
+      # exercises the tenancy, not just the realm design.
+      AUTH_KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
       # Still required: the browser resolves the Traefik hostname, this container
       # cannot, so the back-channel keeps using the service name.
-      KEYCLOAK_INTERNAL_ISSUER: http://app-keycloak:8080/realms/${KC_REALM:-platform}
-      KEYCLOAK_INTERNAL_URL: http://app-keycloak:8080
+      # `keycloak` is now unambiguous on the shared networks: the app's own
+      # Keycloak is gone, so this can only be Hill90's. That ambiguity was a
+      # measured defect — see the follow-up issue linked from README.
+      KEYCLOAK_INTERNAL_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
       AUTH_URL: http://${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
     labels:
       # Production routes the UI at the APEX domain (hill90.com), not app.<domain>.
