@@ -53,3 +53,6 @@ infra/secrets/keys/
 infra/secrets/*.env
 !infra/secrets/*.enc.env
 !infra/secrets/*.example
+
+# carrier audit output (diagnostic, never committed)
+services/api/carrier-audit.jsonl
