@@ -1095,3 +1095,120 @@ must precede every timeout; if a run times out with the counts in agreement, tha
 lead outright.
 
 **Nothing was disabled, retried or quarantined.**
+
+---
+
+# Round five, 2026-08-03: the queue lead is refuted
+
+**15 runs of half A, 1 failure. 615 test executions with per-test queue accounting.**
+Nothing skipped, retried, reordered or quarantined.
+
+Round four closed by naming the next instrument and, importantly, the condition that would
+kill the lead: *count calls made against `Once` values queued, per test; a timeout with the
+counts in agreement refutes this outright.* The instrument was built. **The lead is dead —
+on stronger evidence than the condition asked for.**
+
+## The result
+
+| | executions | with a DRAINED queue |
+|---|---|---|
+| the 14 green runs | 574 | **280 (49%)** |
+| the 1 failing run | 41 | **20 (49%)** |
+| total | 615 | 300 (49%) |
+
+**A drained queue is the normal, everyday state of this suite.** Half of all test executions
+make more calls than they queued `Once` values for, on runs that pass. Examples from a fully
+green run, cross-checked by hand against the source:
+
+```
+DRAINED: 2 calls vs 1 queued — POST /agents creates agent with user role
+DRAINED: 2 calls vs 1 queued — DELETE /agents/:id works for admin
+DRAINED: 9 calls vs 1 queued — POST /agents/:id/start starts agent
+```
+
+The rate is **identical to the percentage point** on passing and failing runs. It has no
+discriminating power whatsoever.
+
+## What that does to round four's mechanism
+
+Round four proved, and this document still records, that a drained queue *can* hang a
+request: the mock returns `undefined`, the handler reads `.rows` off it and throws, and
+Express 4.22.1 does not catch an async handler's rejection. That chain is real and was
+measured.
+
+**It is not what happens here.** If it were, 49% of test executions would hang. They do not.
+So on the paths where the queue drains, one of two things must be true — the extra calls
+happen *after* the response is sent, or the handler never dereferences the result. The
+record's very first section already described post-response work outliving the request; that
+is the reading consistent with this measurement, and "drain causes the failure" is not.
+
+**Do not resurrect this lead on the strength of the round-four mechanism.** The mechanism is
+sound and the premise is false: the drain is ubiquitous and benign.
+
+## Honesty about the stated condition
+
+The condition named in round four was a **timeout** with the counts in agreement. That exact
+observation was not obtained: the one failure in these 15 runs was
+`routes-agents-events › SSE follow forwards a late-arriving event without reconnect`, an
+assertion failure in a file the shim did not cover, not a timeout in the instrumented file.
+
+The lead is nonetheless refuted, by a disconfirmation the condition did not anticipate and
+which is stronger than it: the proposed cause occurs at an identical rate on runs that pass.
+A cause that is present in half of all green executions explains nothing.
+
+## The instrument, and a hook that does not exist
+
+Two things are worth recording so the next person does not spend the time again.
+
+**A global `jest.fn` hook is not available in this setup.** Patching `jest.fn` from
+`setupFilesAfterEnv` intercepts **0** of the suite's mock creations; so does patching from
+`setupFiles`; so does patching `ModuleMocker.prototype.fn` resolved from the project's own
+`node_modules`. Measured, all three:
+
+```
+QA-DBG  jest.fn() calls intercepted: 0      (setupFilesAfterEnv)
+QA-DBG3 mocks created via ModuleMocker: 0   (prototype patch)
+QA-DBG4 intercepted via setupFiles: 0
+```
+
+The test module receives a `jest` object distinct from the setup file's, and the mocker's
+`fn` is bound before setup runs. **No global auto-instrumentation of mocks is possible this
+way.** The broken instrument is deliberately not committed; a diagnostic that silently
+reports `mocks: 0` is worse than none, and it read exactly that against a file using
+`Once(` fourteen times.
+
+What worked was a **counting Proxy around the file's own `mockQuery`**, applied to the
+working tree for the measurement and reverted afterwards, so the committed suite is
+unchanged. It preserves behaviour exactly — it returns whatever the underlying mock returns,
+including `undefined` on a drained queue — and counts calls, `Once` values and defaults.
+
+**Its positive control caught a real bug in it.** jest implements
+`mockResolvedValueOnce(v)` as `mockImplementationOnce(() => Promise.resolve(v))`, so wrapping
+both members of that pair counts one queued value **twice** — which makes an over-called mock
+read as balanced, the precise failure the instrument exists to detect. A synthetic control
+(2 calls against 1 queued value must read drained; 2 against 2 must not; a non-`Once` default
+must not) failed, the re-entrancy guard was added, and it passed. Without that control the
+49% above would have been reported as 0%.
+
+## Where the search space stands
+
+Eliminated by measurement, cumulative:
+
+- `process.env` and `globalThis` as carriers
+- "symptoms are purely logical" — timeout, 401 and 400 are in the set
+- order-dependence, n=80; the runInBand-worse-than-workers asymmetry, n=80
+- CPU starvation as the timeout mechanism (round four, free loop during the only ≥5s execution)
+- "drained queue → promise never resolves" (round four — it returns `undefined`)
+- **a drained queue as the cause of the flake** — 49% on green runs, 49% on the failing one
+
+**Still unexplained, and deliberately not folded together:**
+
+- **The 501/401/400 class.** Untouched by this round and by round four. Nothing measured so
+  far bears on it. It should not be attached to the queue mechanism, which is now known to be
+  benign, nor to starvation, which is eliminated.
+- **The SSE class.** The failure caught here — a late-arriving event not forwarded — and
+  round four's finding that `INFERENCE_POLL_MS = 3000` sits ~1s under jest's 5000ms ceiling
+  both point at `routes-agents-events`, which remains the most frequent victim across every
+  round. That file's timing, not its state, is the last thing pointed at by evidence.
+
+**Nothing was disabled, retried or quarantined.**
