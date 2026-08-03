@@ -1,8 +1,7 @@
 # Secret layout
 
-What each secret this application needs is for, and how the vault KV paths were
-arranged. Relocated from a status document on 2026-07-31 because it is the only written
-description of the layout — the working notes around it had expired, this had not.
+What each secret this application needs is for, and how the vault KV paths are
+arranged.
 
 Read alongside [`infra/secrets/prod.enc.env.example`](../../infra/secrets/prod.enc.env.example),
 which lists the keys, and
