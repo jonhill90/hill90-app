@@ -19,6 +19,7 @@ import {
   removeAgentVolumes,
   resolveAgentNetwork,
 } from '../services/docker';
+import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import {
   generateAgentAkmToken,
   getAkmEnvVars,
@@ -1763,10 +1764,40 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         }, INFERENCE_POLL_MS);
 
         let buffer = '';
+        // Bytes held in the trailing INCOMPLETE line. On this path the hazard is
+        // not the total — a follow stream is meant to run long — it is a line
+        // that never ends, which `buffer` would grow to hold forever.
+        let pendingBytes = 0;
+        // Destroying a stream does not un-queue the 'data' events already
+        // scheduled, so without this the abort path runs twice and the second
+        // res.write() throws "write after end".
+        let aborted = false;
         stream.on('data', (chunk: Buffer) => {
+          if (aborted || res.writableEnded || res.destroyed) return;
+          pendingBytes += chunk.length;
           buffer += chunk.toString('utf-8');
           const lines = buffer.split('\n');
           buffer = lines.pop() || ''; // keep incomplete line in buffer
+          if (lines.length > 0) {
+            // Something was consumed, so only the leftover is still pending.
+            pendingBytes = Buffer.byteLength(buffer);
+          }
+          if (pendingBytes > MAX_READ_BYTES) {
+            // Explicit, not silent. A stream that simply stopped emitting would
+            // be indistinguishable from an idle agent.
+            aborted = true;
+            console.error(`[agents] SSE aborted: unterminated line over ${MAX_READ_BYTES} bytes`);
+            res.write(
+              `event: error\ndata: ${JSON.stringify({
+                error: 'Event log line too large',
+                detail: `A single log line exceeded the ${MAX_READ_BYTES}-byte read limit; the stream was stopped.`,
+              })}\n\n`,
+            );
+            clearInterval(pollInterval);
+            (stream as unknown as { destroy?: () => void }).destroy?.();
+            res.end();
+            return;
+          }
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed) continue;
@@ -1808,11 +1839,26 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         'tail', '-n', String(tail), '/var/log/agentbox/events.jsonl',
       ]);
 
-      const chunks: Buffer[] = [];
-      stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-      stream.on('end', async () => {
+      let rawBuf: Buffer;
+      try {
+        // Bounded as it arrives. `tail -n` limits how many LINES are asked for;
+        // nothing limits how long one line is, and the agent writes this file.
+        rawBuf = await collectBounded(stream);
+      } catch (err) {
+        if (err instanceof ReadTooLargeError) {
+          res.status(413).json({
+            error: 'Event log too large',
+            detail: `The agent's event log exceeds the ${MAX_READ_BYTES}-byte read limit. Lower ?tail= or export a narrower range.`,
+          });
+          return;
+        }
+        res.status(500).json({ error: 'Failed to read events', detail: (err as Error).message });
+        return;
+      }
+
+      await (async () => {
         try {
-          const raw = Buffer.concat(chunks).toString('utf-8');
+          const raw = rawBuf.toString('utf-8');
           const containerEvents = raw
             .split('\n')
             .map(line => line.trim())
@@ -1845,10 +1891,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
             res.status(500).json({ error: 'Failed to merge events', detail: err.message });
           }
         }
-      });
-      stream.on('error', (err: Error) => {
-        res.status(500).json({ error: 'Failed to read events', detail: err.message });
-      });
+      })();
     } catch (err: any) {
       res.status(500).json({ error: 'Failed to read events', detail: err.message });
     }
@@ -1892,13 +1935,7 @@ router.get('/:id/events/export', requireRole('user'), async (req: Request, res: 
       const stream = await execInContainer(agent.agent_id, [
         'tail', '-n', String(tail), '/var/log/agentbox/events.jsonl',
       ]);
-      const chunks: Buffer[] = [];
-      await new Promise<void>((resolve, reject) => {
-        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-        stream.on('end', () => resolve());
-        stream.on('error', reject);
-      });
-      const raw = Buffer.concat(chunks).toString('utf-8');
+      const raw = (await collectBounded(stream)).toString('utf-8');
       containerEvents = raw
         .split('\n')
         .map(line => line.trim())
@@ -1906,6 +1943,16 @@ router.get('/:id/events/export', requireRole('user'), async (req: Request, res: 
         .map(line => { try { return JSON.parse(line); } catch { return null; } })
         .filter(e => e !== null);
     } catch (err) {
+      if (err instanceof ReadTooLargeError) {
+        // Must NOT fall through to the generic catch below. That one logs and
+        // continues with an empty containerEvents, which would hand back a CSV
+        // that looks complete and silently contains none of the agent's events.
+        res.status(413).json({
+          error: 'Event log too large',
+          detail: `The agent's event log exceeds the ${MAX_READ_BYTES}-byte read limit. Lower ?tail= to export a narrower range.`,
+        });
+        return;
+      }
       console.error('[agents] CSV export container events failed:', err);
     }
 
@@ -2030,17 +2077,23 @@ router.get('/:id/logs', requireRole('admin'), async (req: Request, res: Response
 
     // Non-streaming: return log text
     const stream = await getContainerLogs(agent.agent_id, { tail, follow: false });
-    const chunks: Buffer[] = [];
-    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-    stream.on('end', () => {
-      const raw = Buffer.concat(chunks);
-      const lines = stripDockerHeader(raw);
-      const filtered = filterLogLines(lines, search, since, until);
-      res.json({ logs: filtered.join('\n') });
-    });
-    stream.on('error', (err: Error) => {
-      res.status(500).json({ error: 'Failed to read logs', detail: err.message });
-    });
+    let logBuf: Buffer;
+    try {
+      logBuf = await collectBounded(stream);
+    } catch (err) {
+      if (err instanceof ReadTooLargeError) {
+        res.status(413).json({
+          error: 'Log too large',
+          detail: `The container log exceeds the ${MAX_READ_BYTES}-byte read limit. Lower ?tail= or narrow the range.`,
+        });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to read logs', detail: (err as Error).message });
+      return;
+    }
+    const lines = stripDockerHeader(logBuf);
+    const filtered = filterLogLines(lines, search, since, until);
+    res.json({ logs: filtered.join('\n') });
   } catch (err) {
     console.error('[agents] Logs error:', err);
     res.status(500).json({ error: 'Failed to get logs' });
