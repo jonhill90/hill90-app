@@ -1,0 +1,44 @@
+# The Hill90 PLATFORM containers this tenant expects to find running.
+#
+# ---------------------------------------------------------------------------
+# THIS LIST IS A DUPLICATE. It is owned by the Hill90 repository, which defines
+# these containers, and copied here by hand. IT WILL DRIFT. When the platform
+# adds or renames a container this file will be wrong, and the deploy will say
+# so — loudly, and possibly wrongly.
+#
+# That is a deliberate trade and it is not free. The alternative is for this
+# tenant to read the platform's compose files at deploy time, which couples the
+# tenant to the platform's internals and crosses a tenancy boundary this estate
+# has been careful about. A stale duplicate that announces itself is preferable
+# to a live dependency on someone else's file layout.
+#
+# Tracked in hill90-app for the duplication; the Hill90 side needs a check that
+# the two lists agree, because a duplicated list nobody compares is its own
+# defect.
+#
+# SOURCE: `container_name:` entries in Hill90's deploy/compose/prod/*.yml, read
+# once by hand at Hill90 340d8847 (2026-08-03). Seventeen are declared;
+# `openbao-init` is excluded because it is `restart: "no"` running a one-shot
+# chown and is not a long-lived container. Sixteen remain, which matches the
+# count this repo's CLAUDE.md records as verified on the host 2026-07-31.
+#
+# NAMES ARE COMPARED EXACTLY. `blackbox-exporter` is not `blackbox`: a check
+# that matched on substrings would call a running container missing, or worse,
+# call a missing one present.
+# ---------------------------------------------------------------------------
+alertmanager
+blackbox-exporter
+cadvisor
+grafana
+keycloak
+loki
+minio
+node-exporter
+openbao
+portainer
+postgres
+postgres-exporter
+prometheus
+promtail
+tempo
+traefik
