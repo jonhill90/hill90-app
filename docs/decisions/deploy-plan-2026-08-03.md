@@ -4,7 +4,9 @@ Companion to [`hardening-batch-2026-08-03.md`](hardening-batch-2026-08-03.md), w
 records *what is in the batch*. This records *how it goes out*, written before the
 deploy rather than reconstructed after it.
 
-**Status: not run.** Nothing here has been executed.
+**Status: EXECUTED 2026-08-03, in three steps rather than the two planned.**
+What follows is the plan as written; the record of what actually happened is at the
+end, and where the two differ the record is right.
 
 ## THE CUT — `435f87a`
 
@@ -225,3 +227,86 @@ no `mem_limit`, on a VPS shared with the platform. Every fix in this batch narro
 can be *consumed*; none puts a ceiling on the *container*. Until that lands, a member of
 this class that nobody has found yet is still a host-level event rather than one
 container restarting.
+
+---
+
+# What actually happened
+
+Written after the fact, and kept separate from the plan above so the plan is not
+quietly edited into agreement with the outcome.
+
+## Three steps, not two
+
+| Step | Run | `origin/main` before | Host after | Shipped |
+|---|---|---|---|---|
+| 1. `api` | `30849633039` | `435f87a` | **`435f87a`** | #148, #153 |
+| 2. `ui` | `30849952163` | `542676f` | **`542676f`** | #146, #147, #149, #152 |
+| 3. `api` follow-up | `30850428930` | `b9c6a27` | **`b9c6a27`** | #150, #156 |
+
+All three green, all gates passed, Hill90's baseline unchanged each time.
+
+## The cut did not hold, and step 3 is the consequence
+
+`origin/main` moved during **every** step:
+
+```
+step 1:  435f87a -> b479e2c   (#156 landed mid-run)
+step 2:  542676f -> 542676f   (steady)
+step 3:  b9c6a27 -> 8f6dfab   (#159 landed mid-run)
+```
+
+In step 1 the host reset before #156 landed, so the declared cut held — **by winning a
+race, not because anything enforced it**. See
+[#158](https://github.com/jonhill90/hill90-app/issues/158): the workflow takes no ref
+input, so a deploy ships whatever `origin/main` is when the reset runs and no artifact of
+the run records which commit that was.
+
+**#150 and #156 shipped in a follow-up deploy, not in the cut.** They were explicitly
+excluded — #150 was open and dirty on another lane's branch, #156 was open — and both
+merged afterwards. Rather than leaving merged api code sitting in the checkout unrun,
+which is precisely the drift the alarm exists to catch, they were deployed as step 3.
+The record says follow-up because that is what happened.
+
+## Verification: what was actually proved
+
+| Fix | Result | Kind |
+|---|---|---|
+| #148, #153, #150, #156 (`api`) | commits present, no surface regression | **Containment only** |
+| #146, #147, #149, #152 (`ui`) | commits present, no surface regression | **Containment only** |
+
+```
+api.hill90.com/health          200  {"status":"healthy","service":"api"}
+api.hill90.com/health/detailed 401   #136 tripwire intact
+hill90.com                     200
+hill90.com/api/services/health 401   #134 tripwire intact
+hill90.com/api/agents          401   cache-control: private, no-store
+```
+
+**Nothing in this batch was verified behaviourally, and the plan was wrong to say
+otherwise.** It claimed #146 could be proved from outside by posting an oversized body.
+It cannot:
+
+```
+POST 3MB to /api/profile, anonymous  ->  401 {"error":"Not authenticated"}
+```
+
+The session gate fires before the body is read — correct design, and deliberate — so an
+anonymous caller never reaches the cap. The same is true of #150 and #156: an anonymous
+SSE request returns 401 and never reaches either bound. **Every bound in this batch sits
+behind authentication, so no external check can reach any of them.** That is not a gap in
+the deploy; it is what "containment only" always meant, and the plan overstated it by one.
+
+Still unverified and human-only: the terminal path (#148), and #149's rendering, which
+needs a **non-admin** session because an admin sees the old view either way.
+
+## The alarm's verdict, and its blind spot
+
+After step 3 it reports `PASS`, with one docs-only commit outstanding (#159, merged
+mid-run) correctly classified as not actionable.
+
+But after step 2 it printed `PASS: what is running is what was merged` while two merged
+api fixes were in the checkout and **not in the running api image** — it reads
+`git rev-parse HEAD`, which is the checkout, and every deploy resets the whole checkout
+while rebuilding one stack. The instrument built to catch this family could not see it.
+Recorded in [#158](https://github.com/jonhill90/hill90-app/issues/158); the smallest fix
+is to narrow the sentence it prints, which is a claim it cannot support.
