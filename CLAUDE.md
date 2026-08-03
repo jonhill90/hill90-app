@@ -209,8 +209,13 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   agent networks, so it precedes `ai` and `knowledge`.
 - **`minio` is retired and `deploy.sh` refuses it**, like `db` and `auth` — since #91.
   Production object storage is the platform's `minio`; the app's `app-minio` has been
-  stopped since 2026-07-31 01:40:43 UTC and its removal window opens
-  **2026-08-01 01:41 UTC**. *(This entry said the opposite for about an hour: written
+  stopped since 2026-07-31 01:40:43 UTC. **That removal window OPENED on 2026-08-01
+  01:41 UTC and nothing has been done — `Verified 2026-08-03`:** the container still
+  exists (`app-minio  Exited (0) 3 days ago`) and so does `prod_app-minio-data`.
+  This entry read "the window opens" for two days after it had opened, which invited
+  a cold reader to treat a decision that is due as one that is pending. **Deleting
+  the volume is still a deliberate, irreversible decision nobody has taken**, and
+  this note is not an argument for taking it. *(This entry said the opposite for about an hour: written
   when `minio` was still in `DEPLOY_REST`, and left standing when #91 removed it.)*
   Its resurrection was the quietest of the three — both backends are MinIO, so
   `storage.hill90.com` would have answered 200 either way and looked fine.
