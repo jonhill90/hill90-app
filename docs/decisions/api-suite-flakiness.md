@@ -3266,3 +3266,132 @@ document's own arithmetic puts ~120 runs per arm behind separating 15% from 30%.
 statement is *no effect detected under a valid design*, not *no effect*. A reviewer who would
 rather hold any timing change to this suite until the flake class is understood has a
 defensible position, and the change is small to revert.
+
+---
+
+## PREDICTION, recorded before the retrospective pass
+
+Written and committed **before** looking at the evidence, so this is a prediction and not a
+description of what was found. The commit order in git is the proof; if the next section
+agrees with this one, that ordering is the only thing separating a finding from a story.
+
+**The hypothesis: 400, 401 and timeout are not three classes. They are one mechanism — a
+response arriving from a socket that is not ours — of which the foreign daemon
+(`LogiPluginService`, `websocket-sharp`, answering 501 on the ephemeral range) was the first
+instance identified.**
+
+The reasoning is the shape of every recorded symptom:
+
+```
+403 → 404      201 → 400      501 → 404
+200 → 400      200 → 404      timeout
+```
+
+Each is *expected X, received Y* where Y is a **well-formed answer to a different question**.
+This record already insists they are "not a crash, not a timeout, not a connection error" — so
+they are real HTTP responses that belong to somebody else's request. The timeout is the same
+event with the response never arriving rather than arriving wrong; it needs no separate theory.
+
+**Why it looked like three classes: the assertion captured the status code and nothing else.**
+Not the responder, not the socket, not whether the process was ours. Given only a number, a
+single mechanism with a varying responder *must* present as a family of unrelated classes. The
+taxonomy is an artefact of the instrument, in the same way the first `#117` recorder gave one
+verdict for two states — there one hook collapsed two states into one answer, here one field
+expands one state into many.
+
+### How this is falsified
+
+**A captured occurrence bearing a CORRECT identity stamp with a wrong body.** That would mean
+the response was ours, from our process, and simply wrong — a genuine logic race, and this
+hypothesis is dead. Nothing else falsifies it; in particular a run of green tests does not.
+
+### What the retrospective can and cannot do, said in advance
+
+The six original 401s **predate the identity stamp**, and this record already states they cannot
+be classified retrospectively. So the likely outcome is *unclassifiable*, and that is where the
+trap is:
+
+> **"Cannot classify retrospectively" must not become "no evidence of a problem."** They are
+> different sentences. The first is a statement about the instrument; the second is a claim
+> about the world, and nothing here would support it.
+
+I am the party most likely to make that slide, because the flattering reading — *nothing found,
+therefore probably fixed by the port work* — is the one that suits the hypothesis above. It is
+recorded here so the next reader can hold me to it, and so I can. **42 clean runs is not
+evidence of absence** when this document's own arithmetic puts ~300 runs behind a ~1% event.
+
+If the retrospective cannot classify, the correct action is not another 42 runs. It is the `#117`
+move: make sure the next occurrence carries the identity field, prove the recorder works in
+**both** arms, and wait. Waiting with a proven recorder is a result.
+
+## RETROSPECTIVE RESULT — the prediction is partly refuted
+
+Written after the pass. The prediction above is in the preceding commit; this is a separate one,
+so the order stands on its own.
+
+### 1. It cannot be classified retrospectively — confirmed, and that is a statement about the instrument
+
+Every 400, 401 and timeout in this record predates the identity stamp. This document already
+said so; the pass confirms it rather than discovering it. **That is not evidence of absence, and
+it is not support for the hypothesis.** It is the absence of a field, in occurrences that
+happened before anyone thought to record it.
+
+### 2. One reading of the prediction is REFUTED by data already here
+
+The 60-run table shows the two non-501 failures occurring with **zero foreign responses in the
+same run**:
+
+| Run | foreign responses | received | class |
+|---|---|---|---|
+| 3 | 8 | 501 | 501 |
+| 43 | 8 | 501 | 501 |
+| **26** | **0** | — | **TIMEOUT** |
+| **45** | **0** | 401 | **401** |
+
+So the **foreign-daemon** variant does not explain the 401 or the timeout. The daemon was
+absent from both runs. My prediction named the daemon as "the first instance identified" of the
+mechanism, and on the strength of this table the daemon reading is dead for these two classes.
+
+### 3. The sibling-worker variant survives, and is demonstrated CAPABLE — not demonstrated as the cause
+
+The identity guard's own control produced exactly this:
+
+```
+✕ B: FOREIGN STAMP — a sibling worker answering must fail this test
+     FOREIGN STAMP  HTTP/1.1 401 Unauthorized  from 127.0.0.1:59606
+         produced by 99999:9, this worker is 78273:1
+```
+
+A **spurious 401 from a sibling jest worker**, with a different keypair and route table. That is
+the mechanism I predicted, with a different responder — and it is proven *possible*. It has
+never been caught in the wild. "Capable of producing the symptom" and "produced the symptom" are
+different claims and only the first is established.
+
+**Net: the hypothesis is narrowed, not confirmed.** One responder is excluded; another remains
+live and unobserved. It is still falsified by the same single thing — a correct stamp with a
+wrong body.
+
+### 4. The gap that actually blocks progress: the guard has NO COMMITTED CONTROL
+
+`jest.identityguard.js` is wired through `jest.config.js` and runs on every suite. Searching the
+tree for a test that exercises it returns **nothing**. Its three arms were forced by hand during
+the investigation and written up here; no file keeps them forced.
+
+That matters more than it sounds, because this record documents **two holes already found in
+this guard after it was working**: the recycled-port hole, and a websocket false-positive fix
+that suppressed a missing stamp. Both were found by accident rather than by a control.
+
+So the instrument this whole investigation now depends on is in exactly the state the `#117`
+recorder was in before it was controlled: believed good, never watched working, and with a
+history of silently losing an arm. **A guard that has lost an arm reports clean, and clean is
+the answer that would flatter the hypothesis above.**
+
+### What happens next, and what must not
+
+The `#117` move, applied here: give `jest.identityguard.js` a committed control that forces all
+three arms — ours, foreign stamp, no stamp — prove it fails on each, and only then let a run of
+green mean anything. Then wait.
+
+**Not** another 42 runs. This document's arithmetic puts ~300 behind a ~1% event, and 42 clean
+runs with an unproven guard is two unknowns multiplied together.
+
