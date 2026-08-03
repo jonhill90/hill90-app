@@ -204,10 +204,21 @@ Three parts were **not** spent, and were relocated rather than deleted:
 
 **The rule applied, and worth applying next time: decision records preserve, status
 trackers expire.** A record explaining *why* something was decided or rebuilt stays, even
-where its language has aged — `docs/decisions/infra-app-separation.md` still says "the AI
-agent application is shelved", which is a statement of what was decided at the time and
-is correct as such. A tracker describing *what state things were in* does not survive its
-own timestamp.
+where its language has aged. A tracker describing *what state things were in* does not
+survive its own timestamp.
+
+**A refinement, from applying it again on 2026-08-03.** The example this paragraph used to
+give was `docs/decisions/infra-app-separation.md`, on the grounds that "the AI agent
+application is shelved" was correct as a statement of what was decided at the time. That
+held while the file was merely *aged*. It stopped holding once the file was
+*contradicted*: the shelving never happened, the app was extracted and deployed instead,
+and the document also carried an implementation plan — two generic boilerplate
+repositories — that was abandoned entirely. It is now a **stub** that keeps the decision
+and drops the abandoned plan, because six documents cite the path and a deletion would
+have broken all of them.
+
+So the rule has a third clause: **a decision that was reversed by events is preserved as a
+decision and marked superseded — not deleted, and not left reading as current.**
 
 Nothing was unpublished by this. Every removed line remains in `git log`.
 

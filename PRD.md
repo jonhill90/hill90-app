@@ -11,8 +11,9 @@ extraction SHA must be captured at run time, not copied from here.
 
 ## What this repo is
 
-A preserved, standalone copy of the Hill90 AI agent application, carrying its own
-git history, currently **shelved**.
+A standalone copy of the Hill90 AI agent application, carrying its own git
+history. Extracted 2026-07-26; **running in production as a tenant of the Hill90
+platform since 2026-07-29**.
 
 Hill90 grew into a combined repository — infrastructure automation (Ansible
 bootstrap, Traefik, SOPS/OpenBao secrets, Tailscale, LGTM observability) sitting
@@ -68,9 +69,13 @@ optimized for **resumability**, not for running today.
 
 ## Non-goals
 
+**These were the non-goals of the EXTRACTION, as scoped in July 2026 — not
+statements about the app today.** Every one of them has since been done: the
+stack boots, the databases are provisioned, and it is deployed behind Traefik.
+They are kept because the scope discipline is the point of the document.
+
 - **Running it.** No attempt to boot the stack, provision databases, or prove a
-  health check. The app is shelved; making it run is unbounded work on code with
-  no current consumer.
+  health check — at the time, unbounded work on code with no consumer.
 - **Fixing it.** Known breakage is *documented*, not repaired.
 - **Deploying it.** No VPS, no Traefik routing, no secrets provisioning. The
   deploy tooling (`scripts/deploy.sh`, the workflows, SOPS/OpenBao) stays in
@@ -81,35 +86,26 @@ optimized for **resumability**, not for running today.
   lane's verification besides.
 - **Carrying every branch.** `main` only.
 
-## End state: shelved, with a resurrection checklist
+## End state: extracted and deployed
 
-The repo ships as an archive, not a working project:
+The extraction produced a repository that runs, and it has been running in
+production since 2026-07-29 — see [`README.md`](README.md) for the dated status
+table, which is the single home for facts with a shelf life.
 
-- `README.md` states in its first paragraph: *shelved — not verified runnable
-  since June 2026.*
-- `RESURRECTION.md` (**removed 2026-07-31**; its durable content lives in
-  `docs/reference/secret-layout.md` and `docs/extraction/PROVENANCE.md`) listed every
-  known-broken thing, each with its file path and
-  what would have to change. This is the deliberate middle path: no time spent
-  fixing, but the diagnostic knowledge gathered during extraction is written down
-  while it is cheap rather than rediscovered later at high cost. Seed contents:
-  - `deploy/compose/dev/docker-compose.yml:55` builds
-    `context: ../../../services/auth` — a directory deleted long ago. The dev
-    compose cannot build as written.
-  - The Keycloak realm (`platform/auth/keycloak/hill90-realm.json`) hardcodes
-    `hill90.com` hostnames, the `hill90-ui` / `hill90-api` clients, and a
-    redirect to `https://hill90.com/api/auth/callback/keycloak`. Any new host
-    needs the realm re-pointed.
-  - Database provisioning is split across `platform/data/postgres/init.sh`
-    (creates `keycloak`, `hill90_api`, `hill90_akm`, `hill90_litellm`) and
-    `scripts/provision-{akm,litellm}-db.sh`. Migrations are applied by the
-    services themselves.
-  - Secrets came from OpenBao with a SOPS fallback, neither of which comes with
-    the app. `deploy/compose/prod/.env.example` is the only remaining
-    description of the required variables, and it still carries infra keys.
-  - `services/cli` and `services/discord-bot` have no deploy wiring at all.
-- CI exists but is gated to `workflow_dispatch` — present and one click away,
-  never firing unbidden on an archived repo.
+**This section used to say the opposite.** It described the repo as "shelved, with
+a resurrection checklist" and asserted that `README.md`'s first paragraph read
+*"shelved — not verified runnable since June 2026"*. Both statements outlived the
+thing they described: `RESURRECTION.md` was removed on 2026-07-31, and README's
+first paragraph now says the app is deployed and healthy. A document making a
+checkable claim about a sibling file, wrongly, in a public repository, is worse
+than one that says nothing.
+
+The diagnostic seed list that lived here was re-checked before removal rather than
+deleted on sight. Most of it had expired: `deploy/compose/dev/` and
+`services/auth` no longer exist, and CI is no longer gated to `workflow_dispatch`
+— it runs on every pull request. What remains true about deploy coverage belongs
+in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the stack list in `scripts/deploy.sh`,
+which are maintained; a frozen copy in a requirements document is not.
 
 ## What "successfully extracted" means
 
