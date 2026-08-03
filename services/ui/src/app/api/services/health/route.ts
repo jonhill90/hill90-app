@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { auth } from '@/auth';
 
 const SERVICES = [
   { name: 'API', url: process.env.API_URL || 'http://localhost:3000', path: '/health' },
@@ -34,9 +35,27 @@ async function checkService(service: { name: string; url: string; path: string }
 }
 
 export async function GET() {
+  // The gate has to be here, in the handler. src/middleware.ts matches page
+  // paths only — /dashboard, /admin, /agents and the rest — and never /api, so
+  // no middleware runs in front of this route. Sibling routes are gated inside
+  // their handlers too, through proxyToApi or an explicit auth() call; this one
+  // had neither and answered anonymous callers in production with the internal
+  // service inventory.
+  //
+  // Authentication, not the admin role: DashboardClient calls this and any
+  // signed-in user reaches the dashboard. The admin-gated equivalent already
+  // exists at /api/admin/services/health.
+  const session = await auth();
+  if (!(session as { accessToken?: string } | null)?.accessToken) {
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  }
+
   const results = await Promise.all(SERVICES.map(checkService));
   return NextResponse.json(
     { services: results },
-    { headers: { 'Cache-Control': 'public, max-age=10' } },
+    // private, not public: the response is per-session, and a shared cache in
+    // front of the site must not store internal infrastructure state and serve
+    // it to whoever asks next.
+    { headers: { 'Cache-Control': 'private, max-age=10' } },
   );
 }
