@@ -1667,6 +1667,12 @@ async function getRecentInference(
   return rows.reverse(); // Oldest first
 }
 
+// The most log lines and inference rows one request may ask for. Both
+// /:id/events and /:id/events/export read `?tail=` and feed it to `tail -n` and
+// to a SQL LIMIT, so the bound belongs in one place rather than in two literals
+// that already disagreed once.
+const MAX_EVENT_TAIL = 5000;
+
 // Get agent events (structured activity timeline)
 router.get('/:id/events', requireRole('user'), async (req: Request, res: Response) => {
   try {
@@ -1691,8 +1697,16 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
       return;
     }
 
+    // Ceiling, not just a floor. This value goes two places on one request:
+    // `tail -n <n>` inside the agent container, whose output the one-shot path
+    // buffers whole before Buffer.concat, and the LIMIT of the model_usage query
+    // in getRecentInference. Unbounded, one signed-in user could ask for the
+    // agent's entire log and inference history in a single response — and
+    // app-api declares no mem_limit, so the ceiling was the VPS's memory, shared
+    // with the platform. 5000 is the bound /events/export already applies to the
+    // same parameter; the two must not disagree.
     const parsedTail = parseInt(req.query.tail as string);
-    const tail = Number.isNaN(parsedTail) ? 100 : Math.max(0, parsedTail);
+    const tail = Number.isNaN(parsedTail) ? 100 : Math.max(0, Math.min(parsedTail, MAX_EVENT_TAIL));
     const follow = req.query.follow === 'true';
 
     if (follow) {
@@ -1870,7 +1884,7 @@ router.get('/:id/events/export', requireRole('user'), async (req: Request, res: 
     }
 
     const parsedTail = parseInt(req.query.tail as string);
-    const tail = Number.isNaN(parsedTail) ? 500 : Math.max(0, Math.min(parsedTail, 5000));
+    const tail = Number.isNaN(parsedTail) ? 500 : Math.max(0, Math.min(parsedTail, MAX_EVENT_TAIL));
 
     // Collect container events
     let containerEvents: Record<string, unknown>[] = [];
