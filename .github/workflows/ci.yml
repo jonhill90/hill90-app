@@ -73,7 +73,7 @@ jobs:
             args: ''
           - service: services/ai
             args: ''
-          # services/knowledge/tests/integration (18 files) needs a live
+          # services/knowledge/tests/integration (19 files, 98 tests) needs a live
           # pgvector Postgres on localhost:5432 and is excluded here. Run it
           # against the local stack instead — see README, Running locally.
           - service: services/knowledge
