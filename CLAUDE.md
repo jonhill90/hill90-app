@@ -77,6 +77,12 @@ Most of these were bought with a real bug. They are not style preferences.
 
 ## Ground rules for changing this repo
 
+- **State what becomes true at a date, not that the date is coming.** A future-tense
+  sentence reads as *not yet due* forever, so it fails silently the moment it passes —
+  and a `Verified` stamp on one is misleading in both directions at once: recently
+  checked, and describing a moment that has since arrived. Write "expired 2026-08-01;
+  after that it is an untaken decision" rather than "expires 2026-08-01". The first is
+  true before and after; the second is only true before.
 - **Verify against the host, then date the claim.** Anything perishable —
   container counts, health, what is deployed — gets a `Verified <UTC timestamp>`
   next to it, or it goes in README's table and is linked. A dated claim that has
