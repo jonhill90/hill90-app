@@ -285,6 +285,30 @@ jobs:
             deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
             "cd ${VPS_APP_PATH} && bash scripts/deploy.sh preflight prod"
 
+      # The preflight is a GUARD, so it runs from THIS checkout, piped over ssh —
+      # not from the copy lying on the VPS.
+      #
+      # It used to run the host's copy, which is the copy `git reset --hard` has
+      # not updated yet, so the guard protecting a deploy was always one deploy
+      # older than the deploy it protected. On 2026-08-03 that bit: a SIGPIPE bug
+      # fixed in the repository could not reach the host, because the only thing
+      # that updates the host is the deploy the bug was blocking. A guard read
+      # from a stale copy is the same rot this repo keeps finding in checks that
+      # cannot fire.
+      #
+      # `bash -s` runs the script we just checked out, on the host, in the
+      # checkout directory. It sources nothing and does not read $0, so stdin
+      # execution is equivalent to running the file.
+      - name: Checkout preflight (this repo's copy, not the host's)
+        if: inputs.dry_run != true
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && git fetch origin && git diff --stat HEAD origin/main"
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && bash -s" < scripts/preflight-checkout.sh
+
       - name: Deploy ${{ inputs.service }}
         if: inputs.dry_run != true
         env:
@@ -294,10 +318,6 @@ jobs:
           ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
             deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
             "cd ${VPS_APP_PATH} && \
-             git fetch origin && \
-             git diff --stat HEAD origin/main && \
-             { [ -f scripts/preflight-checkout.sh ] || { echo '::error::preflight-checkout.sh is missing from the VPS checkout. It ships in this repo, so it only exists there after one deploy that includes it. Fix: ssh to the VPS, cd to the checkout, run git pull, then re-run this workflow.'; exit 1; }; } && \
-             bash scripts/preflight-checkout.sh && \
              git reset --hard origin/main && \
              export SOPS_AGE_KEY_FILE=${VPS_AGE_KEY} && \
              export CONFIRM_PUBLIC_DEPLOY=${CONFIRM} && \

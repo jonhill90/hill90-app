@@ -176,38 +176,28 @@ setup() {
 # and not here. That gap is what these tests close.
 # ---------------------------------------------------------------------------
 
-# The line carrying the guard, extracted once.
+# The three tests that used to sit here asserted properties of the
+# "preflight-checkout.sh is missing from the VPS checkout" message: no double
+# quote, no backslash, and that it still named `git pull` as the remedy.
+#
+# That message is gone. The workflow no longer runs the host's copy of the
+# preflight — it pipes this repository's copy over ssh with `bash -s` — so the
+# script cannot be missing from the host, and there is no remedy to name. The
+# message was removed with the guard it belonged to, not because the lesson
+# expired.
+#
+# THE LESSON IS STILL TESTED, and by tests that fire against the workflow as it
+# stands rather than against one deleted string:
+#
+#   - "the remote payload the workflow sends parses as shell" — the property the
+#     original failure actually violated;
+#   - "no ::error:: message in the deploy workflow carries a backslash escape" —
+#     the generalised form of the three tests removed here.
+#
+# Deleting a test whose subject no longer exists is correct. Deleting one whose
+# subject still exists is how a suite quietly stops checking.
+
 repo_root() { cd "${BATS_TEST_DIRNAME}/../.." && pwd; }
-
-guard_line() {
-  grep -- "-f scripts/preflight-checkout.sh" \
-    "$(repo_root)/.github/workflows/reusable-deploy-service.yml" | head -1
-}
-
-@test "the missing-preflight message contains NO double quote" {
-  line="$(guard_line)"
-  [ -n "$line" ]
-  msg="${line#*::error::}"; msg="${msg%%\'*}"
-  [ -n "$msg" ]
-  [[ "$msg" != *'"'* ]]
-}
-
-@test "the missing-preflight message contains NO backslash escape" {
-  # \" and \\" are the exact shapes that broke. A backslash inside the message is
-  # the warning sign regardless of what follows it.
-  line="$(guard_line)"
-  msg="${line#*::error::}"; msg="${msg%%\'*}"
-  [ -n "$msg" ]
-  [[ "$msg" != *'\'* ]]
-}
-
-@test "the message still names the exact remedy despite carrying no quotes" {
-  # Removing quotes must not have removed the instruction. A message that survives
-  # parsing but says nothing useful is the other failure.
-  line="$(guard_line)"
-  [[ "$line" == *"git pull"* ]]
-  [[ "$line" == *"preflight-checkout.sh"* ]]
-}
 
 @test "the remote payload the workflow sends parses as shell" {
   # The real property, tested the way the failure actually presented: extract the
