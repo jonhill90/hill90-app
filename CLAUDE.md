@@ -198,7 +198,7 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   only: 3 CI failures against ~40 local runs across four emulated CI conditions.
   Unresolved. **Do not make it green by re-running** — a retry that passes tells you
   it is flaky and nothing more.
-- **`services/knowledge/tests/integration` does not run in CI** — 18 files, ~98 tests,
+- **`services/knowledge/tests/integration` does not run in CI** — **19** files, 98 tests,
   excluded because they need a live pgvector Postgres on `localhost:5432`. The
   exclusion is deliberate and commented in `ci.yml`, but the consequence is worth
   knowing: the deletion-leaves-SEARCH regression test added in #84 **is in that
