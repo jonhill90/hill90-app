@@ -6,7 +6,15 @@ const API_URL = process.env.API_URL || 'http://localhost:3000'
 /**
  * Proxy a Next.js API route request to the backend API service.
  * Handles auth, query params, body forwarding, and SSE passthrough.
+ *
+ * Every response here is built from the CALLER'S access token, so it varies by
+ * session and no shared cache may store it. Nothing set a Cache-Control before,
+ * and RFC 9111 lets an intermediary heuristically cache a 200 that carries no
+ * freshness information — the milder form of the `public, max-age=10` that
+ * /api/services/health was serving (#134).
  */
+const NO_SHARED_CACHE = { 'Cache-Control': 'private, no-store' } as const
+
 export async function proxyToApi(
   req: NextRequest,
   backendPath: string,
@@ -14,7 +22,12 @@ export async function proxyToApi(
 ) {
   const session = await auth()
   if (!session?.accessToken) {
-    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    // The refusal needs the header in its own right: a cached 401 would be
+    // served to a signed-in user, and a cached 200 to an anonymous one.
+    return NextResponse.json(
+      { error: 'Not authenticated' },
+      { status: 401, headers: NO_SHARED_CACHE },
+    )
   }
 
   const url = new URL(`${API_URL}${backendPath}`)
@@ -62,9 +75,12 @@ export async function proxyToApi(
     }
 
     const data = await res.json()
-    return NextResponse.json(data, { status: res.status })
+    return NextResponse.json(data, { status: res.status, headers: NO_SHARED_CACHE })
   } catch (err) {
     console.error(`[${label}] Error:`, err)
-    return NextResponse.json({ error: 'API request failed' }, { status: 502 })
+    return NextResponse.json(
+      { error: 'API request failed' },
+      { status: 502, headers: NO_SHARED_CACHE },
+    )
   }
 }
