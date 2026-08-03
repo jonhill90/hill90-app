@@ -152,12 +152,39 @@ jobs:
             echo "::warning::Could not read a SHA from the host; the check will report this as UNKNOWN."
           fi
 
+      # The half the checkout comparison cannot do. One read-only docker inspect
+      # per container, over the same ssh. A container with no stamp prints
+      # `<no value>`, which the check treats as UNSTAMPED rather than as a
+      # revision — absence is never agreement.
+      - name: Ask each container which commit it was created from
+        id: revs
+        if: inputs.deployed_sha_override == ''
+        run: |
+          revs=$(ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            'for c in app-api app-ui app-ai app-knowledge app-mcp; do
+               if docker inspect "$c" >/dev/null 2>&1; then
+                 printf "%s=%s\n" "$c" "$(docker inspect "$c" --format "{{index .Config.Labels \"com.hill90.revision\"}}" 2>/dev/null | tr -d "[:space:]")"
+               fi
+             done' 2>/dev/null || true)
+          {
+            echo "revisions<<EOF"
+            echo "$revs"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          if [ -z "$revs" ]; then
+            echo "::warning::No container revisions could be read; the check will report that as UNKNOWN rather than as agreement."
+          else
+            echo "$revs"
+          fi
+
       - name: Compare deployed against main
         env:
           DEPLOYED_SHA: ${{ inputs.deployed_sha_override != '' && inputs.deployed_sha_override || steps.host.outputs.sha }}
           GRACE_HOURS: ${{ inputs.grace_hours || '4' }}
           TARGET_REF: origin/main
           LABEL: hill90-app (${{ vars.VPS_APP_PATH || '/opt/hill90-app' }})
+          CONTAINER_REVISIONS: ${{ steps.revs.outputs.revisions }}
         run: |
           if [ -n "${{ inputs.deployed_sha_override }}" ]; then
             echo "::notice::POSITIVE CONTROL — pretending the host is on ${{ inputs.deployed_sha_override }}. The host was not contacted."
