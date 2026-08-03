@@ -326,7 +326,9 @@ describe('Spec contract enforcement', () => {
       for (const [method, operation] of Object.entries(pathItem)) {
         if (method === 'parameters') continue;
         const op = operation as any;
-        if (pathKey === '/health' || pathKey === '/health/detailed' || pathKey.includes('/webhook/')) {
+        // /health/detailed was in this exemption while it was public. It is not
+        // public any more, so it must fall through to the security assertion below.
+        if (pathKey === '/health' || pathKey.includes('/webhook/')) {
           expect(op.security).toEqual([]);
         } else {
           expect(op.security).toBeDefined();

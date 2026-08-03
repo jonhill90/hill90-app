@@ -964,9 +964,14 @@ paths:
       summary: Detailed health check
       description: >
         Returns service health with database connectivity, uptime, memory usage,
-        and Node.js version. Public — no authentication required.
-      security: []
+        and Node.js version. Requires a session: it reports the runtime build and
+        the tenant's inventory, which are not public facts. /health is the public
+        liveness probe.
+      security:
+        - bearerAuth: []
       responses:
+        "401":
+          description: Missing or invalid token
         "200":
           description: Detailed health status
           content:
