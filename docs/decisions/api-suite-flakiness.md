@@ -1212,3 +1212,123 @@ Eliminated by measurement, cumulative:
   round. That file's timing, not its state, is the last thing pointed at by evidence.
 
 **Nothing was disabled, retried or quarantined.**
+
+---
+
+# Round six, 2026-08-03: the timing-margin lead is refuted
+
+**20 runs of half A, 2 failures, 6,020 test executions with per-test durations.**
+Nothing skipped, retried, reordered or quarantined, and **neither the poll interval nor the
+jest timeout was changed** — widening either would have hidden the failure rather than
+explained it.
+
+## The instrument, controlled first
+
+The lead needs a classifier that separates *failed because it ran out of the 5000ms budget*
+from *failed for some other reason*. Two synthetic failures with known causes:
+
+```
+CTL-NEAR-CEILING  ran  5002ms  -> OUT OF HEADROOM        [FAILED]
+CTL-FAST-FAIL     ran     1ms  -> 4999ms headroom        [FAILED]
+CTL-PASSES        ran     1ms  -> 4999ms headroom
+```
+
+It flags the budget-limited failure, does not flag the instant one, and does not flag the
+passing test. Only then was it used.
+
+## The margin is real, and it is never consumed
+
+`INFERENCE_POLL_MS = 3000` against a 5000ms ceiling is a genuine ~1s margin. The question is
+whether anything ever spends it. Across 20 runs:
+
+```
+routes-agents-events test executions:            580
+  of those, poll-waiting (>=3000ms):              40
+    durations: min 3515ms, median 4006ms, MAX 4082ms
+    worst headroom observed:                     918ms
+    executions within 500ms of the ceiling:        0
+    loop delay during them: median 65.4ms, worst 212.7ms
+
+ALL 6,020 executions:
+    within 500ms of the 5000ms ceiling:            0
+    exceeded it:                                   0
+```
+
+**The worst excursion in 40 poll waits used 82ms of roughly 1,000ms of slack.** The poll
+tests are strikingly stable — a 567ms spread across 20 runs — and the loop is free
+throughout, so nothing is even competing for the time.
+
+For the margin to cause a failure something must consume ~1s of slack. Across 6,020
+executions nothing consumed a tenth of it.
+
+## And the failures that did happen were nowhere near it
+
+```
+run 11  routes-agents-skill      ran  321ms, loopMax  84.9ms -> 4679ms headroom   200 -> 400
+run 14  platform-connections     ran  180ms, loopMax 157.8ms -> 4820ms headroom   403 -> 501
+run 14  root-route non-regression ran 148ms, loopMax 100.1ms -> 4852ms headroom   404 -> ?
+```
+
+Every failing test finished in under a third of a second with **more than 4.6 seconds of
+budget unused**. `routes-agents-events` did not fail at all in these 20 runs.
+
+**The timing-margin lead is dead.** It was the obvious suspect, it is arithmetically real,
+and it explains none of the observed failures.
+
+## One reconciliation, and one thing not reproduced
+
+Round three recorded `routes-agents-events` at **83.2s** and read that as the largest
+unexplained quantity here. Per test, nothing in that file exceeds **4.1s**. So a
+file-level 83s is not any single test overrunning its budget — it is many tests, or
+file-level setup, and the per-test framing that suspicion was built on does not hold.
+
+**This round did not reproduce an 83s file.** Twenty runs, all normal. That is recorded as a
+non-reproduction, not as a refutation of the original observation.
+
+## The 501 class — kept separate, and now with a concrete target
+
+This is **not** folded into the timing lead. It is named because this round produced a code
+fact worth the next session's time.
+
+`platform-connections › P2` calls **`POST /provider-connections`** and expects 403. It
+received **501**. So:
+
+```
+$ grep -rn "status(501)" src --include='*.ts' | grep -v __tests__ | wc -l
+1
+src/routes/profile.ts:287   // POST /profile/password — "NOT_IMPLEMENTED"
+```
+
+**There is exactly one site in the entire application that can produce a 501**, it is on
+`POST /profile/password`, and it is on a different router from the route under test. Express
+and finalhandler contain no 501 of their own — checked, no matches.
+
+`501` has now appeared in round three (200→501, twice), round four (`docs.test.ts`, 400→501)
+and here (403→501). Every one of them must have come from that single handler, on a path
+none of those tests called.
+
+**This is a lead, not a finding.** It does point somewhere specific: a response produced by
+one route arriving at a request made to another. The record eliminated a "wrong server"
+hypothesis in round one, but on 404 evidence — *"455 of 470 captured 404s were handler
+JSON"* — which says nothing about this. A unique-origin status code is a much sharper probe
+than a 404, because 404 has many sources and this has exactly one.
+
+**The next thing to attack:** instrument that single handler to record, when it fires, which
+request it believes it is answering — method, path, and the supertest socket — and compare
+against the request the failing test made. If they agree, cross-talk is dead and the 501 came
+from somewhere unmodelled. If they disagree, the carrier is the connection, not the state.
+
+## Where the search space stands
+
+Eliminated by measurement, cumulative:
+
+- `process.env` and `globalThis` as carriers
+- "symptoms are purely logical" — timeout, 401 and 400 are in the set
+- order-dependence, n=80; the runInBand-worse-than-workers asymmetry, n=80
+- CPU starvation as the timeout mechanism
+- "drained queue → promise never resolves" — it returns `undefined`
+- a drained queue as the cause — 49% on green runs, 49% on the failing one
+- **the SSE timing margin** — 0 of 6,020 executions came within 500ms of the ceiling, and
+  every observed failure had >4.6s of headroom
+
+**Nothing was disabled, retried or quarantined, and no timeout or interval was widened.**
