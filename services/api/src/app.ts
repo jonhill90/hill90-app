@@ -1,4 +1,8 @@
-import express, { Application } from 'express';
+// Must come before any router is invoked: it makes Express forward an async
+// handler's rejection to the error middleware below instead of dropping it,
+// which is the difference between a 500 and a dead process. See the file.
+import './boot/async-errors';
+import express, { Application, NextFunction, Request, Response } from 'express';
 import { createRequireAuth, createJwksKeyResolver } from './middleware/auth';
 import { getIssuer, getJwksUri } from './middleware/keycloak-config';
 import { correlationId } from './middleware/correlation-id';
@@ -172,6 +176,23 @@ export function createApp(opts: AppOptions = {}): Application {
   // API documentation (admin-only)
   app.use('/docs', requireAuth, requireRole('admin'), docsRouter);
   app.use('/openapi.json', requireAuth, requireRole('admin'), specRouter);
+
+  // Terminal error handler. Four arguments, and registered after every route,
+  // because that is how Express recognises it. Everything the async-errors
+  // patch forwards arrives here; without it, Express's default handler would
+  // leak the stack trace into the response body.
+  //
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    console.error('[api] Unhandled error in request pipeline:', err);
+    if (res.headersSent) {
+      // A response is already on the wire; the only honest thing left is to
+      // stop writing to it. Express would do the same.
+      res.end();
+      return;
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  });
 
   return app;
 }
