@@ -9,8 +9,19 @@
  *
  * SERVICES is built at module load from process.env, so each case has to set the
  * environment and then re-import the module.
+ *
+ * The route requires a session — it probes the internal network, and served that
+ * inventory to anonymous callers until that was fixed; see
+ * services-health-auth.test.ts. These cases are about which URL is probed, not
+ * about who may probe it, so they supply a signed-in session and move on. Without
+ * the mock the route reaches real next-auth and every case here fails on a module
+ * resolution error rather than on anything to do with realms.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+
+vi.mock('@/auth', () => ({
+  auth: vi.fn(() => Promise.resolve({ accessToken: 'test-token' })),
+}))
 
 const ORIGINAL_ENV = { ...process.env }
 
