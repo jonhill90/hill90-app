@@ -94,6 +94,52 @@ Most of these were bought with a real bug. They are not style preferences.
   `scripts/deploy.sh` deliberately mirrors Hill90's.
 - Never commit a credential, an age key, or a decrypted `.env`.
 
+## Finding defects by shape, not by symptom
+
+Nine defects in `services/api` were found on 2026-08-03 by grepping for a *shape* and then
+checking reachability. None was found by something failing. The shapes are the part that
+transfers.
+
+**What it covered.** *Process death:* a `void`ed promise chain whose inner query could
+reject (#133), and async handler rejections that Express 4 drops on the floor (#135 — fixed
+at the boundary, so the next handler written inherits it). *Unbounded memory:*
+caller-controlled sizes with a floor and no ceiling (#141, #153), reads with no byte cap
+(#143, #153), a WebSocket relay and SSE writes that never consulted backpressure (#148,
+#150). *Credential lifetime:* a terminal session outliving its token (#145). *Anonymous
+exposure:* `/health/detailed` served the runtime and the tenant inventory (#136).
+
+**The greps that earned their keep:**
+
+```bash
+grep -rn "void [a-z]" src/                     # fire-and-forget chains
+grep -rn "chunks.push\|buffer +=" src/         # accumulation with no ceiling
+grep -rnE "parseInt\(\s*req\.(query|params)"   # caller-controlled sizes
+grep -rnE "(=|if \()\s*res\.write\("          # is backpressure consulted at all?
+grep -rnE "\.on\('(data|message)'" src/        # producer-driven writes
+```
+
+**A hit is not a defect until two questions are answered**, and skipping either wastes the
+sweep. *Who can reach it* — role, ownership, preconditions: #141's answer narrowed it from
+"any signed-in user" to "needs an admin to have started the agent". *What does it cost* —
+usually the parameter removes a cap rather than inventing data, so the cost is bounded by
+data the caller's own agent produced.
+
+**Looked for and NOT found**, so nobody repeats the search: ReDoS from request input (the
+only `new RegExp` is a constant), SQL built by concatenation, `.then()` without `.catch()`,
+`forEach(async)`, and unawaited `pool.query` outside `await Promise.all` — two exist, both
+unreachable from the affected paths. `services/ai`'s single `asyncio.create_task` is
+guarded, and Python does not exit on an un-retrieved task exception, so this seam is
+**Node-specific**.
+
+**The recurring cause was drift, not ignorance.** #141 existed because the clamp sat on the
+export endpoint and not its twin; #153 because that fix went to one route and not the other.
+The bound belongs in a shared constant, never a literal typed in three files.
+
+**Merged is not deployed.** Deploy state for this work lives in
+[`docs/decisions/hardening-batch-2026-08-03.md`](docs/decisions/hardening-batch-2026-08-03.md),
+including which fixes can be verified behaviourally after a deploy and which only by
+containment.
+
 ## The governing principle
 
 **The platform provides identity, data and storage. This app consumes them.**
