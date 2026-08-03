@@ -184,11 +184,31 @@ export default function AgentDetailClient({
 
   const isAdmin = session.user?.roles?.includes('admin')
 
+  // WHICH AGENT THIS PAGE IS CURRENTLY SHOWING.
+  //
+  // page.tsx renders <AgentDetailClient agentId={id}/> with no `key`, so
+  // navigating /agents/A -> /agents/B changes the prop WITHOUT remounting: state
+  // survives and so do in-flight requests. A response for A could land after B's
+  // and overwrite it — and because handleScheduleSave PUTs to
+  // /api/agents/${agentId}/schedule carrying `scheduleCron` from state, that put
+  // A's schedule on B's page and would have written it to B on save.
+  //
+  // A ref rather than the closed-over prop: a stale invocation closes over the
+  // OLD agentId, which is exactly what has to be compared against the current
+  // one.
+  const currentAgentId = useRef(agentId)
+  useEffect(() => { currentAgentId.current = agentId }, [agentId])
+
   const fetchAgent = useCallback(async () => {
+    const requestedId = agentId
     try {
       const res = await fetch(`/api/agents/${agentId}`)
+      // The page may have moved on while this was in flight. Dropping the
+      // response is correct: the agent it describes is not the one on screen.
+      if (currentAgentId.current !== requestedId) return
       if (res.ok) {
         const data = await res.json()
+        if (currentAgentId.current !== requestedId) return
         setAgent(data)
         setScheduleCron(data.schedule_cron || '')
         setScheduleEnabled(data.schedule_enabled || false)
@@ -263,18 +283,20 @@ export default function AgentDetailClient({
   // Fetch model policy name
   useEffect(() => {
     if (!agent?.model_policy_id) return
+    const requestedId = agentId
     fetch(`/api/model-policies/${agent.model_policy_id}`)
       .then(res => res.ok ? res.json() : null)
-      .then(data => { if (data?.name) setPolicyName(data.name) })
+      .then(data => { if (data?.name && currentAgentId.current === requestedId) setPolicyName(data.name) })
       .catch(() => {})
   }, [agent?.model_policy_id])
 
   // Fetch activity summary stats
   useEffect(() => {
     if (!agent) return
+    const requestedId = agentId
     fetch(`/api/agents/${agentId}/stats`)
       .then(res => res.ok ? res.json() : null)
-      .then(data => { if (data) setActivityStats(data) })
+      .then(data => { if (data && currentAgentId.current === requestedId) setActivityStats(data) })
       .catch(() => {})
   }, [agent, agentId])
 
