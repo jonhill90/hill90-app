@@ -119,8 +119,13 @@ describe('terminal websocket handshake', () => {
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     jest.spyOn(console, 'warn').mockImplementation(() => {});
     server = http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); });
+    // `exp` is part of the verifier's contract now: the proxy ends a session when
+    // the credential does, so it must be told when that is. Far future here —
+    // these tests are about the handshake, not the session's lifetime.
     attachTerminalProxy(server, async (token: string) =>
-      token === TOKEN ? { sub: 'user-1', roles: ['user'] } : null,
+      token === TOKEN
+        ? { sub: 'user-1', roles: ['user'], exp: Math.floor(Date.now() / 1000) + 3600 }
+        : null,
     );
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     port = (server.address() as AddressInfo).port;
