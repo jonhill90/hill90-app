@@ -2382,6 +2382,11 @@ theory.
   2x  Agent PUT skill_ids behavior
 ```
 
+**That list is the top six, not all of them — it sums to 22 of the 29.** The remaining 7 are a
+long tail of one failure each. Truncated when it was written and not marked as truncated,
+which reads as an arithmetic error rather than a summary. Flagged by the Copilot review on
+#112 and merged past unread.
+
 `GET /agents/:id/events` is **10 of 29 — 34%** — consistent with every earlier round naming it
 the most frequent victim, and now measured against the surviving classes specifically rather
 than against the mixed set.
@@ -2829,7 +2834,9 @@ whose conditions changed mid-flight looks exactly like a measurement whose condi
 ### What would change the answer
 
 At roughly 1% per run a spurious 401 needs ~300 runs to appear with confidence. The clean
-batch is running. But the practical point is that **the batch is no longer the mechanism that
+batch was running `as of 2026-08-03` — an undated live status when first written, which is
+the very failure this document formalised two sections later; its result is not recorded here
+and should not be inferred. But the practical point is that **the batch is no longer the mechanism that
 answers this** — `auth.ts` now logs the cause on every 401, in CI and locally, so the next
 occurrence classifies itself in the ordinary course of someone's failing build.
 
