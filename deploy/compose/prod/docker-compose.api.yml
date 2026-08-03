@@ -95,6 +95,12 @@ services:
       - ../../../platform/vault/secrets-schema.yaml:/data/secrets-schema.yaml:ro
     environment:
       - NODE_ENV=production
+      # The commit this container was built from, as an ENV so the process can
+      # report it — the label above answers the same question but only to
+      # someone on the host with docker. Exposed on /health/detailed, which
+      # requires a session; NOT on /health, which is public and where a build
+      # SHA would re-open exactly what #136 closed.
+      - DEPLOY_REVISION=${DEPLOY_REVISION:-unstamped}
       - SECRETS_SCHEMA_PATH=/data/secrets-schema.yaml
       - PORT=3000
       - AI_SERVICE_URL=http://ai:8000

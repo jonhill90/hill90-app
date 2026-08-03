@@ -108,3 +108,47 @@ describe('GET /health stays public', () => {
     expect(res.body).toEqual({ status: 'healthy', service: 'api' });
   });
 });
+
+describe('build provenance is reported where a session is required, and nowhere else', () => {
+  const OLD = process.env.DEPLOY_REVISION;
+  beforeEach(() => { process.env.DEPLOY_REVISION = 'abc123def456'; });
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.DEPLOY_REVISION;
+    else process.env.DEPLOY_REVISION = OLD;
+  });
+
+  it('/health/detailed reports the revision to a signed-in caller', async () => {
+    const res = await request(app)
+      .get('/health/detailed')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.revision).toBe('abc123def456');
+  });
+
+  it('/health does NOT report it — that endpoint is public', async () => {
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(200);
+    // #136 removed runtime disclosure from an anonymous surface. A build SHA is
+    // the same class, so this asserts the absence rather than trusting a habit.
+    expect(JSON.stringify(res.body)).not.toContain('abc123def456');
+    expect(res.body).toEqual({ status: 'healthy', service: 'api' });
+  });
+
+  it('an anonymous caller still gets nothing from /health/detailed', async () => {
+    const res = await request(app).get('/health/detailed');
+
+    expect(res.status).toBe(401);
+    expect(JSON.stringify(res.body)).not.toContain('abc123def456');
+  });
+
+  it('reports unstamped rather than hiding the gap when the deploy set nothing', async () => {
+    delete process.env.DEPLOY_REVISION;
+    const res = await request(app)
+      .get('/health/detailed')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.body.revision).toBe('unstamped');
+  });
+});
