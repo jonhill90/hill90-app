@@ -129,3 +129,52 @@ run_teardown() {
     printf 'compose -p x -f y down -v\n' > "$ARGV"
     grep -qE -- '(^| )(-v|--volumes)( |$)' "$ARGV"
 }
+
+# ---------------------------------------------------------------------------
+# --remove-orphans, banned for the neighbour's sake.
+#
+# Hill90 bans it globally — every script and workflow — and enforces it in CI,
+# because a `down` carrying it deletes containers that share a Compose project
+# name but belong to another stack. THIS REPO IS THE NEIGHBOUR that ban exists to
+# protect the platform from: both deploys run as the same user on the same host.
+#
+# deploy.sh:607 already says it is deliberately not used. A comment is not a
+# guard, and the argv assertion is stronger than a grep because it pins what
+# docker actually RECEIVES rather than what the source happens to spell.
+# ---------------------------------------------------------------------------
+
+@test "teardown never passes --remove-orphans — it would reach a neighbour's containers" {
+    run_teardown ui prod
+    [ "$status" -eq 0 ]
+    ! grep -qE -- '(^| )--remove-orphans( |$)' "$ARGV"
+}
+
+@test "no stack's teardown passes --remove-orphans" {
+    for s in api ui ai knowledge mcp; do
+        : > "$ARGV"
+        run_teardown "$s" prod
+        ! grep -qE -- '(^| )--remove-orphans( |$)' "$ARGV"
+    done
+}
+
+@test "CONTROL: the recorder CAN see --remove-orphans, so the case is not vacuous" {
+    # Same defence as the -v control: on an empty argv file every "must not
+    # contain" assertion passes for free.
+    printf 'compose -p x -f y down --remove-orphans\n' > "$ARGV"
+    grep -qE -- '(^| )--remove-orphans( |$)' "$ARGV"
+}
+
+@test "no script or workflow in this repo uses --remove-orphans at all" {
+    # Wider than Hill90's equivalent, which greps scripts/deploy.sh only. The
+    # flag is dangerous wherever it appears, and the app has local.sh and its own
+    # workflows that Hill90's check would never see.
+    cd "$ROOT"
+    run bash -c "grep -rn -- '--remove-orphans' scripts/ .github/ deploy/ compose/ 2>/dev/null | grep -v 'deliberately NOT used' | grep -v 'remove-orphans( |\$)' || true"
+    [ -z "$output" ]
+}
+
+@test "CONTROL: that repo-wide grep finds the flag when it is present" {
+    printf 'docker compose down --remove-orphans\n' > "$BATS_TEST_TMPDIR/planted.sh"
+    run grep -rn -- '--remove-orphans' "$BATS_TEST_TMPDIR/planted.sh"
+    [ "$status" -eq 0 ]
+}
