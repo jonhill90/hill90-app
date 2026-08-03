@@ -2421,3 +2421,307 @@ third of the failures being counted were not this defect at all.
 
 **Nothing was disabled, retried or quarantined; production files remain byte-identical to
 `main`.**
+
+---
+
+# Hunt two, round two, 2026-08-03: the rate correction, and an instrument for the 401s
+
+## First, a correction that changes how this whole document should be read
+
+**Mechanism-level eliminations survive. Conclusions that rested on failure RATES do not.**
+
+Roughly a third of every failure counted in this record — 13 of 42 in the mined corpus — was
+a foreign 501 written by another process, not this defect. So:
+
+**The 25% in the original brief was never measuring one thing.** Neither was the 7/20, the
+~23%, the 15.0% vs 7.5% arms comparison, or any other rate quoted here. Each was a blend of at
+least two unrelated failure sources in unknown proportion, and the proportion varied by
+machine, because one of the sources was a daemon that happens to run on this laptop.
+
+That does **not** reinstate the eliminated hypotheses: those were killed by mechanism — a file
+with zero `Once(` calls that flakes, a free event loop during a timeout, a drained queue at
+49% on green runs — and a mechanism argument does not care what the base rate was. But any
+sentence in this document that compares two rates, or infers something from a rate moving,
+should be read as measuring a blend. **The arms comparison in round three is the clearest
+casualty**: 15.0% against 7.5% could have been driven entirely by how many foreign 501s each
+arm happened to collect.
+
+## The 401s: six failures, and the logs cannot say why
+
+```
+6x 401, across 6 different files and 6 different expectations (200, 409, 201)
+```
+
+`services/api/src/middleware/auth.ts` has five distinct 401 paths, and line 41 is:
+
+```js
+    } catch {
+      res.status(401).json({ error: 'Invalid or expired token' });
+```
+
+**A bare `catch` with no binding.** The underlying `jsonwebtoken` error is discarded, and jest
+prints only the asserted status — so every 401 in 623 logs is causeless. Grepping the six
+failing logs for any of the five messages returns nothing.
+
+This is not a theory about the cause; it is why the existing corpus cannot choose between the
+candidate causes at all.
+
+## The probe, and its control
+
+`services/api/jest.auth401.js`, `AUTH_401_PROBE=1`, off by default, **production files
+untouched**. It wraps `jsonwebtoken.verify` to record what was actually thrown, and
+`res.json` to record which of the five 401 bodies was sent.
+
+The four candidate causes map onto distinguishable evidence:
+
+| Cause | Signature it would leave |
+|---|---|
+| expiry racing a slow test / clock skew | `TokenExpiredError`, with `expiredAt` and `now` |
+| key material differs, signer vs verifier | `JsonWebTokenError: invalid signature` |
+| request reached the wrong verifier | `JsonWebTokenError: jwt issuer/audience invalid` |
+| request lost its header | body `Missing or invalid Authorization header` |
+
+**Positive-controlled by forcing three of them**, before any null is believed:
+
+```
+verify threw: TokenExpiredError | jwt expired      | expiredAt 2026-08-03T11:20:01.000Z
+verify threw: JsonWebTokenError | invalid signature | expiredAt None
+sent 401 body: {"error":"Invalid or expired token"}
+sent 401 body: {"error":"Invalid or expired token"}
+sent 401 body: {"error":"Missing or invalid Authorization header"}
+-> PASS: expiry and wrong-key are distinguishable, and the missing-header path is named
+```
+
+Note what the control also shows: **expiry and wrong-key produce the same 401 body.** Reading
+the body alone would have conflated them — the `verify` wrapper is what separates them, and
+without it a null on "it isn't expiry" would have been unfounded.
+
+Verified shipped and inert by default:
+
+```
+default   : ["<rootDir>/jest.portguard.js"]
+with probe: ["<rootDir>/jest.portguard.js","<rootDir>/jest.auth401.js"]
+installed rows when enabled: 1
+```
+
+## Status
+
+The probe is built, controlled and shipped; **no 401 has been captured with it yet.** At six
+occurrences in 623 logs the event is rare, and no claim about the cause is made here — the
+next batch run with `AUTH_401_PROBE=1` will name it, or will show a null that is now worth
+something because the instrument has been seen to fire.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
+
+---
+
+# Hunt two, round three, 2026-08-03: a mechanism that produces 401 and 404 from one cause
+
+Built on mechanism, not frequency, because frequency here is contaminated.
+
+## Why waiting was not the plan
+
+Six 401s in 623 logs is ≈1% per run, so catching one with 95% confidence needs
+`ln(0.05)/ln(0.99)` ≈ **298 runs**. The probe from the previous round is shipped and ready for
+whoever pays that, but the question is answerable at mechanism level for free.
+
+## What the 401 paths require
+
+```js
+const signingKey = await opts.getSigningKey(decoded.header);
+const payload = jwt.verify(token, signingKey, { algorithms: ['RS256'], issuer: opts.issuer });
+```
+
+A 401 needs the token to fail against **the key material or the issuer that this particular
+app instance was configured with.** So "the request reached a verifier the test did not
+configure" is not a vague worry — it is precisely what this code punishes.
+
+## The corpus makes that possible, and the numbers are stark
+
+```
+test files generating their OWN keypair: 42 of 59
+distinct issuers across files:           41x realms/hill90   (one value)
+```
+
+**Forty-two of fifty-nine test files mint a fresh RSA keypair at module load.** Every jest
+worker therefore runs an app that trusts a *different* public key, while all of them use the
+same issuer. So the issuer is not the discriminator — **the key is**, and a token is valid for
+exactly one worker's app and invalid for all the others.
+
+## The demonstration
+
+A token minted for app A, presented to app B — the sibling-worker case:
+
+```
+CONTROL  token A -> app A, route exists : 200
+CROSS    token A -> app B (other key)   : 401
+CROSS    token B -> app B, route ABSENT : 404
+```
+
+**One mechanism produces both dominant surviving symptoms.** A request arriving at another
+worker's server yields **401** when the key differs, and **404** when that app does not mount
+the route the test asked for. The surviving set is 8× timeout, 6× `200->404`, 4× `200->400`,
+4× `200->401` — and 401-plus-404 is what this predicts, without needing a second theory for
+each.
+
+It is the same shape as the port collision closed earlier today: **the request arriving
+somewhere other than where the test believes.** That shape is no longer speculative in this
+codebase — it was demonstrated once with a foreign daemon and is now demonstrated to produce
+the surviving symptom set when the wrong destination is a sibling worker.
+
+## Stated as a lead, and the gap it exposes
+
+**This is not proof that cross-worker arrival happens.** It proves that *if* it happens the
+symptoms match. No instance has been captured.
+
+And there is a hole worth naming immediately: **the foreign-response guard shipped in round
+fifteen cannot detect this case.** It identifies a stranger by the presence of a `Server:`
+header, which express does not set — so a sibling worker's response looks exactly like our
+own. The guard closes the daemon case and is blind to the worker case.
+
+## The detector this needs
+
+Each app instance should stamp a response header identifying the worker and test file that
+produced it, and the client side should assert that the stamp matches the app it believes it
+called. A mismatch is then caught at the moment it happens, with both identities named, rather
+than inferred from a status code.
+
+That is test-side, needs no production change, and — unlike a status code — **cannot be
+confused with a legitimate response**, which is the property every instrument in this
+investigation has needed and three of them lacked.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
+
+---
+
+# Hunt two, round four, 2026-08-03: the identity guard, and it supersedes the Server-header guard
+
+## What it does
+
+Every response this worker writes is stamped `x-test-app-id: <pid>:<JEST_WORKER_ID>`, patched
+onto `http.ServerResponse` from a jest setup file. The client side reads the stamp off the
+wire and asserts it is **ours**. One check catches two different intruders:
+
+- **NO STAMP** — the responder is not this suite at all. The round-fifteen daemon writes raw
+  HTTP and never touches `ServerResponse`, so it cannot be stamped.
+- **FOREIGN STAMP** — a **sibling jest worker** answered. Its app carries a different RSA
+  keypair (42 of 59 files mint their own) and a different route table, which is how a spurious
+  401 or 404 reaches a test that did nothing wrong.
+
+**Why this is the strongest instrument in the investigation:** a status code can always be a
+legitimate answer, so every earlier check had to infer. A stamp cannot be mistaken for a
+legitimate response — it is ours or it is not. That is the property the mock counter, the
+global `jest.fn` hook and the byte recorder all lacked, and all three reported clean results
+that were wrong.
+
+## Controlled — and the first attempt at the control failed
+
+A sound design is not a working implementation, so all three cases were forced.
+
+```
+✓ A: a normal response from OUR app passes
+✕ B: FOREIGN STAMP — a sibling worker answering must fail this test
+     FOREIGN STAMP  HTTP/1.1 401 Unauthorized  from 127.0.0.1:59606
+         produced by 99999:9, this worker is 78273:1
+```
+
+**Control C failed on its first attempt — it timed out at 5002ms instead of firing**, because
+it emulated the stranger with an `http.createServer` whose response the guard stamps anyway,
+then tried to remove the header after it was sent. Rewritten as a **raw TCP server** writing
+HTTP by hand — which is exactly what the daemon does on the wire:
+
+```
+✕ NO STAMP — a raw stranger writing HTTP by hand must fail this test
+     NO STAMP       HTTP/1.1 501 Not Implemented  from 127.0.0.1:59942
+         Server: websocket-sharp/1.0
+```
+
+Had that control been left as written, the NO-STAMP path would have shipped unproven. It is
+the fourth time in this investigation an instrument would have lied if it had not been forced.
+
+## Does it supersede the Server-header guard? Yes — demonstrated, not argued
+
+**Control C is the 501 collision reproduced byte for byte**, down to
+`Server: websocket-sharp/1.0`, and the identity guard catches it as `NO STAMP`.
+
+So the round-fifteen guard detects a strict subset of what this detects:
+
+| Case | Server-header guard | Identity guard |
+|---|---|---|
+| foreign daemon (501) | caught | **caught** |
+| sibling worker (401/404) | **blind** | **caught** |
+| our own response | ignored | ignored |
+
+`jest.portguard.js` is therefore **deleted, not retained.** Carrying two overlapping guards is
+how one rots unnoticed — and the one that would have rotted is the weaker one, which is worse,
+because its silence would have read as evidence.
+
+## Verified non-destructive
+
+The guard patches `http.ServerResponse` globally, so it had to be shown not to change the
+suite:
+
+```
+Test Suites: 29 passed, 29 total
+Tests:       301 passed, 301 total
+```
+
+Half A passes unchanged with every response stamped, and the guard is **on by default** —
+it is a guard, not a diagnostic.
+
+## What it will now tell us, and what it does not claim
+
+Round three demonstrated that cross-worker arrival *would* produce 401 and 404. **No instance
+has been captured, and this section claims none.** What has changed is that the next one
+identifies itself: the failure message names the worker that answered and the worker that
+should have, so the question is settled by a single occurrence rather than by another
+investigation.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
+
+## Correction, same day: the identity guard had a false positive, and CI caught it
+
+**The guard was verified against half A and shipped. CI failed on the full suite.**
+
+```
+● terminal websocket handshake › lets an allowed origin ... THROUGH both security gates
+  NO STAMP  HTTP/1.1 404 Not Found  from 127.0.0.1:34753
+● terminal websocket handshake › REFUSES a cross-origin handshake
+  NO STAMP  HTTP/1.1 403 Forbidden  from 127.0.0.1:42587
+```
+
+Those are **our own responses.** A websocket upgrade rejection is written by `ws` straight to
+the socket and never passes through `http.ServerResponse`, so it cannot be stamped. The guard
+called our own app a stranger.
+
+**The local verification missed it because it ran half A, and those tests are in half B.** The
+instrument was controlled — three cases, all passing — and still shipped a defect, because the
+control covered the cases I had thought of. That is the fifth instrument failure in this
+investigation and the first found by CI rather than by a control.
+
+**Fix:** a missing stamp is a violation only when the responder is on a port **this process
+never bound**. Our own listeners are recorded via `net.Server.prototype.listen`; a foreign
+daemon is on a port we never bound, `ws` is not.
+
+Re-controlled in both directions, the second case deliberately in **another process** so its
+port cannot be in our set:
+
+```
+✓ OUR unstampable response (ws-style raw write on OUR port) must NOT fire
+✕ CONTROL: a stranger in ANOTHER process must still fail this test
+     NO STAMP  HTTP/1.1 501 Not Implemented  Server: websocket-sharp/1.0
+```
+
+And verified against **the full suite this time**, which is what CI runs:
+
+```
+Test Suites: 61 passed, 61 total
+Tests:       786 passed, 786 total
+```
+
+**The lesson worth keeping:** "positive-controlled" means the control covered the cases the
+author imagined. Half A was a convenient corpus for fourteen rounds of hunting and a bad
+corpus for validating a global guard, and nothing in the process flagged the difference.
