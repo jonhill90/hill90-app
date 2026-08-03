@@ -12,12 +12,13 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/jest.portguard.js'],
   // LOOP_AUDIT=1 enables the per-test event-loop delay audit (jest.loopdelay.js).
   // Also a diagnostic, also off by default. Both can be on at once.
-  ...((process.env.CARRIER_AUDIT || process.env.LOOP_AUDIT)
+  ...((process.env.CARRIER_AUDIT || process.env.LOOP_AUDIT || process.env.AUTH_401_PROBE)
     ? {
         setupFilesAfterEnv: [
           '<rootDir>/jest.portguard.js',
           ...(process.env.CARRIER_AUDIT ? ['<rootDir>/jest.audit.js'] : []),
           ...(process.env.LOOP_AUDIT ? ['<rootDir>/jest.loopdelay.js'] : []),
+          ...(process.env.AUTH_401_PROBE ? ['<rootDir>/jest.auth401.js'] : []),
         ],
       }
     : {}),

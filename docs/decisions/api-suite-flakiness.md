@@ -2421,3 +2421,95 @@ third of the failures being counted were not this defect at all.
 
 **Nothing was disabled, retried or quarantined; production files remain byte-identical to
 `main`.**
+
+---
+
+# Hunt two, round two, 2026-08-03: the rate correction, and an instrument for the 401s
+
+## First, a correction that changes how this whole document should be read
+
+**Mechanism-level eliminations survive. Conclusions that rested on failure RATES do not.**
+
+Roughly a third of every failure counted in this record — 13 of 42 in the mined corpus — was
+a foreign 501 written by another process, not this defect. So:
+
+**The 25% in the original brief was never measuring one thing.** Neither was the 7/20, the
+~23%, the 15.0% vs 7.5% arms comparison, or any other rate quoted here. Each was a blend of at
+least two unrelated failure sources in unknown proportion, and the proportion varied by
+machine, because one of the sources was a daemon that happens to run on this laptop.
+
+That does **not** reinstate the eliminated hypotheses: those were killed by mechanism — a file
+with zero `Once(` calls that flakes, a free event loop during a timeout, a drained queue at
+49% on green runs — and a mechanism argument does not care what the base rate was. But any
+sentence in this document that compares two rates, or infers something from a rate moving,
+should be read as measuring a blend. **The arms comparison in round three is the clearest
+casualty**: 15.0% against 7.5% could have been driven entirely by how many foreign 501s each
+arm happened to collect.
+
+## The 401s: six failures, and the logs cannot say why
+
+```
+6x 401, across 6 different files and 6 different expectations (200, 409, 201)
+```
+
+`services/api/src/middleware/auth.ts` has five distinct 401 paths, and line 41 is:
+
+```js
+    } catch {
+      res.status(401).json({ error: 'Invalid or expired token' });
+```
+
+**A bare `catch` with no binding.** The underlying `jsonwebtoken` error is discarded, and jest
+prints only the asserted status — so every 401 in 623 logs is causeless. Grepping the six
+failing logs for any of the five messages returns nothing.
+
+This is not a theory about the cause; it is why the existing corpus cannot choose between the
+candidate causes at all.
+
+## The probe, and its control
+
+`services/api/jest.auth401.js`, `AUTH_401_PROBE=1`, off by default, **production files
+untouched**. It wraps `jsonwebtoken.verify` to record what was actually thrown, and
+`res.json` to record which of the five 401 bodies was sent.
+
+The four candidate causes map onto distinguishable evidence:
+
+| Cause | Signature it would leave |
+|---|---|
+| expiry racing a slow test / clock skew | `TokenExpiredError`, with `expiredAt` and `now` |
+| key material differs, signer vs verifier | `JsonWebTokenError: invalid signature` |
+| request reached the wrong verifier | `JsonWebTokenError: jwt issuer/audience invalid` |
+| request lost its header | body `Missing or invalid Authorization header` |
+
+**Positive-controlled by forcing three of them**, before any null is believed:
+
+```
+verify threw: TokenExpiredError | jwt expired      | expiredAt 2026-08-03T11:20:01.000Z
+verify threw: JsonWebTokenError | invalid signature | expiredAt None
+sent 401 body: {"error":"Invalid or expired token"}
+sent 401 body: {"error":"Invalid or expired token"}
+sent 401 body: {"error":"Missing or invalid Authorization header"}
+-> PASS: expiry and wrong-key are distinguishable, and the missing-header path is named
+```
+
+Note what the control also shows: **expiry and wrong-key produce the same 401 body.** Reading
+the body alone would have conflated them — the `verify` wrapper is what separates them, and
+without it a null on "it isn't expiry" would have been unfounded.
+
+Verified shipped and inert by default:
+
+```
+default   : ["<rootDir>/jest.portguard.js"]
+with probe: ["<rootDir>/jest.portguard.js","<rootDir>/jest.auth401.js"]
+installed rows when enabled: 1
+```
+
+## Status
+
+The probe is built, controlled and shipped; **no 401 has been captured with it yet.** At six
+occurrences in 623 logs the event is rare, and no claim about the cause is made here — the
+next batch run with `AUTH_401_PROBE=1` will name it, or will show a null that is now worth
+something because the instrument has been seen to fire.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
