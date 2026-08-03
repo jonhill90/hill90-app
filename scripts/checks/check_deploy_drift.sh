@@ -184,14 +184,22 @@ else
             say "    ${cname}: ${crev:0:12} — ${cbehind} commit(s) behind ${TARGET_REF}"
             # Only a commit touching a DEPLOYABLE path can matter to a container,
             # for the same reason the checkout rule uses that filter.
+            # SCOPED TO THIS CONTAINER, and to code it actually runs.
+            #
+            # The first version reused the global DEPLOYABLE_PREFIXES, which made
+            # every container behind on every other container's commits: against
+            # app-api it counted a change to services/ui/src/__tests__ and a
+            # change to this very script. Neither is inside the api image. That is
+            # the too-broad-guard failure again — a guard that fires on things it
+            # does not describe gets relaxed, and then guards nothing.
+            svc="${cname#app-}"
             n_dep=0
             for sha in $(git rev-list "${crev}..${target_sha}"); do
-                files=$(git show --name-only --format="" "$sha")
-                for prefix in $DEPLOYABLE_PREFIXES; do
-                    if printf '%s\n' "$files" | grep -q "^${prefix}"; then
-                        n_dep=$((n_dep+1)); break
-                    fi
-                done
+                if git show --name-only --format="" "$sha" \
+                     | grep -E "^(services/${svc}/|deploy/compose/prod/docker-compose\.${svc}\.yml)" \
+                     | grep -qvE '(/__tests__/|/tests/|\.test\.|\.spec\.|_test\.py$|/test_)'; then
+                    n_dep=$((n_dep+1))
+                fi
             done
             if [ "$n_dep" -gt 0 ]; then
                 say "      ${n_dep} of them touch deployable paths — this container is running OLD CODE."

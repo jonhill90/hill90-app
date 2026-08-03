@@ -393,3 +393,62 @@ setup() {
     # and the checkout line still printed, so the two facts stay separable
     [[ "$output" == *"host checkout"* ]]
 }
+
+@test "RUNNING: a commit in ANOTHER service does not mark this container behind" {
+    # The false positive the first version produced against real data: a change
+    # to services/ui made app-api report OLD CODE. A guard that fires on things
+    # it does not describe gets relaxed, and then guards nothing.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "services/ui/src/thing.ts" "fix(ui): unrelated to api"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"none touch a deployable path"* ]]
+}
+
+@test "RUNNING: a change to the CHECK ITSELF does not mark a container behind" {
+    # It also counted scripts/checks/check_deploy_drift.sh against app-api. The
+    # alarm is not inside any image.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "scripts/checks/check_deploy_drift.sh" "fix(ci): the alarm"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+}
+
+@test "RUNNING: a TEST-only change inside this service does not mark it behind" {
+    # The container does not run the tests. a10f5d0 was exactly this shape.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "services/api/src/__tests__/x.test.ts" "test(api): a case"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+}
+
+@test "RUNNING: but this service's OWN runtime code still fires" {
+    # The complement, so the three exclusions above cannot have muted the check.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "services/api/src/routes/thing.ts" "fix(api): real runtime change"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"running OLD CODE"* ]]
+}
+
+@test "RUNNING: this service's own COMPOSE file fires too" {
+    old=$(git rev-parse HEAD)
+    commit_at 5 "deploy/compose/prod/docker-compose.api.yml" "fix(api): change the container"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 1 ]
+}
