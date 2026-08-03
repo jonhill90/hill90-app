@@ -60,3 +60,6 @@ infra/secrets/*.env
 
 # carrier audit output (diagnostic, never committed)
 services/api/carrier-audit.jsonl
+
+# Written only when a test fails (issue #117 flake evidence); collected by CI, never committed.
+test-artifacts/

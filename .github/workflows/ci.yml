@@ -73,6 +73,27 @@ jobs:
       - run: npm ci
       - run: npm test
 
+      # issue #117 is CI-ONLY: it has never reproduced locally in ~40 runs, so a
+      # failure here is the only evidence there is, and re-running to provoke
+      # another establishes nothing the issue does not already record. The
+      # DashboardClient tests write test-artifacts/ on failure — the full
+      # untruncated DOM, the fetch calls, and a verdict on whether the text
+      # arrived late or never came. Collect it, or the next failure teaches us
+      # exactly as much as the previous four did.
+      #
+      # if: always() rather than failure(), because the job is what fails, and a
+      # future step between here and there would otherwise skip this silently.
+      # if-no-files-found: ignore, because a green run writes nothing — that is
+      # the design, not a fault.
+      - name: Collect flake evidence (#117)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-flake-evidence
+          path: services/ui/test-artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
   python:
     name: ${{ matrix.service }} (pytest)
     runs-on: ubuntu-latest
