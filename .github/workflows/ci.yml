@@ -35,6 +35,19 @@ jobs:
   api:
     name: services/api (jest)
     runs-on: ubuntu-latest
+    services:
+      # Only services/knowledge uses this; an unused container costs ~2s to start.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hill90_akm_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AKM_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hill90_akm_test
     defaults:
       run:
         working-directory: services/api
@@ -74,10 +87,14 @@ jobs:
           - service: services/ai
             args: ''
           # services/knowledge/tests/integration (19 files, 98 tests) needs a live
-          # pgvector Postgres on localhost:5432 and is excluded here. Run it
-          # against the local stack instead — see README, Running locally.
+          # pgvector Postgres. It ran NOWHERE from 2026-07-26 (#1) until now, and in
+          # that window it was hiding a real 500: /internal/admin/shared/stats?since=
+          # passed a str to asyncpg, which requires a datetime. A regression test that
+          # never runs is a check attached to nothing.
           - service: services/knowledge
-            args: '--ignore=tests/integration'
+            args: ''
+            # pgvector's image ships the extension but does not enable it per-database.
+            setup: 'PGPASSWORD=postgres psql -h localhost -U postgres -d hill90_akm_test -c "CREATE EXTENSION IF NOT EXISTS vector;"'
     defaults:
       run:
         working-directory: ${{ matrix.service }}
@@ -88,6 +105,9 @@ jobs:
           python-version: '3.12'
       - run: pipx install poetry
       - run: poetry install --no-interaction
+      - name: Enable pgvector (knowledge only)
+        if: matrix.setup != ''
+        run: ${{ matrix.setup }}
       - run: poetry run pytest ${{ matrix.args }}
 
   # Lint had NEVER run here. `grep -c lint ci.yml` returned 0 while all three

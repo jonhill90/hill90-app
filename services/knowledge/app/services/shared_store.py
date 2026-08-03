@@ -6,6 +6,8 @@ Follows patterns established in knowledge_store.py.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from typing import Any
 from uuid import UUID
 
@@ -580,7 +582,7 @@ async def record_retrieval(
 async def get_shared_stats(
     pool: asyncpg.Pool,
     *,
-    since: str | None = None,
+    since: datetime | None = None,
 ) -> dict[str, Any]:
     """Return aggregate quality/ops metrics. No PII, no raw queries."""
 
