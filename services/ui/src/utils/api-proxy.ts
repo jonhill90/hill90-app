@@ -1,5 +1,11 @@
 import { auth } from '@/auth'
 import { NextRequest, NextResponse } from 'next/server'
+import {
+  readTextLimited,
+  bodyTooLargeResponse,
+  BodyTooLargeError,
+  BODY_LIMIT_JSON,
+} from '@/utils/request-body'
 
 const API_URL = process.env.API_URL || 'http://localhost:3000'
 
@@ -55,7 +61,15 @@ export async function proxyToApi(
   }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    fetchOpts.body = await req.text()
+    // Counted, not just declared. Nothing here set any body limit, so a signed-in
+    // caller could make this process allocate an unbounded buffer before the API
+    // — which caps JSON at express's 100kb — ever saw the request.
+    try {
+      fetchOpts.body = await readTextLimited(req, BODY_LIMIT_JSON)
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) return bodyTooLargeResponse(err)
+      throw err
+    }
   }
 
   try {
