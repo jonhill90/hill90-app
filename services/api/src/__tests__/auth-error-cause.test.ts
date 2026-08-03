@@ -13,11 +13,21 @@ function run(token: string) {
   const mw = createRequireAuth({ issuer: ISS, getSigningKey: async () => kA.publicKey });
   const req: any = { headers: { authorization: `Bearer ${token}` } };
   const res: any = { status: () => res, json: () => res };
-  return mw(req, res, () => {}).then(() => {
-    const out = warn.mock.calls.map((c) => c.join(' ')).join('\n');
-    warn.mockRestore();
-    return out;
-  });
+  // try/finally, not .then(). mockRestore() used to sit in the success callback, so
+  // a rejection from the middleware skipped it and left console.warn mocked for
+  // every later test in this file — a global silently swallowed for the rest of the
+  // run. That is the exact leak class docs/decisions/api-suite-flakiness.md spent a
+  // day hunting, introduced by the fix for a different reporting failure.
+  //
+  // Caught by the Copilot review on #114 and merged past unread.
+  return (async () => {
+    try {
+      await mw(req, res, () => {});
+      return warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    } finally {
+      warn.mockRestore();
+    }
+  })();
 }
 
 describe('401 cause is reported', () => {
