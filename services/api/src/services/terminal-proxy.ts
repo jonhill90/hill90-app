@@ -38,6 +38,7 @@
 import { IncomingMessage } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { getPool } from '../db/pool';
+import { pumpWithBackpressure, RELAY_DEFAULTS } from './relay-backpressure';
 
 const CONTAINER_PREFIX = 'agentbox-';
 const AGENTBOX_PORT = 8054;
@@ -180,6 +181,14 @@ async function isParticipant(threadId: string, userSub: string): Promise<boolean
 const CLOSE_CREDENTIAL_EXPIRED = 4002;
 
 /**
+ * Close code for a session ended because a peer stopped reading and the relay
+ * queue passed its hard cap. Distinct from 4001/4002: nothing is wrong with the
+ * credential, so a client may reasonably reconnect — which is why the UI's
+ * terminalClose.ts leaves this one on the auto-reconnect path.
+ */
+const CLOSE_RELAY_OVERFLOW = 4003;
+
+/**
  * setTimeout stores its delay in a signed 32-bit int. A larger value overflows
  * and the timer fires IMMEDIATELY — which would turn a long-lived session into
  * one that dies at once. Anything beyond this is capped; the socket then simply
@@ -319,26 +328,47 @@ export function attachTerminalProxy(
           cleanupAll();
         }, Math.min(expiresAtMs - Date.now(), MAX_TIMEOUT_MS));
 
+        // Declared before cleanupAll so its teardown can reach them; assigned when
+        // the pumps are created below.
+        let stopAgentToClient: (() => void) | null = null;
+        let stopClientToAgent: (() => void) | null = null;
+
         function cleanupAll() {
+          stopAgentToClient?.();
+          stopClientToAgent?.();
           clearTimeout(expiryTimer);
           clearInterval(pingInterval);
           if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
           if (agentWs.readyState === WebSocket.OPEN) agentWs.close();
         }
 
-        // Relay: agentbox → client
-        agentWs.on('message', (data, isBinary) => {
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(data, { binary: isBinary });
-          }
-        });
+        // Relay, both ways, with backpressure. `ws.send()` does not block: a peer
+        // that stops reading used to accumulate the entire stream in this
+        // process's memory, and app-api has no mem_limit (issue #144). Above the
+        // high-water mark the SOURCE is paused so the stall reaches whoever is
+        // producing; past the hard cap the peer is not slow but gone, and the
+        // session ends rather than being held open at a cost to everyone else.
+        const isOpen = (s: { readyState: number }) => s.readyState === WebSocket.OPEN;
 
-        // Relay: client → agentbox
-        clientWs.on('message', (data, isBinary) => {
-          if (agentWs.readyState === WebSocket.OPEN) {
-            agentWs.send(data, { binary: isBinary });
+        const endForOverflow = (direction: string) => (queued: number) => {
+          console.error(
+            `[terminal-proxy] Closing thread=${threadId}: ${direction} queue ${queued} bytes ` +
+            `over the ${RELAY_DEFAULTS.hardCapBytes}-byte cap — peer is not reading`,
+          );
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.close(CLOSE_RELAY_OVERFLOW, 'peer not reading: buffer limit exceeded');
           }
-        });
+          cleanupAll();
+        };
+
+        stopAgentToClient = pumpWithBackpressure(
+          agentWs as never, clientWs as never,
+          { ...RELAY_DEFAULTS, isOpen, onOverflow: endForOverflow('agentbox to client') },
+        );
+        stopClientToAgent = pumpWithBackpressure(
+          clientWs as never, agentWs as never,
+          { ...RELAY_DEFAULTS, isOpen, onOverflow: endForOverflow('client to agentbox') },
+        );
 
         // Cleanup on either side close
         agentWs.on('close', cleanupAll);
