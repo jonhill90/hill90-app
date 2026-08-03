@@ -1,3 +1,7 @@
+// Module scope, not global script scope: without a top-level import or export,
+// TypeScript shares one scope across such files and identically named top-level
+// consts collide with TS2451. That fired for real between two of these files.
+export {};
 describe('Docker service module', () => {
   it('exports all expected functions', () => {
     const dockerModule = require('../services/docker');

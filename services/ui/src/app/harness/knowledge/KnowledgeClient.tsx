@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { fetchKnowledgePage, describePage } from '@/utils/knowledge-page'
 import { RefreshCw } from 'lucide-react'
 
 interface KnowledgeAgent {
@@ -78,6 +79,9 @@ export default function KnowledgeClient() {
   const [knowledgeAgents, setKnowledgeAgents] = useState<KnowledgeAgent[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
   const [entries, setEntries] = useState<KnowledgeEntry[]>([])
+  // What the server says exists, not entries.length (#180).
+  const [total, setTotal] = useState<number | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const [selectedEntry, setSelectedEntry] = useState<KnowledgeEntryFull | null>(null)
   const [typeFilter, setTypeFilter] = useState<string>('')
@@ -113,18 +117,25 @@ export default function KnowledgeClient() {
     fetchInitialData()
   }, [fetchInitialData])
 
-  const fetchEntries = useCallback(async (agentId: string) => {
-    setEntriesLoading(true)
-    setSelectedEntry(null)
+  const entriesRef = useRef<KnowledgeEntry[]>([])
+  entriesRef.current = entries
+
+  const fetchEntries = useCallback(async (agentId: string, append = false) => {
+    if (append) setLoadingMore(true)
+    else { setEntriesLoading(true); setSelectedEntry(null) }
     try {
-      const params = new URLSearchParams({ agent_id: agentId })
-      if (typeFilter) params.set('type', typeFilter)
-      const res = await fetch(`/api/knowledge/entries?${params}`)
-      if (res.ok) { const data = await res.json(); if (Array.isArray(data)) setEntries(data) }
+      const page = await fetchKnowledgePage<KnowledgeEntry>(
+        '/api/knowledge/entries',
+        { agent_id: agentId, ...(typeFilter ? { type: typeFilter } : {}) },
+        { offset: append ? entriesRef.current.length : 0 },
+      )
+      setEntries(prev => (append ? [...prev, ...page.entries] : page.entries))
+      setTotal(page.total)
     } catch (err) {
       console.error('Failed to fetch entries:', err)
     } finally {
       setEntriesLoading(false)
+      setLoadingMore(false)
     }
   }, [typeFilter])
 
@@ -180,13 +191,17 @@ export default function KnowledgeClient() {
     return sorted
   }, [entries, sortField, sortDir])
 
+  // Per-type counts are computed from what is loaded, so they are shown ONLY
+  // when the loaded page is the whole set. A breakdown of a truncated page is
+  // a row of small numbers that look like the answer (#180).
   const typeCounts = useMemo(() => {
+    if (total === null || total > entries.length) return {}
     const counts: Record<string, number> = {}
     for (const e of entries) {
       counts[e.entry_type] = (counts[e.entry_type] || 0) + 1
     }
     return counts
-  }, [entries])
+  }, [entries, total])
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -351,7 +366,7 @@ export default function KnowledgeClient() {
                     <h3 className="text-sm font-semibold text-white">{agentName(selectedAgent)}</h3>
                     {entries.length > 0 && (
                       <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-brand-900/40 text-brand-400 border border-brand-800">
-                        {entries.length} entr{entries.length !== 1 ? 'ies' : 'y'}
+                        {describePage(entries.length, total)}
                       </span>
                     )}
                   </div>
@@ -376,7 +391,7 @@ export default function KnowledgeClient() {
                         : 'bg-navy-900 text-mountain-400 border-navy-700 hover:border-navy-500'
                     }`}
                   >
-                    All ({entries.length})
+                    All{total !== null ? ` (${total.toLocaleString()})` : ''}
                   </button>
                   {ENTRY_TYPES.map((type) => {
                     const count = typeCounts[type] || 0
@@ -456,6 +471,16 @@ export default function KnowledgeClient() {
                           ))}
                         </tbody>
                       </table>
+                      {total !== null && entries.length < total && (
+                        <button
+                          onClick={() => selectedAgent && fetchEntries(selectedAgent, true)}
+                          disabled={loadingMore}
+                          className="w-full border-t border-navy-700 bg-navy-900 p-2 text-sm text-mountain-300 hover:text-white disabled:opacity-50 transition-colors cursor-pointer"
+                          data-testid="load-more"
+                        >
+                          {loadingMore ? 'Loading…' : `Load more (${(total - entries.length).toLocaleString()} remaining)`}
+                        </button>
+                      )}
                     </div>
 
                     {/* Content view */}

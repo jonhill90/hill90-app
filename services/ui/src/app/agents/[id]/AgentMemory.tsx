@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
+import { fetchKnowledgePage, describePage } from '@/utils/knowledge-page'
 
 const ENTRY_TYPES = ['note', 'plan', 'decision', 'journal', 'research'] as const
 type EntryType = typeof ENTRY_TYPES[number]
@@ -49,7 +50,12 @@ interface Props {
 
 export default function AgentMemory({ agentId }: Props) {
   const [entries, setEntries] = useState<Entry[]>([])
+  // `total` is what the server says exists, NOT entries.length. Null means no
+  // hop in the chain reported one, and that must read as unknown rather than
+  // as complete.
+  const [total, setTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null)
@@ -58,19 +64,34 @@ export default function AgentMemory({ agentId }: Props) {
   const [selectedContent, setSelectedContent] = useState<string | null>(null)
   const [contentLoading, setContentLoading] = useState(false)
 
-  const fetchEntries = useCallback(async () => {
+  // Read inside the callback rather than closing over `entries`, so appending
+  // does not re-create the callback and re-trigger the initial-load effect.
+  const entriesRef = useRef<Entry[]>([])
+  entriesRef.current = entries
+
+  const fetchEntries = useCallback(async (append = false) => {
+    const offset = append ? entriesRef.current.length : 0
+    if (!append) setLoading(true)
+    else setLoadingMore(true)
     try {
-      const res = await fetch(`/api/knowledge/entries?agent_id=${agentId}`)
-      if (res.ok) {
-        const data = await res.json()
-        setEntries(Array.isArray(data) ? data : [])
-      }
+      // The type filter goes UPSTREAM, not over the loaded page. Filtering a
+      // page client-side was fine while the endpoint returned every row; now
+      // that it returns 100, it would show "3 notes" out of a possible
+      // thousand and look complete (#180).
+      const page = await fetchKnowledgePage<Entry>('/api/knowledge/entries', {
+        agent_id: agentId,
+        ...(typeFilter === 'all' ? {} : { type: typeFilter }),
+      }, { offset })
+
+      setEntries(prev => (append ? [...prev, ...page.entries] : page.entries))
+      setTotal(page.total)
     } catch {
       // Non-fatal
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
-  }, [agentId])
+  }, [agentId, typeFilter])
 
   useEffect(() => {
     fetchEntries()
@@ -100,16 +121,21 @@ export default function AgentMemory({ agentId }: Props) {
       .finally(() => setContentLoading(false))
   }
 
-  // Filter entries by type
-  const filtered = typeFilter === 'all'
-    ? entries
-    : entries.filter(e => e.entry_type === typeFilter)
+  // The type filter is applied upstream now, so the page IS the filtered set.
+  const filtered = entries
 
-  // Compute counts
-  const typeCounts = entries.reduce<Record<string, number>>((acc, e) => {
-    acc[e.entry_type] = (acc[e.entry_type] || 0) + 1
-    return acc
-  }, {})
+  // Per-type counts can only be computed from what is loaded, so they are
+  // shown ONLY when the page is the whole set. A breakdown of a truncated
+  // page is a set of small numbers that look like the answer.
+  const isComplete = total !== null && total <= entries.length
+  const typeCounts = isComplete
+    ? entries.reduce<Record<string, number>>((acc, e) => {
+        acc[e.entry_type] = (acc[e.entry_type] || 0) + 1
+        return acc
+      }, {})
+    : {}
+
+  const hasMore = total !== null && entries.length < total
 
   // Entry detail view
   if (selectedEntry) {
@@ -155,7 +181,7 @@ export default function AgentMemory({ agentId }: Props) {
         <h2 className="text-lg font-semibold text-white">Memory</h2>
         {entries.length > 0 && (
           <p className="text-xs text-mountain-400 mt-1" data-testid="entry-count-summary">
-            {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+            {describePage(entries.length, total)}
             {Object.keys(typeCounts).length > 0 && (
               <span>
                 {' '}({Object.entries(typeCounts).map(([type, count], i) => (
@@ -273,6 +299,16 @@ export default function AgentMemory({ agentId }: Props) {
               </p>
             </button>
           ))}
+          {hasMore && (
+            <button
+              onClick={() => fetchEntries(true)}
+              disabled={loadingMore}
+              className="w-full rounded-md border border-navy-700 bg-navy-900 p-2 text-sm text-mountain-300 hover:border-navy-500 disabled:opacity-50 transition-colors cursor-pointer"
+              data-testid="load-more"
+            >
+              {loadingMore ? 'Loading…' : `Load more (${(total! - entries.length).toLocaleString()} remaining)`}
+            </button>
+          )}
         </div>
       ) : (
         <p className="text-sm text-mountain-500" data-testid="empty-state">
