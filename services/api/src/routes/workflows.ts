@@ -288,12 +288,20 @@ router.post('/:id/run', requireRole('user'), async (req: Request, res: Response)
       callbackUrl,
     }).catch((err: any) => {
       console.error(`[workflows] Dispatch failed for workflow ${wf.id}:`, err);
+      // This query needs its own handler. Nothing awaits this chain, so a
+      // rejection here has nowhere to go: Node 20 exits the process on an
+      // unhandled rejection and this service registers no handler for one. The
+      // database failing is exactly the case that coincides with a dispatch
+      // failure, so the recording of an outage must not be able to cause a worse
+      // one. Losing the row update is bad; losing the API container is worse.
       pool.query(
         `UPDATE workflow_runs SET status = 'error', error = $1, completed_at = NOW(),
          duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at))::int * 1000
          WHERE id = $2`,
         [err.message || 'Dispatch failed', run.id]
-      );
+      ).catch((updateErr: any) => {
+        console.error(`[workflows] Failed to record dispatch failure for run ${run.id}:`, updateErr);
+      });
     });
 
     // Update workflow last_run_at
@@ -498,10 +506,16 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
       model,
       callbackUrl: 'http://api:3000/internal/chat/callback',
     }).catch((err: any) => {
+      console.error(`[workflows] Webhook dispatch failed for workflow ${wf.id}:`, err);
+      // Own handler, for the same reason as the `/:id/run` site above: nothing
+      // awaits this chain, so an unhandled rejection here would take the process
+      // down on Node 20.
       pool.query(
         `UPDATE workflow_runs SET status = 'error', error = $1, completed_at = NOW() WHERE id = $2`,
         [err.message, runRows[0].id]
-      );
+      ).catch((updateErr: any) => {
+        console.error(`[workflows] Failed to record dispatch failure for run ${runRows[0].id}:`, updateErr);
+      });
     });
 
     await pool.query(`UPDATE workflow_runs SET thread_id = $1 WHERE id = $2`, [threadId, runRows[0].id]);
