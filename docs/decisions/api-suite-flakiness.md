@@ -1332,3 +1332,94 @@ Eliminated by measurement, cumulative:
   every observed failure had >4.6s of headroom
 
 **Nothing was disabled, retried or quarantined, and no timeout or interval was widened.**
+
+---
+
+# Round seven, 2026-08-03: the 501 instrument works, and the experiment did not decide
+
+**25 runs of half A, 0 failures, 0 audit rows.** The question round six posed is **not
+answered**. This section records why, what was learned anyway, and the one change that makes
+the next attempt sharp.
+
+## The instrument, and its control
+
+The 501 handler at `src/routes/profile.ts` was instrumented (working tree only, behaviour
+unchanged, env-gated) to record which request it believes it is answering: method,
+`originalUrl`, `baseUrl`, `path`, and the socket's local/remote ports.
+
+**The way this instrument could lie is by reporting the route pattern rather than the real
+request** — it would then always "agree" and prove nothing. So the control mounted the *same
+router* at a second path and required two distinct readings:
+
+```
+POST originalUrl=/profile/password     baseUrl=/profile     socket local=53509 remote=53510
+POST originalUrl=/zz-control/password  baseUrl=/zz-control  socket local=53511 remote=53512
+distinct originalUrls: 2 -> PASS: reports the actual request
+```
+
+## And then it measured nothing, exactly as feared
+
+Across the 25 half-A runs the audit produced **zero rows**. That is the third time in this
+investigation an instrument has silently reported nothing — after the mock counter that
+double-counted and the global `jest.fn` hook that intercepted 0 mocks. It was caught the same
+way: by running it against a case that must produce output.
+
+```
+rows from routes-profile.test.ts (which really calls the endpoint): 1
+```
+
+The instrument is fine. **The reason is a fact about the corpus, and it is the useful part of
+this round:**
+
+- `docs.test.ts` contains the string `/profile/password` only as an entry in a spec-contract
+  array (line 188). It never issues the request.
+- `routes-profile.test.ts` is the **only** file in the suite that calls it, and
+  `grep -c routes-profile /tmp/halfA.txt` = **0** — it is not in half A.
+
+**So no test in half A can legitimately make that handler fire.** Yet round six recorded
+`platform-connections › P2` (which *is* in half A) receiving a 501.
+
+## Why that makes the next attempt much sharper
+
+The round-six plan was to compare the handler's `originalUrl` against what the failing test
+sent. That comparison is now unnecessary: in a half-A run **any audit row at all is
+anomalous**, because nothing there should reach the handler. Presence or absence is the
+signal, and it does not depend on catching the failing assertion at the same moment.
+
+The premise was re-checked rather than assumed. `status(501)` appears once in the
+application; `src/routes/secrets.ts:122` mentions 501 only in a comment, and that route
+deliberately requests `?sealedcode=200&uninitcode=200&standbycode=200` and always replies
+with its own `res.json(...)`, so it never forwards an upstream 501. **One origin, confirmed.**
+
+## The honest verdict: undecided
+
+The condition set in round six was that agreement kills cross-talk and disagreement makes the
+connection the carrier. **Neither was observed, because no 501 event occurred.** 0 failures in
+25 runs — at the ~10% rate measured in rounds four to six that has a probability of about
+7%, so it is unremarkable but it is also not evidence the flake is gone, and it is not
+recorded as such.
+
+**The cross-talk lead is neither confirmed nor refuted.** It is not rescued either: nothing
+here argues for it.
+
+## What the next attempt should do, in one command
+
+Reapply the audit (it is not committed — a diagnostic belongs with the other diagnostics, and
+this one lives in a production route file, so it stays out of `main`):
+
+```
+# in services/api/src/routes/profile.ts, inside the POST /password handler,
+# before res.status(501):
+if (process.env.API_501_AUDIT) { try { const s:any=(_req as any).socket||{};
+  require('fs').appendFileSync(process.env.API_501_OUT||'/tmp/audit501.jsonl',
+  JSON.stringify({ts:Date.now(),method:_req.method,originalUrl:(_req as any).originalUrl,
+  baseUrl:(_req as any).baseUrl,path:(_req as any).path,
+  localPort:s.localPort,remotePort:s.remotePort,pid:process.pid})+'\n'); } catch(e){} }
+```
+
+Then run half A until a failure occurs and check for **any** row. Because half A has no
+legitimate caller, a single row is the finding; an unexpected 501 with **no** row means the
+status did not come from this handler at all, which would refute the unique-origin reasoning
+this lead rests on and is equally worth having.
+
+**Nothing was disabled, retried or quarantined, and no handler behaviour was changed.**
