@@ -49,8 +49,38 @@ export function createApp(opts: AppOptions = {}): Application {
     res.json({ status: 'healthy', service: 'api' });
   });
 
-  // Detailed health — public, includes DB check + runtime stats
-  app.get('/health/detailed', async (_req, res) => {
+  // Internal service-to-service endpoints (service-token auth, not Keycloak)
+  app.post('/internal/delegation-token', delegationTokenHandler);
+  app.post('/internal/chat/callback', chatCallbackHandler);
+  app.post('/internal/model-router/refresh-token', modelRouterRefreshHandler);
+  app.use('/internal/discord', discordInternalRouter);
+
+  // Protected routes
+  const issuer = getIssuer(opts.issuer);
+  const jwksUri = getJwksUri(issuer);
+
+  const requireAuth = createRequireAuth({
+    issuer,
+    getSigningKey: opts.getSigningKey || createJwksKeyResolver(jwksUri),
+  });
+
+  app.get('/me', requireAuth, (req, res) => {
+    res.json((req as any).user);
+  });
+
+  // Detailed health — REQUIRES A SESSION. It reports the exact Node build, process
+  // uptime, memory, database reachability and latency, and the tenant's inventory of
+  // agents, threads and workflows. Served anonymously from api.hill90.com until this
+  // gate was added, while /agents and /me next to it answered 401.
+  //
+  // Authentication, not `admin`: the caller is the UI's monitoring page, which is
+  // linked from the dashboard and reachable by any signed-in user. requireAuth also
+  // puts the refusal BEFORE the four database queries below, so an anonymous caller
+  // cannot drive load into the internal network or time its reachability.
+  //
+  // /health above stays public on purpose — the platform's TenantApiDown alert
+  // probes it. Both properties are pinned by tests.
+  app.get('/health/detailed', requireAuth, async (_req, res) => {
     const mem = process.memoryUsage();
     let dbStatus: 'connected' | 'error' = 'error';
     let dbLatencyMs: number | null = null;
@@ -98,25 +128,6 @@ export function createApp(opts: AppOptions = {}): Application {
       },
       platform: platformStats,
     });
-  });
-
-  // Internal service-to-service endpoints (service-token auth, not Keycloak)
-  app.post('/internal/delegation-token', delegationTokenHandler);
-  app.post('/internal/chat/callback', chatCallbackHandler);
-  app.post('/internal/model-router/refresh-token', modelRouterRefreshHandler);
-  app.use('/internal/discord', discordInternalRouter);
-
-  // Protected routes
-  const issuer = getIssuer(opts.issuer);
-  const jwksUri = getJwksUri(issuer);
-
-  const requireAuth = createRequireAuth({
-    issuer,
-    getSigningKey: opts.getSigningKey || createJwksKeyResolver(jwksUri),
-  });
-
-  app.get('/me', requireAuth, (req, res) => {
-    res.json((req as any).user);
   });
 
   // Agent management routes
