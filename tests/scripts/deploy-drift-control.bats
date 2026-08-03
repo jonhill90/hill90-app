@@ -452,3 +452,70 @@ setup() {
     run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
     [ "$status" -eq 1 ]
 }
+
+# ---------------------------------------- BEHIND is not the same as UNKNOWN ---
+# The alarm used to report both through one flag and one message, so an
+# unstamped container produced the headline "RUNNING CODE IS BEHIND" — a
+# specific finding, on evidence that was an absence of one. Someone acting on it
+# would have deployed looking for old code and found none.
+#
+# These tests exist to keep the two distinguishable. The control that matters is
+# the LAST one: the two states must not produce the same output, or the
+# distinction has been lost again whatever the wording says.
+
+@test "a stamped-but-older container says BEHIND, and exits 1" {
+    commit_at 200 "services/api/src/app.ts" "old"
+    local old_sha; old_sha=$(git rev-parse HEAD)
+    commit_at 200 "services/api/src/app.ts" "new"
+    git branch -f origin-main main
+
+    run env CONTAINER_REVISIONS="app-api=${old_sha}" \
+        DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"RUNNING CODE IS BEHIND"* ]]
+    [[ "$output" == *"running OLD CODE"* ]]
+    # It must NOT claim it could not identify the container: it could.
+    [[ "$output" != *"RUNNING CODE UNKNOWN"* ]]
+}
+
+@test "an unstamped container says UNKNOWN, not BEHIND, and exits 3" {
+    run env CONTAINER_REVISIONS="app-api=" \
+        DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
+
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"RUNNING CODE UNKNOWN"* ]]
+    [[ "$output" == *"UNSTAMPED"* ]]
+    # The headline must not assert drift it has no evidence for.
+    [[ "$output" != *"RUNNING CODE IS BEHIND"* ]]
+}
+
+@test "an unresolvable stamp is UNKNOWN too — a stamp that cannot be read is not a finding" {
+    run env CONTAINER_REVISIONS="app-api=deadbeefdeadbeef" \
+        DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
+
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"RUNNING CODE UNKNOWN"* ]]
+    [[ "$output" != *"RUNNING CODE IS BEHIND"* ]]
+}
+
+@test "CONTROL: the two states produce DIFFERENT output and DIFFERENT exit codes" {
+    commit_at 200 "services/api/src/app.ts" "old"
+    local old_sha; old_sha=$(git rev-parse HEAD)
+    commit_at 200 "services/api/src/app.ts" "new"
+    git branch -f origin-main main
+    local head_sha; head_sha=$(git rev-parse HEAD)
+
+    run env CONTAINER_REVISIONS="app-api=${old_sha}" DEPLOYED_SHA="$head_sha" bash "$CHECK"
+    local behind_status="$status" behind_output="$output"
+
+    run env CONTAINER_REVISIONS="app-api=" DEPLOYED_SHA="$head_sha" bash "$CHECK"
+    local unknown_status="$status" unknown_output="$output"
+
+    # Both are failures — neither state is a pass.
+    [ "$behind_status" -ne 0 ]
+    [ "$unknown_status" -ne 0 ]
+    # And they are TELLABLE APART, which is the whole point.
+    [ "$behind_status" -ne "$unknown_status" ]
+    [ "$behind_output" != "$unknown_output" ]
+}
