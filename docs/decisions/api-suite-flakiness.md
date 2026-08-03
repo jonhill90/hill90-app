@@ -2163,3 +2163,81 @@ the response actually said.
 
 **Nothing was disabled, retried or quarantined; production and test files remain
 byte-identical to `main`.**
+
+---
+
+# Round sixteen, 2026-08-03: the guard ships, and the cross-class question stays open
+
+## Part one: full capture for every status — no foreign response recurred
+
+The recorder was widened from "capture 501s" to "flag any response carrying a `Server:`
+header", since neither express nor Node's http server sets one and anything that does is not
+us. That covers **every status**, not just 501, which is what the 400/401 question needs.
+
+**30 runs of half A, 1 failure, and zero foreign responses of any status.**
+
+So the collision did not recur in this batch, and **the question of whether the 400/401 class
+shares this cause is still open.** It is not being answered by inference from the 501 case: a
+foreign daemon answering a different request with a different status is a *prediction*, and no
+instance of it was observed. Saying it is the same cause would be exactly the forcing this
+document has spent fifteen rounds avoiding.
+
+What has changed is that the question is now **answerable without another investigation**. The
+guard names the status and the `Server:` header of any foreign response the moment one occurs,
+so the next occurrence classifies itself.
+
+## Part two: the fix, and why it fails loudly
+
+`services/api/jest.portguard.js`, **on by default** — a guard, not a diagnostic.
+
+It does not retry, skip, rebind or work around the collision. It throws, naming what answered:
+
+```
+FOREIGN HTTP RESPONSE — this test received a response that this application did not write.
+  HTTP/1.1 501 Not Implemented  (Server: websocket-sharp/1.0)  from 127.0.0.1:51706
+
+A process outside this repository is listening inside the ephemeral port range
+supertest binds from, and answered instead of the app. Known offender on macOS:
+Logitech Options (LogiPluginService), which serves websocket-sharp and replies
+501 Not Implemented to any non-WebSocket request.
+
+Find it with:   lsof -nP -iTCP -sTCP:LISTEN | grep <port>
+```
+
+Positive-controlled both ways before shipping:
+
+```
+✓ does NOT fire on a normal app response
+✕ CONTROL-FOREIGN: a stranger answering must fail this test
+```
+
+**Rebinding away from the range was the alternative and was rejected.** A test that quietly
+avoids the collision still cannot tell a real response from a stranger's, and that is the
+family of defect this entire investigation was closing — an instrument that cannot distinguish
+an observation from an artefact. Failing loudly converts a silent wrong assertion into a named
+one.
+
+## For the next person meeting a weird status
+
+- **Daemon:** Logitech Options / `LogiPluginService` (macOS), serving `websocket-sharp/1.0`.
+- **Observed port:** `127.0.0.1:50441`, confirmed with
+  `lsof -nP -iTCP:50441` → `LogiPlugi 2654 jon ... (LISTEN)`.
+- **Range:** the ephemeral range supertest draws from — on this machine the collisions landed
+  in the **50400–50500** area, but the range is OS-assigned and the specific port is not the
+  point; any listener inside it will do this.
+- **Signature:** a status your application cannot emit, on a request that never appears in
+  your handler logs, with a `Server:` header your stack does not set.
+
+## Standing state
+
+The 501 class is explained and guarded. The 400/401/404 and timeout classes remain
+**unexplained and unattached** — deliberately.
+
+Eliminated across sixteen rounds: `process.env` and `globalThis`; "symptoms are purely
+logical"; order-dependence; the runInBand asymmetry; CPU starvation; "drained queue → promise
+never resolves"; the drained queue as the cause; the SSE timing margin; every route-level
+origin of the 501; the client layer; express-to-express cross-talk; port reuse within the
+process; the closing-server race; Node's HTTP server; supertest.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
