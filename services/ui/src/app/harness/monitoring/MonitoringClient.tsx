@@ -2,41 +2,10 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { Activity, Server, Bot, Clock, RefreshCw, ShieldCheck, HardDrive } from 'lucide-react'
-
-interface HealthStatus {
-  service: string
-  /**
-   * `unknown` is a third answer, and it is the point of this type.
-   *
-   * These probes are ordinary authenticated fetches, so a 401 or 403 arrives in
-   * the same shape as a real outage. Collapsing them into `unhealthy` meant this
-   * page told every non-admin that the vault was DOWN — /harness/monitoring is
-   * offered to all signed-in users, while /api/admin/secrets/status is
-   * requireRole('admin'). It reported the observer's permissions as the
-   * system's health.
-   *
-   * A monitoring page that cannot see a component must say so. A red dot meaning
-   * "you are not allowed to look" is worse than no dot: it sends someone to
-   * investigate an outage that is not happening, and it teaches people to
-   * ignore red on this page.
-   */
-  status: 'healthy' | 'unhealthy' | 'unknown'
-  error?: string
-}
-
-/**
- * Turn a failed probe response into a status.
- *
- * 401 and 403 are the ONLY codes treated as "cannot see". Everything else —
- * 500, 502, 404 — stays `unhealthy`, because a service answering 500 is
- * unhealthy no matter who is asking.
- */
-function statusFromFailedProbe(service: string, code: number): HealthStatus {
-  if (code === 401 || code === 403) {
-    return { service, status: 'unknown', error: 'Not visible to your account' }
-  }
-  return { service, status: 'unhealthy', error: `HTTP ${code}` }
-}
+import {
+  probeService,
+  type HealthStatus,
+} from '@/utils/service-probe'
 
 interface Agent {
   id: string
@@ -146,52 +115,31 @@ export default function MonitoringClient() {
   const [detailed, setDetailed] = useState<any>(null)
 
   const fetchHealth = useCallback(async () => {
-    try {
-      const res = await fetch('/api/health')
-      if (res.ok) {
+    setHealth(
+      await probeService('api', '/api/health', async (res) => {
         const data = await res.json()
-        setHealth({ service: data.service || 'api', status: 'healthy' })
-      } else {
-        setHealth(statusFromFailedProbe('api', res.status))
-      }
-      // Also fetch detailed stats
+        return { service: data.service || 'api', status: 'healthy' }
+      }),
+    )
+    // Detailed stats are supplementary, not a health signal: this endpoint is
+    // admin-adjacent and a refusal here must not colour the API panel.
+    try {
       const detRes = await fetch('/api/health/detailed')
       if (detRes.ok) setDetailed(await detRes.json())
     } catch {
-      setHealth({ service: 'api', status: 'unhealthy', error: 'Connection failed' })
-    } finally {
-      setHealthLoading(false)
+      // deliberately ignored — see above
     }
+    setHealthLoading(false)
   }, [])
 
   const fetchVault = useCallback(async () => {
-    try {
-      const res = await fetch('/api/admin/secrets/status')
-      if (res.ok) {
-        setVaultHealth({ service: 'vault', status: 'healthy' })
-      } else {
-        setVaultHealth(statusFromFailedProbe('vault', res.status))
-      }
-    } catch {
-      setVaultHealth({ service: 'vault', status: 'unhealthy', error: 'Connection failed' })
-    } finally {
-      setVaultLoading(false)
-    }
+    setVaultHealth(await probeService('vault', '/api/admin/secrets/status'))
+    setVaultLoading(false)
   }, [])
 
   const fetchStorage = useCallback(async () => {
-    try {
-      const res = await fetch('/api/storage/buckets')
-      if (res.ok) {
-        setStorageHealth({ service: 'storage', status: 'healthy' })
-      } else {
-        setStorageHealth(statusFromFailedProbe('storage', res.status))
-      }
-    } catch {
-      setStorageHealth({ service: 'storage', status: 'unhealthy', error: 'Connection failed' })
-    } finally {
-      setStorageLoading(false)
-    }
+    setStorageHealth(await probeService('storage', '/api/storage/buckets'))
+    setStorageLoading(false)
   }, [])
 
   const fetchAgents = useCallback(async () => {
