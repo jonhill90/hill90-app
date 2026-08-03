@@ -2828,3 +2828,89 @@ occurrence classifies itself in the ordinary course of someone's failing build.
 **If a failing run ever shows a spurious 401 with no probe row and no `[auth] token rejected`
 line, suspect the instrument before the theory.** Seven have misled today, and the pattern is
 that the convenient result is the dangerous one.
+
+---
+
+# First-line diagnostic for any suspected flake: does it pass alone?
+
+**Promoted out of the narrative because it decided two separate investigations today and
+costs one run.**
+
+Before any instrument, any hypothesis and any batch, run the failing test **by itself**:
+
+```
+api  routes-agents-events, platform-eligibility, platform-models, routes-notifications
+       0 failures in 30 runs each, alone — 0/90 — against 11 failures in company
+ui   DashboardClient.test.tsx
+       0 failures in 20 runs alone; 0 in 8 full-suite runs locally; 3 failures in CI
+```
+
+What it buys, immediately and cheaply:
+
+- **It passes alone → the defect needs company.** Every single-file theory is dead before it
+  is written, and the search space becomes interaction, environment or infrastructure.
+- **It fails alone → the defect is in that file**, and the whole cross-file search is
+  unnecessary. Fourteen rounds of this document would have been avoidable if that had been the
+  answer.
+- **It cannot be run alone → that is itself a finding** about the suite's coupling.
+
+It is not a substitute for characterisation. It is what runs *before* it, because a wrong
+answer here sends the next week in the wrong direction.
+
+---
+
+# services/ui (issue #117): characterised, unresolved
+
+Same discipline, deliberately not hunted.
+
+## It passes alone
+
+```
+DashboardClient.test.tsx, isolated:      0 / 20 failed
+full ui suite, locally:                  0 / 8  failed
+CI:                                      3 failures today (app#114 once, app#116 twice)
+main's own ui job:                       0 / 5 most recent runs — green at HEAD aa7aed4
+```
+
+**So: not a broken `main`, not infrastructure, and not caused by the PRs that surfaced it** —
+app#116 was docs-only and app#114 touched only `services/api`. It needs company *and* CI.
+
+## The actual assertion, which the issue did not have
+
+```
+× DashboardClient > renders active agents widget with running agents
+  → Unable to find an element with the text: Scout
+    TestingLibraryElementError
+```
+
+Not a crash, not a timeout, not a network error: a rendered element that was **not there yet**
+when a synchronous query looked for it.
+
+## One structural fact, offered as a fact
+
+```ts
+await waitFor(() => {
+  expect(screen.getByText('Active Agents')).toBeInTheDocument()   // line 199, awaited
+})
+expect(screen.getByText('Scout')).toBeInTheDocument()             // line 202, NOT awaited
+```
+
+The assertion that fails is **synchronous and outside the `waitFor`** that guards the one
+before it. If `Scout` arrives in a later tick than `Active Agents`, the second assertion races
+the render.
+
+**That is a candidate consistent with the observed error, not the cause.** It has not been
+tested, and this document's history is emphatic about the difference — a plausible mechanism
+that matched the symptoms was wrong at least four times today.
+
+**What would settle it cheaply:** change nothing, and instead assert `findByText('Scout')` in a
+throwaway copy under the CI-like conditions that reproduce it. If it stops failing, the race
+is real; if it still fails, the synchronous query is innocent and the data itself is missing.
+Neither is a fix — the fix follows the answer.
+
+## Status: unresolved
+
+The rate is 3 CI failures against 0 in 28 local runs. That is enough to say **CI-only so far**
+and not enough to quote a rate, and no rate is quoted. **Nothing was retried to green** — the
+job was diagnosed rather than re-run, because a retry that passes establishes only that it is
+flaky, which #117 already records.
