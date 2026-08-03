@@ -95,6 +95,24 @@ jobs:
             args: ''
             # pgvector's image ships the extension but does not enable it per-database.
             setup: 'PGPASSWORD=postgres psql -h localhost -U postgres -d hill90_akm_test -c "CREATE EXTENSION IF NOT EXISTS vector;"'
+    services:
+      # Used only by the services/knowledge arm; the other three ignore it and it
+      # costs a couple of seconds to start. tests/integration needs a real pgvector
+      # Postgres — see docs and the comment on the matrix entry below.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hill90_akm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AKM_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hill90_akm_test
     defaults:
       run:
         working-directory: ${{ matrix.service }}
