@@ -199,5 +199,7 @@ jobs:
             0) echo "::notice::No actionable deploy drift." ;;
             1) echo "Deploy the affected stacks, or record why not." ;;
             2) echo "The alarm could not determine what is running. Treat as unverified, not as fine." ;;
+            3) echo "A container carries no usable revision stamp, so the alarm CANNOT SAY whether it is current. This is an absence of evidence, not a finding of drift — redeploy the affected stacks to stamp them." ;;
+            *) echo "::error::Unrecognised exit code $rc from check_deploy_drift.sh — a new state was added without a branch here. Treat as unverified." ;;
           esac
           exit $rc

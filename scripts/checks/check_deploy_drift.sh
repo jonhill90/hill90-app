@@ -63,6 +63,14 @@
 #   0  no actionable drift  (in sync, docs-only, or inside the grace window)
 #   1  ACTIONABLE DRIFT     (deployable code merged and not running, or host ahead)
 #   2  CANNOT DETERMINE     (no usable deployed SHA — never silent, never green)
+#   3  RUNNING CODE UNKNOWN (a container carries no usable stamp: this check
+#                            cannot say whether it is current OR behind)
+#
+# 1 AND 3 ARE DELIBERATELY DIFFERENT, and a caller that collapses them to
+# "non-zero" loses the distinction this script exists to make. 1 is a finding
+# about the code. 3 is the ABSENCE of a finding — the check has no information.
+# Reporting 3 as 1 is what this script used to do, and it meant the alarm's
+# headline asserted drift on evidence it did not have.
 
 set -uo pipefail
 
@@ -143,7 +151,18 @@ fi
 # ------------------------------------------------ what is actually RUNNING ---
 # The checkout comparison above is necessary and not sufficient. This is the
 # part that answers the question the alarm's name implies.
-running_fail=0
+# TWO DIFFERENT FINDINGS, TRACKED SEPARATELY.
+#
+# "this container runs code older than main" is a fact about the code.
+# "this container carries no usable stamp" is an ABSENCE of information.
+#
+# They were one flag and one message, so the alarm's headline asserted BEHIND
+# while its evidence was, for unstamped containers, that it could not tell. That
+# is this repository's own defect family pointed the other way: a check reporting
+# a specific finding when what it has is an absence of one. A reader who saw
+# "RUNNING CODE IS BEHIND" and then deployed would find nothing had been behind.
+running_behind=0
+running_unknown=0
 if [ -z "$CONTAINER_REVISIONS" ]; then
     say ""
     say "  RUNNING CONTAINERS: not reported."
@@ -167,13 +186,14 @@ else
         if ! printf '%s' "$crev" | grep -qE '^[0-9a-f]{7,40}$'; then
             say "    ${cname}: UNSTAMPED — created before the stamp existed, or by hand."
             say "      Not a pass. Nothing is known about this container's code."
-            running_fail=1
+            running_unknown=1
             continue
         fi
 
         if ! git rev-parse --verify --quiet "${crev}^{commit}" >/dev/null; then
             say "    ${cname}: revision ${crev:0:12} is not a commit in this repository."
-            running_fail=1
+            say "      Not a pass. The stamp exists but cannot be resolved here."
+            running_unknown=1
             continue
         fi
 
@@ -203,7 +223,7 @@ else
             done
             if [ "$n_dep" -gt 0 ]; then
                 say "      ${n_dep} of them touch deployable paths — this container is running OLD CODE."
-                running_fail=1
+                running_behind=1
             else
                 say "      none touch a deployable path"
             fi
@@ -211,9 +231,16 @@ else
     done < <(printf '%s\n' "$CONTAINER_REVISIONS" | tr ' ' '\n' | grep -F '=' || true)
 fi
 
-if [ "$running_fail" -ne 0 ]; then
-    fail "RUNNING CODE IS BEHIND for ${LABEL}: at least one container is running code older than ${TARGET_REF}, or could not be identified. The host checkout may well be current — that is the gap #158 is about, and it is why this check no longer stops at the checkout."
+# Reported separately, and with different exit codes, so a caller can tell a
+# defect from an absence of evidence. Both are non-zero: neither is a pass.
+if [ "$running_behind" -ne 0 ]; then
+    fail "RUNNING CODE IS BEHIND for ${LABEL}: at least one container is running code older than ${TARGET_REF} on a path inside its own image. The host checkout may well be current — that is the gap #158 is about, and it is why this check no longer stops at the checkout."
     exit 1
+fi
+
+if [ "$running_unknown" -ne 0 ]; then
+    fail "RUNNING CODE UNKNOWN for ${LABEL}: at least one container carries no usable revision stamp, so this check CANNOT SAY whether it is current or behind. This is an absence of evidence, not a finding of drift — do not read it as 'behind'. Redeploy the affected stacks to stamp them."
+    exit 3
 fi
 
 # ---------------------------------------------------------------- in sync ---
