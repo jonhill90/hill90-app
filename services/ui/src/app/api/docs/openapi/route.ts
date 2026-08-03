@@ -1,5 +1,10 @@
 import { auth } from '@/auth'
 import { NextResponse } from 'next/server'
+import {
+  readUpstreamTextLimited,
+  upstreamTooLargeResponse,
+  UpstreamTooLargeError,
+} from '@/utils/request-body'
 
 const API_URL = process.env.API_URL || 'http://localhost:3000'
 
@@ -18,7 +23,14 @@ export async function GET() {
       headers: { Authorization: `Bearer ${session.accessToken}` },
       signal: AbortSignal.timeout(30000),
     })
-    const data = await res.json()
+    let raw: string
+    try {
+      raw = await readUpstreamTextLimited(res)
+    } catch (err) {
+      if (err instanceof UpstreamTooLargeError) return upstreamTooLargeResponse(err)
+      throw err
+    }
+    const data = raw === '' ? null : JSON.parse(raw)
     return NextResponse.json(data, { status: res.status })
   } catch (err) {
     console.error('[docs-proxy] Error:', err)

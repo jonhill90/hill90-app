@@ -115,6 +115,7 @@ describe('JSON proxy pass-through', () => {
         get: (name: string) => name === 'content-type' ? 'application/json' : null,
       },
       json: () => Promise.resolve({ id: '123', name: 'test-agent' }),
+      text: () => Promise.resolve(JSON.stringify({ id: '123', name: 'test-agent' })),
     })
 
     const req = makeRequest(['some-id'])
@@ -133,6 +134,7 @@ describe('JSON proxy pass-through', () => {
         get: () => 'application/json',
       },
       json: () => Promise.resolve({}),
+      text: () => Promise.resolve(JSON.stringify({})),
     })
 
     const req = makeRequest(['some-id'])

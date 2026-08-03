@@ -6,6 +6,9 @@ import {
   bodyTooLargeResponse,
   BodyTooLargeError,
   BODY_LIMIT_UPLOAD,
+  readUpstreamTextLimited,
+  upstreamTooLargeResponse,
+  UpstreamTooLargeError,
 } from '@/utils/request-body'
 
 const API_URL = process.env.API_URL || 'http://localhost:3000'
@@ -52,7 +55,14 @@ async function proxyUpload(req: NextRequest, { params }: { params: Promise<{ pat
       body: payload,
       signal: AbortSignal.timeout(60000),
     })
-    const data = await res.json()
+    let raw: string
+    try {
+      raw = await readUpstreamTextLimited(res)
+    } catch (err) {
+      if (err instanceof UpstreamTooLargeError) return upstreamTooLargeResponse(err)
+      throw err
+    }
+    const data = raw === '' ? null : JSON.parse(raw)
     return NextResponse.json(data, { status: res.status, headers: NO_SHARED_CACHE })
   } catch (err) {
     console.error('[storage-proxy-upload] Error:', err)
