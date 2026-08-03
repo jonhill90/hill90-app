@@ -3103,3 +3103,81 @@ merits, and it is the whole claim.
 test to fail, which is exactly what a suite cannot assert about itself. The two-arm control
 above is the evidence, and it was run rather than reasoned; it is deliberately not committed,
 because a test file whose positive arm must fail cannot live in a green suite.
+
+## Does the #130 leak class explain #117? No — and the reasons are measurements, not inference
+
+Asked after #130 fixed five restore-not-in-`finally` sites in `services/ui`, three of them
+live. If those leaks were firing, the flake and the fix should be causally connected, and
+the check is whether the failing test is downstream of a leaking one. **It is not, on three
+independent grounds, and the third makes the ordering question void.**
+
+### 1. The leak never fired in any of the three CI failures
+
+A skipped restore is **conditional**: it only happens if the guarded test throws first.
+Pulled from the CI logs of all three known failures:
+
+| Run | PR | Failing file | Rest of the suite |
+|---|---|---|---|
+| 30811619768 | #114 | `DashboardClient.test.tsx` | **67 passed (68)** |
+| 30813368511 | #116 | `DashboardClient.test.tsx` | **67 passed (68)** |
+| 30813600887 | #116 | `DashboardClient.test.tsx` | **67 passed (68)** |
+
+`ModelsClient`, `ConnectionsClient`, `auth-callbacks`, `PoliciesClient` and `api-proxy` —
+every file that carried a leak — **passed in all three runs**. No guarded test threw, so no
+restore was skipped, so nothing leaked. That alone is decisive and needed no experiment.
+
+### 2. The leak cannot cross a file boundary anyway — measured in three arms
+
+Two temporary control files: A leaks `window.confirm` by throwing before `mockRestore()`;
+B checks whether A's leak arrived, **and leaks in-file itself as a positive control in the
+same run**, so a null from B is only believable if B's own detector visibly fires.
+
+| Arm | cross-file (B1) | in-file positive control (B3) |
+|---|---|---|
+| default settings, as CI runs | **not mocked** | **mocked** |
+| `--no-file-parallelism --poolOptions.forks.singleFork` | **not mocked** | **mocked** |
+| the above plus `--isolate=false` | **not mocked** | **mocked** |
+
+The detector fires every time on the in-file leak and never on the cross-file one, including
+with isolation explicitly disabled and both files in one process. **So "downstream in file
+order" is not a question that can be answered yes: the boundary is not permeable.** The
+controls are not committed — a file whose positive arm must fail cannot live in a green suite.
+
+### 3. `DashboardClient.test.tsx` contains no member of the class
+
+No `spyOn`, no unrestored stub. Its `fetch` is a module-level `vi.stubGlobal`, and the one
+test that reconfigures it (`shows platform overview even when some fetches fail`,
+immediately before the failing test) is overwritten by `mockFetchDefaults()` in `beforeEach`
+— checked, because `vi.clearAllMocks()` does *not* clear an implementation and that would
+have been a real in-file leak returning `[]` for `/api/agents`, which is exactly the observed
+symptom. It does not happen: the implementation is re-installed every test.
+
+**Verdict: it does not explain #117.** Not "partly" — there is no path by which it could
+contribute, and no run in which it was even armed.
+
+### What the CI logs did give up, which #117 does not record
+
+**One run failed two tests, not one.** Run 30813368511 failed *renders active agents widget*
+(`Scout`) **and** *renders recent chat threads widget* (`Deploy discussion`). Both have the
+identical shape:
+
+```ts
+await waitFor(() => expect(screen.getByText('Active Agents')).toBeInTheDocument())  // heading
+expect(screen.getByText('Scout')).toBeInTheDocument()                               // content, sync
+
+await waitFor(() => expect(screen.getByText('Recent Chats')).toBeInTheDocument())   // heading
+expect(screen.getByText('Deploy discussion')).toBeInTheDocument()                   // content, sync
+```
+
+In both, the `waitFor` guards the widget **heading** and the synchronous query then asks for
+**data-dependent content**. Two different widgets failing the same way in one run is
+consistent with the line-202 race candidate and is evidence the candidate is not specific to
+`Scout`. It remains a candidate: nothing here measures it.
+
+**All three failures predate the paired assertion.** At `c1cc4407` and `4233f54f` and
+`055578cb`, line 202 was the bare `expect(screen.getByText('Scout'))` with no `findByText`
+before it. So the disagreement experiment recorded above has **not yet had a CI failure to
+report on** — which is why #117 is still unresolved, and why the next CI failure of this test
+is worth reading carefully rather than re-running.
+
+**#117 stays open. Nothing was retried, quarantined or skipped.**
