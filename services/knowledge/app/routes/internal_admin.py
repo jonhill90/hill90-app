@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from app.services import knowledge_store
@@ -63,10 +63,22 @@ async def list_agents(request: Request) -> list[dict[str, Any]]:
 @router.get("/entries")
 async def list_entries(
     request: Request,
+    response: Response,
     agent_id: str = Query(..., description="Agent ID to filter by"),
     type: str | None = Query(None, description="Optional entry type filter"),
+    limit: int = Query(500, ge=1, le=2000, description="Max entries to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip before the page"),
 ) -> list[dict[str, Any]]:
-    """List entries for a specific agent, optionally filtered by type."""
+    """List entries for a specific agent, optionally filtered by type.
+
+    The response body stays a JSON array — bounded now, but the same shape an
+    un-updated consumer already handles. ``services/ui``'s AgentMemory does
+    ``Array.isArray(data) ? data : []``, so shipping a body object from here
+    while the UI is still the old build renders an EMPTY knowledge base: the
+    exact silent truncation this bound exists to prevent, caused by the fix
+    for it. The total therefore travels in ``X-Total-Count``; moving it into
+    the body is safe only once api and ui read the header (issue #180).
+    """
     _verify_service_token(request)
     pool = request.app.state.pool
 
@@ -76,7 +88,17 @@ async def list_entries(
                       status, sync_status, created_at, updated_at
                FROM knowledge_entries
                WHERE agent_id = $1 AND status = 'active' AND entry_type = $2
-               ORDER BY updated_at DESC""",
+               ORDER BY updated_at DESC, id DESC
+               LIMIT $3 OFFSET $4""",
+            agent_id,
+            type,
+            limit,
+            offset,
+        )
+        total = await pool.fetchval(
+            """SELECT COUNT(*)
+               FROM knowledge_entries
+               WHERE agent_id = $1 AND status = 'active' AND entry_type = $2""",
             agent_id,
             type,
         )
@@ -86,9 +108,22 @@ async def list_entries(
                       status, sync_status, created_at, updated_at
                FROM knowledge_entries
                WHERE agent_id = $1 AND status = 'active'
-               ORDER BY updated_at DESC""",
+               ORDER BY updated_at DESC, id DESC
+               LIMIT $2 OFFSET $3""",
+            agent_id,
+            limit,
+            offset,
+        )
+        total = await pool.fetchval(
+            """SELECT COUNT(*)
+               FROM knowledge_entries
+               WHERE agent_id = $1 AND status = 'active'""",
             agent_id,
         )
+
+    # COUNT(*) over the same WHERE, never len(rows): a total derived from the
+    # page is a number that agrees with itself and calls truncation complete.
+    response.headers["X-Total-Count"] = str(total)
 
     return [_serialize(dict(r)) for r in rows]
 
