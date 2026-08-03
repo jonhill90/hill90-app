@@ -123,9 +123,19 @@ were kept.
 
 **MinIO: storage moved up, and this section used to say the opposite.** As of
 2026-07-31 the platform runs `minio`, the app consumes it through the scoped
-`tenant-hill90-app` credential, and `app-minio` is stopped-but-retained until
-2026-08-01 01:41 UTC. This file previously listed it as *genuinely open* with
+`tenant-hill90-app` credential, and `app-minio` is stopped. Its retention window
+**expired 2026-08-01 01:41 UTC**; `Verified 2026-08-03` the container is still
+present as `Exited (0)` and the volume `prod_app-minio-data` still exists, so the
+removal is an untaken decision rather than a pending one — see the `minio` entry
+under Fast facts. This file previously listed it as *genuinely open* with
 "there is no platform MinIO"; both halves are now false.
+
+*(This paragraph read "stopped-but-retained **until** 2026-08-01 01:41 UTC" for
+two days after that moment passed, while the Fast-facts entry had already been
+corrected to say the window opened and nothing was done. One file, two sections,
+opposite claims about the same container — and "until" is the more dangerous of
+the two, because a reader who stops at the Settled section never reaches the
+correction.)*
 
 ## Genuinely open
 
