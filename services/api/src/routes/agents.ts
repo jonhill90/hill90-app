@@ -22,6 +22,7 @@ import {
 } from '../services/docker';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
+import { createBoundedSseWriter, SSE_DEFAULTS } from '../services/sse-writer';
 import {
   generateAgentAkmToken,
   getAkmEnvVars,
@@ -1748,6 +1749,28 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
           'tail', '-f', '-n', String(tail), '/var/log/agentbox/events.jsonl',
         ]);
 
+        // Every SSE frame goes through this. res.write() returns false when the
+        // socket is full and Node will happily buffer past that, without limit —
+        // see sse-writer.ts. Backpressure pauses the container stream; the cap
+        // ends a stream nobody is reading.
+        const sse = createBoundedSseWriter(res as never, {
+          hardCapBytes: SSE_DEFAULTS.hardCapBytes,
+          onOverflow: (queued) => {
+            console.error(
+              `[agents] SSE aborted: ${queued} bytes queued for a client that is not reading`,
+            );
+            clearInterval(pollInterval);
+            (stream as unknown as { destroy?: () => void }).destroy?.();
+            res.write(
+              `event: error\ndata: ${JSON.stringify({
+                error: 'Client not reading',
+                detail: 'The event stream was stopped because its buffer limit was exceeded.',
+              })}\n\n`,
+            );
+            res.end();
+          },
+        });
+
         // Phase 3: inference poll
         const INFERENCE_POLL_MS = 3000;
         const pollInterval = setInterval(async () => {
@@ -1759,7 +1782,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
             );
             for (const row of newRows) {
               if (res.writableEnded || res.destroyed) return;
-              res.write(`data: ${JSON.stringify(mapInferenceToEvent(row))}\n\n`);
+              sse.write(`data: ${JSON.stringify(mapInferenceToEvent(row))}\n\n`);
             }
             if (newRows.length > 0) {
               const last = newRows[newRows.length - 1];
@@ -1770,6 +1793,11 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
             console.error('[agents] SSE inference poll failed (continuing):', err);
           }
         }, INFERENCE_POLL_MS);
+
+        // The producer to slow down when the client falls behind. Without this the
+        // writer can only refuse writes; with it, `tail -f` stops being read and
+        // the stall reaches the agent instead of this process's memory.
+        sse.setSource(stream as unknown as { pause(): void; resume(): void });
 
         let buffer = '';
         // Bytes held in the trailing INCOMPLETE line. On this path the hazard is
@@ -1811,7 +1839,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
             if (!trimmed) continue;
             // Validate JSON — skip any non-JSON lines (e.g. tail errors)
             try { JSON.parse(trimmed); } catch { continue; }
-            res.write(`data: ${trimmed}\n\n`);
+            sse.write(`data: ${trimmed}\n\n`);
           }
         });
 
