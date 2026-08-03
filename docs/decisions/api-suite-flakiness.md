@@ -850,3 +850,104 @@ Still open, and now the narrowest description available:
 evidence. Nothing was disabled, retried or quarantined — the rate is unchanged at 25% (5/20)
 because nothing was done to change it, and converting a known flake into a silent one would
 be worse than leaving it.
+
+---
+
+# Round three, 2026-08-03: the hypothesis's one supporting measurement does not replicate
+
+**210 runs.** Attacking the standing hypothesis rather than confirming it, as asked.
+
+## The arithmetic first, because a handful of green runs proves nothing
+
+| Arm | Files | Result | 95% CI |
+|---|---|---|---|
+| half A, `--runInBand`, alphabetical | 29 | **3/40 = 7.5%** | [0, 15.7] |
+| half A, `--runInBand`, **reversed** | 29 | **2/40 = 5.0%** | [0, 11.8] |
+| half A, **default workers** | 29 | **6/40 = 15.0%** | [3.9, 26.1] |
+| the three victims, each alone | 1 | **0/90 = 0%** | — |
+
+Harness committed as `services/api/flake-harness.sh`; it records pass/fail, the
+failing suite and a classified symptom per run, and does not retry anything.
+
+**Note the local rate is lower than CI's 25%.** 7.5% here against 25% there, same
+files. Whatever modulates it is environmental, so a rate measured on one machine
+should not be quoted as the rate.
+
+## What this falsifies
+
+**The single measurement the standing hypothesis called its active support does
+not replicate, and inverts.** That section says:
+
+> One measurement actively supports it. `--runInBand` was *slightly worse* than
+> default workers (4/10 against 3/10) … A per-process carrier predicts exactly
+> that ordering, and no mechanism-in-the-code theory does.
+
+Measured again at four times the sample: **workers 6/40 (15.0%) against runInBand
+3/40 (7.5%)** — the opposite ordering. The intervals overlap, so this does not
+prove workers is worse; it does establish that *runInBand is not worse*, which is
+the claim the hypothesis rested on. The original 4/10-vs-3/10 was two failures'
+difference at n=10 and should not have carried argumentative weight.
+
+**Order is not the variable, now at n=80.** Reversing all 29 files end to end
+moved 7.5% to 5.0%, well inside noise. The prior claim was right and is now
+measured properly.
+
+**Cross-file is confirmed for three new victims.** `platform-eligibility`,
+`platform-models` and `routes-agents-events` each failed in a full half-A run and
+each passed **30/30 alone**. 0/90 solo against 11 failures in company.
+
+## What the failures actually look like now
+
+| Arm | Victim | Symptom |
+|---|---|---|
+| runInBand | `platform-eligibility` | 200 → **501** |
+| runInBand | `routes-agents-events` | 409 → **401** |
+| runInBand | `platform-models` | 200 → **404** |
+| reversed | `routes-agents-events` | 200 → **501** |
+| reversed | `routes-agents` | 200 → **401** |
+| workers | `routes-agents-events` ×4 | OTHER, 200→**400**, **TIMEOUT**, 200→**404** |
+| workers | `routes-agents-policy` | 200 → **404** |
+| workers | `routes-agents` | 200 → **501** |
+
+**The symptom set is now six wide** — 400, 401, 404, 501, timeout, and an
+unclassified assertion. `401` and `400` are new to this record. Any theory
+requiring a single logical carrier has to explain an authentication failure and a
+timeout in the same set.
+
+## The strongest signal is not logical at all
+
+**`routes-agents-events` is 6 of 11 failures**, and its duration is wildly
+unstable: 8.8s and 8.8s under runInBand, then **11.5s, 12.6s, 12.9s and 83.2s**
+under workers — in a half that completes in ~11s in total. An 83-second file is
+not a branch condition being read differently. It is a file that could not get
+what it needed.
+
+Taken with workers failing at twice the runInBand rate, the shape that fits is
+**contention, not carriage**: more concurrency, more failures, concentrated in the
+one file that does the most asynchronous work. That is the opposite of the
+standing hypothesis's direction, which predicts sharing (runInBand) is worse.
+
+**This is a lead, not a finding.** Nothing here identifies the resource.
+
+## Where the search space now stands
+
+Eliminated by measurement, cumulative:
+
+- `process.env` and `globalThis` as carriers (round two, positive-controlled)
+- "symptoms are purely logical" — timeout, and now 401/400, are in the set
+- **order-dependence** — n=80, forward against reversed, no effect
+- **the runInBand-worse-than-workers asymmetry** — does not replicate at n=80
+
+Still open, narrowed:
+
+- The fault is **cross-file** and needs company: 0/90 solo, 11/120 in half A.
+- It is **not order-sensitive**, so *when* something happens matters more than
+  *what runs before what* — consistent with the record's earlier reasoning.
+- The next thing worth attacking is **why `routes-agents-events` takes between
+  8.8 and 83 seconds**, since that variance is the largest unexplained quantity in
+  this document and it sits on the file that fails most. Instrument its
+  asynchronous work — open handles, pending supertest requests, unresolved
+  promises — per test rather than per file.
+
+**Nothing was disabled, retried or quarantined.** The rate is unchanged because
+nothing was done to change it.
