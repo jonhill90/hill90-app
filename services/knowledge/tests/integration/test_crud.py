@@ -44,6 +44,136 @@ class TestCreateEntry:
         assert resp.status_code == 400
 
 
+class TestListEntriesIsBounded:
+    """GET /api/v1/entries — the agent-facing twin of the admin endpoint (#183).
+
+    The admin endpoint was bounded in #182 and this one was left unbounded for
+    the length of that PR. Both now carry the same bound, the same real total,
+    and the same tiebreak.
+    """
+
+    ENTRY = "---\ntitle: Paged\ntype: note\n---\nBody."
+
+    async def _seed(self, app_client, agent_token, prefix, n=3):
+        for i in range(n):
+            resp = await app_client.post(
+                "/api/v1/entries",
+                headers={"Authorization": f"Bearer {agent_token}"},
+                json={"path": f"notes/{prefix}-{i}.md", "content": self.ENTRY},
+            )
+            assert resp.status_code == 201, resp.text
+
+    async def test_page_is_capped_and_total_is_the_whole_set(self, app_client, agent_token):
+        """3 rows, limit=2, header says 3 — the two numbers must DISAGREE.
+
+        A fixture with fewer rows than the limit makes them equal, and an
+        ``X-Total-Count: len(rows)`` implementation passes that weaker fixture
+        unnoticed: a total derived from the page agrees with itself and
+        reports truncation as completeness.
+        """
+        await self._seed(app_client, agent_token, "cap")
+
+        resp = await app_client.get(
+            "/api/v1/entries",
+            params={"limit": 2},
+            headers={"Authorization": f"Bearer {agent_token}"},
+        )
+        assert resp.status_code == 200
+
+        entries = resp.json()
+        # Still a bare JSON array. cli/client/akm.go:198 unmarshals into
+        # []map[string]interface{} — a body object is a hard decode error
+        # there, not merely an empty render.
+        assert isinstance(entries, list)
+        assert len(entries) == 2
+        assert resp.headers["X-Total-Count"] == "3"
+
+    async def test_type_filtered_page_is_capped_and_totalled(self, app_client, agent_token):
+        """The filtered branch is its own SQL string and needs its own control."""
+        await self._seed(app_client, agent_token, "typed")
+
+        resp = await app_client.get(
+            "/api/v1/entries",
+            params={"type": "note", "limit": 2},
+            headers={"Authorization": f"Bearer {agent_token}"},
+        )
+        assert resp.status_code == 200
+        entries = resp.json()
+        assert len(entries) == 2
+        assert all(e["entry_type"] == "note" for e in entries)
+        assert resp.headers["X-Total-Count"] == "3"
+
+    async def test_offset_pages_without_repeating_or_skipping(self, app_client, agent_token):
+        """Why the ORDER BY carries an id tiebreak.
+
+        Entries written in the same instant share an ``updated_at``. Paging
+        over a non-unique sort key can hand one row to two pages and no page
+        to another — the same silent wrong answer as truncation, arriving
+        through pagination instead.
+        """
+        await self._seed(app_client, agent_token, "walk")
+
+        first = await app_client.get(
+            "/api/v1/entries",
+            params={"limit": 2, "offset": 0},
+            headers={"Authorization": f"Bearer {agent_token}"},
+        )
+        second = await app_client.get(
+            "/api/v1/entries",
+            params={"limit": 2, "offset": 2},
+            headers={"Authorization": f"Bearer {agent_token}"},
+        )
+        assert first.status_code == 200 and second.status_code == 200
+        assert len(first.json()) == 2
+        assert len(second.json()) == 1
+        assert first.headers["X-Total-Count"] == "3"
+        assert second.headers["X-Total-Count"] == "3"
+
+        paths = [e["path"] for e in first.json()] + [e["path"] for e in second.json()]
+        assert len(set(paths)) == 3, f"a row was repeated or skipped: {paths}"
+
+    async def test_default_limit_applies_without_an_explicit_limit(self, app_client, agent_token):
+        """An un-updated caller sends no paging params and must still be bounded."""
+        await self._seed(app_client, agent_token, "default")
+
+        resp = await app_client.get(
+            "/api/v1/entries",
+            headers={"Authorization": f"Bearer {agent_token}"},
+        )
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+        assert resp.headers["X-Total-Count"] == "3"
+
+    @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 2001}, {"offset": -1}])
+    async def test_rejects_out_of_range_paging(self, app_client, agent_token, params):
+        resp = await app_client.get(
+            "/api/v1/entries",
+            params=params,
+            headers={"Authorization": f"Bearer {agent_token}"},
+        )
+        assert resp.status_code == 422
+
+    async def test_isolation_holds_under_paging(
+        self, app_client, agent_token, other_agent_token
+    ):
+        """The total counts the caller's OWN entries, not everyone's.
+
+        A COUNT(*) whose WHERE drifts from the page's WHERE leaks the size of
+        another agent's namespace even though no row crosses the boundary.
+        """
+        await self._seed(app_client, agent_token, "mine", n=3)
+        await self._seed(app_client, other_agent_token, "theirs", n=2)
+
+        resp = await app_client.get(
+            "/api/v1/entries",
+            params={"limit": 2},
+            headers={"Authorization": f"Bearer {agent_token}"},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["X-Total-Count"] == "3"
+        assert all("mine" in e["path"] for e in resp.json())
+
+
 class TestReadEntry:
     async def test_read_entry(self, app_client, agent_token):
         # Create first

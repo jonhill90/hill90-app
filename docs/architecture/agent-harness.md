@@ -448,7 +448,7 @@ The Agent Knowledge Manager is an internal-only FastAPI service that provides pe
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/entries` | List entries for authenticated agent (optional `?type=` filter) |
+| GET | `/api/v1/entries` | List entries for authenticated agent — one page (optional `?type=` filter; `limit` 1–2000, default 500; `offset`), with the full match count in the `X-Total-Count` response header |
 | POST | `/api/v1/entries` | Create entry with `{path, content}` |
 | GET | `/api/v1/entries/{path}` | Read entry by path |
 | PUT | `/api/v1/entries/{path}` | Update entry content |

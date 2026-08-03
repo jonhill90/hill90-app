@@ -127,7 +127,7 @@ All authenticated via Ed25519 JWT signed by the API service at agent start. JWT 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/v1/entries` | Create memory entry `{path, title, entry_type, body, tags}` |
-| GET | `/api/v1/entries` | List own entries (optional `?type=` filter) |
+| GET | `/api/v1/entries` | List own entries — one page (optional `?type=` filter; `limit` 1–2000, default 500; `offset`), full count in `X-Total-Count` |
 | GET | `/api/v1/entries/{path}` | Read single entry by path |
 | PUT | `/api/v1/entries/{path}` | Update entry content |
 | DELETE | `/api/v1/entries/{path}` | Archive entry (soft-delete) |
