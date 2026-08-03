@@ -133,6 +133,120 @@ class TestInternalAdminEntries:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    async def test_list_entries_is_bounded_and_reports_the_real_total(
+        self, app_client: AsyncClient, agent_token: str
+    ) -> None:
+        """The page is capped at ``limit``; ``X-Total-Count`` is the whole set.
+
+        This is the positive control for issue #180. The two numbers must
+        DISAGREE for it to prove anything: three rows exist, two are returned,
+        and the header says three. A fixture with fewer rows than the limit
+        makes them equal, and an ``X-Total-Count: len(rows)`` implementation —
+        a total derived from the page, which reports truncation as
+        completeness — passes that weaker fixture unnoticed.
+        """
+        for i in range(3):
+            resp = await app_client.post(
+                "/api/v1/entries",
+                json={"path": f"notes/page-{i}.md", "content": VALID_FRONTMATTER},
+                headers={"Authorization": f"Bearer {agent_token}"},
+            )
+            assert resp.status_code == 201, resp.text
+
+        resp = await app_client.get(
+            "/internal/admin/entries",
+            params={"agent_id": "test-agent", "limit": 2},
+            headers={"Authorization": "Bearer test-internal-token"},
+        )
+        assert resp.status_code == 200
+
+        entries = resp.json()
+        # Still a JSON array. The UI does `Array.isArray(data) ? data : []`, so
+        # a body object here renders an EMPTY knowledge base for as long as
+        # knowledge is deployed and ui is not.
+        assert isinstance(entries, list)
+        assert len(entries) == 2
+        assert resp.headers["X-Total-Count"] == "3"
+
+    async def test_list_entries_offset_pages_through_the_set(
+        self, app_client: AsyncClient, agent_token: str
+    ) -> None:
+        """``offset`` walks the same ordering, and the total never moves.
+
+        The disjointness assertion is why the ORDER BY carries an ``id``
+        tiebreak: paging over a non-unique sort key can hand the same row to
+        two pages and no page to another, which is the same silent wrongness
+        in a different costume.
+        """
+        for i in range(3):
+            await app_client.post(
+                "/api/v1/entries",
+                json={"path": f"notes/offset-{i}.md", "content": VALID_FRONTMATTER},
+                headers={"Authorization": f"Bearer {agent_token}"},
+            )
+
+        first = await app_client.get(
+            "/internal/admin/entries",
+            params={"agent_id": "test-agent", "limit": 2, "offset": 0},
+            headers={"Authorization": "Bearer test-internal-token"},
+        )
+        second = await app_client.get(
+            "/internal/admin/entries",
+            params={"agent_id": "test-agent", "limit": 2, "offset": 2},
+            headers={"Authorization": "Bearer test-internal-token"},
+        )
+        assert first.status_code == 200 and second.status_code == 200
+        assert len(first.json()) == 2
+        assert len(second.json()) == 1
+        assert first.headers["X-Total-Count"] == "3"
+        assert second.headers["X-Total-Count"] == "3"
+        assert {e["path"] for e in first.json()} & {e["path"] for e in second.json()} == set()
+
+    async def test_list_entries_filtered_by_type_is_bounded_and_totalled(
+        self, app_client: AsyncClient, agent_token: str
+    ) -> None:
+        """The ``type`` branch is a separate query and needs its own control.
+
+        The bound and the count live in two SQL strings here. Covering only
+        the unfiltered branch is how the clamp ends up on one route and not
+        its twin.
+        """
+        for i in range(3):
+            await app_client.post(
+                "/api/v1/entries",
+                json={"path": f"notes/typed-{i}.md", "content": VALID_FRONTMATTER},
+                headers={"Authorization": f"Bearer {agent_token}"},
+            )
+
+        resp = await app_client.get(
+            "/internal/admin/entries",
+            params={"agent_id": "test-agent", "type": "note", "limit": 2},
+            headers={"Authorization": "Bearer test-internal-token"},
+        )
+        assert resp.status_code == 200
+        entries = resp.json()
+        assert len(entries) == 2
+        assert all(e["entry_type"] == "note" for e in entries)
+        assert resp.headers["X-Total-Count"] == "3"
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"limit": 0},
+            {"limit": 2001},
+            {"offset": -1},
+        ],
+    )
+    async def test_list_entries_rejects_out_of_range_paging(
+        self, app_client: AsyncClient, params: dict[str, int]
+    ) -> None:
+        resp = await app_client.get(
+            "/internal/admin/entries",
+            params={"agent_id": "test-agent", **params},
+            headers={"Authorization": "Bearer test-internal-token"},
+        )
+        assert resp.status_code == 422
+
     async def test_read_specific_entry(
         self, app_client: AsyncClient, agent_token: str
     ) -> None:
