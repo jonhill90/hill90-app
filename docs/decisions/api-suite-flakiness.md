@@ -3324,3 +3324,74 @@ If the retrospective cannot classify, the correct action is not another 42 runs.
 move: make sure the next occurrence carries the identity field, prove the recorder works in
 **both** arms, and wait. Waiting with a proven recorder is a result.
 
+## RETROSPECTIVE RESULT — the prediction is partly refuted
+
+Written after the pass. The prediction above is in the preceding commit; this is a separate one,
+so the order stands on its own.
+
+### 1. It cannot be classified retrospectively — confirmed, and that is a statement about the instrument
+
+Every 400, 401 and timeout in this record predates the identity stamp. This document already
+said so; the pass confirms it rather than discovering it. **That is not evidence of absence, and
+it is not support for the hypothesis.** It is the absence of a field, in occurrences that
+happened before anyone thought to record it.
+
+### 2. One reading of the prediction is REFUTED by data already here
+
+The 60-run table shows the two non-501 failures occurring with **zero foreign responses in the
+same run**:
+
+| Run | foreign responses | received | class |
+|---|---|---|---|
+| 3 | 8 | 501 | 501 |
+| 43 | 8 | 501 | 501 |
+| **26** | **0** | — | **TIMEOUT** |
+| **45** | **0** | 401 | **401** |
+
+So the **foreign-daemon** variant does not explain the 401 or the timeout. The daemon was
+absent from both runs. My prediction named the daemon as "the first instance identified" of the
+mechanism, and on the strength of this table the daemon reading is dead for these two classes.
+
+### 3. The sibling-worker variant survives, and is demonstrated CAPABLE — not demonstrated as the cause
+
+The identity guard's own control produced exactly this:
+
+```
+✕ B: FOREIGN STAMP — a sibling worker answering must fail this test
+     FOREIGN STAMP  HTTP/1.1 401 Unauthorized  from 127.0.0.1:59606
+         produced by 99999:9, this worker is 78273:1
+```
+
+A **spurious 401 from a sibling jest worker**, with a different keypair and route table. That is
+the mechanism I predicted, with a different responder — and it is proven *possible*. It has
+never been caught in the wild. "Capable of producing the symptom" and "produced the symptom" are
+different claims and only the first is established.
+
+**Net: the hypothesis is narrowed, not confirmed.** One responder is excluded; another remains
+live and unobserved. It is still falsified by the same single thing — a correct stamp with a
+wrong body.
+
+### 4. The gap that actually blocks progress: the guard has NO COMMITTED CONTROL
+
+`jest.identityguard.js` is wired through `jest.config.js` and runs on every suite. Searching the
+tree for a test that exercises it returns **nothing**. Its three arms were forced by hand during
+the investigation and written up here; no file keeps them forced.
+
+That matters more than it sounds, because this record documents **two holes already found in
+this guard after it was working**: the recycled-port hole, and a websocket false-positive fix
+that suppressed a missing stamp. Both were found by accident rather than by a control.
+
+So the instrument this whole investigation now depends on is in exactly the state the `#117`
+recorder was in before it was controlled: believed good, never watched working, and with a
+history of silently losing an arm. **A guard that has lost an arm reports clean, and clean is
+the answer that would flatter the hypothesis above.**
+
+### What happens next, and what must not
+
+The `#117` move, applied here: give `jest.identityguard.js` a committed control that forces all
+three arms — ours, foreign stamp, no stamp — prove it fails on each, and only then let a run of
+green mean anything. Then wait.
+
+**Not** another 42 runs. This document's arithmetic puts ~300 behind a ~1% event, and 42 clean
+runs with an unproven guard is two unknowns multiplied together.
+
