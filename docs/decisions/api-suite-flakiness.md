@@ -2320,3 +2320,104 @@ It should not inherit this investigation's assumptions. Specifically, these are 
 
 **Nothing was disabled, retried or quarantined; production files remain byte-identical to
 `main`.**
+
+---
+
+# Hunt two, round one, 2026-08-03: characterising the surviving failures
+
+A fresh investigation into the **400/401/404 and timeout classes**. Carried forward only the
+known-false list; everything else is treated as open, including anything that felt settled by
+association with the 501 work.
+
+No new runs were needed. **623 logs from today's batches were already on disk**, and mining
+them is free.
+
+## The instrument, controlled before its first result
+
+A log miner extracts, per failing run, the failing test, expected/received values and whether
+a timeout occurred. Controlled against two failures read by hand earlier:
+
+```
+c-run45 (hand-read: received 401) -> 401
+c-run26 (hand-read: a TIMEOUT)    -> timeout=True
+-> PASS: miner reproduces both known cases
+```
+
+## The corpus
+
+```
+logs scanned: 623        failing runs found: 42
+of which 501-class (explained): 13        surviving: 29
+```
+
+## Symptoms
+
+```
+  8x  TIMEOUT
+  6x  200->404
+  4x  200->400
+  4x  200->401
+  3x  OTHER-assertion
+  1x  409->401     1x  400->404     1x  409->404     1x  201->401
+```
+
+Eighteen status mismatches, eight timeouts, three other assertions. **The expected value is
+`200` in fourteen of the eighteen**, and the received value is always a client-error code the
+handler itself can produce — 400, 401, 404. Nothing here resembles the foreign 501: these are
+responses this application really did write.
+
+**`401` appears six times across three different expectations** (200, 409, 201). An
+authentication failure on a request whose token was accepted moments earlier in the same file
+is the most surprising single fact in this table, and it is recorded as an observation, not a
+theory.
+
+## Victims
+
+```
+ 10x  GET /agents/:id/events
+  4x  Agent start — network resolution (S1-S4)
+  2x  Ownership boundary isolation
+  2x  Platform Models (M1-M5)
+  2x  Agent eligibility enforcement (AI-120)
+  2x  Agent PUT skill_ids behavior
+```
+
+`GET /agents/:id/events` is **10 of 29 — 34%** — consistent with every earlier round naming it
+the most frequent victim, and now measured against the surviving classes specifically rather
+than against the mixed set.
+
+## Co-occurrence — and why the obvious reading of it is wrong
+
+```
+27 runs had 1 distinct failing test
+ 2 runs had 2 distinct failing tests
+runs with BOTH a timeout and a status mismatch: 0 / 29
+```
+
+The tempting conclusion is that zero co-occurrence proves the timeout and status classes are
+different defects. **It does not, and saying so would be the same error this record has caught
+three times.** Failures here are *singular*: 27 of 29 runs contain exactly one failing test.
+With about one failure per run, a run containing both a timeout and a status mismatch is
+nearly impossible **whatever the underlying cause**, so observing none is what both hypotheses
+predict. The measurement has no discriminating power and is reported as such.
+
+**What the co-occurrence data does establish** is the singularity itself: whatever this is, it
+strikes **one test per run**, not a state corruption that would take several with it. That is
+a real constraint and it was cheap.
+
+## Where this leaves the hunt
+
+Open, and not yet narrowed by anything measured today:
+
+- one defect or three — **undetermined**; the cheap test was run and cannot decide it
+- the 401s, which imply the auth layer rejecting a request in a file whose other requests pass
+- the concentration in `GET /agents/:id/events`, which survives the removal of the 501 class
+
+**Deliberately not carried over:** every hypothesis eliminated in hunt one was eliminated
+*against the mixed failure set*, which included 501s now known to be foreign. The known-false
+list stands because those tests were mechanism-level rather than symptom-level — but any
+conclusion in this document that rested on failure *rates* is now suspect, because roughly a
+third of the failures being counted were not this defect at all.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
