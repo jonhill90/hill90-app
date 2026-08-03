@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { getPool } from '../db/pool';
+import { armCredentialDeadline, endStreamForExpiredCredential } from '../helpers/stream-deadline';
 import { requireRole } from '../middleware/role';
 import { scopeToOwner } from '../helpers/scope';
 import { ELEVATED_SCOPES, isAdmin, getAgentElevatedScope, getAgentEffectiveScope } from '../helpers/elevated-scope';
@@ -1710,6 +1711,18 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+
+      // This stream must not outlive the credential that authorised it. It is
+      // authenticated once, here, and then held open indefinitely by the poll and
+      // heartbeat below — so without a deadline it keeps delivering after the token
+      // expires, after sign-out, and after roles are revoked. Same defect as the
+      // terminal proxy (app#145), different transport.
+      const clearDeadline = armCredentialDeadline(
+        res as never,
+        (req as any).user?.exp,
+        () => endStreamForExpiredCredential(res as never, 'agents-events'),
+      );
+      req.on('close', () => clearDeadline?.());
       res.flushHeaders();
 
       // Phase 1: Initial inference backfill
@@ -2039,6 +2052,18 @@ router.get('/:id/logs', requireRole('admin'), async (req: Request, res: Response
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+
+      // This stream must not outlive the credential that authorised it. It is
+      // authenticated once, here, and then held open indefinitely by the poll and
+      // heartbeat below — so without a deadline it keeps delivering after the token
+      // expires, after sign-out, and after roles are revoked. Same defect as the
+      // terminal proxy (app#145), different transport.
+      const clearDeadline = armCredentialDeadline(
+        res as never,
+        (req as any).user?.exp,
+        () => endStreamForExpiredCredential(res as never, 'agents-logs'),
+      );
+      req.on('close', () => clearDeadline?.());
       res.flushHeaders();
 
       try {

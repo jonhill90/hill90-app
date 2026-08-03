@@ -20,6 +20,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { getPool } from '../db/pool';
+import { armCredentialDeadline, endStreamForExpiredCredential } from '../helpers/stream-deadline';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { requireRole } from '../middleware/role';
@@ -1074,6 +1075,18 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+
+    // This stream must not outlive the credential that authorised it. It is
+    // authenticated once, here, and then held open indefinitely by the poll and
+    // heartbeat below — so without a deadline it keeps delivering after the token
+    // expires, after sign-out, and after roles are revoked. Same defect as the
+    // terminal proxy (app#145), different transport.
+    const clearDeadline = armCredentialDeadline(
+      res as never,
+      (req as any).user?.exp,
+      () => endStreamForExpiredCredential(res as never, 'chat-stream'),
+    );
+    req.on('close', () => clearDeadline?.());
     res.flushHeaders();
 
     // Parse cursor from Last-Event-ID (default: 0)
@@ -1261,6 +1274,18 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+
+    // This stream must not outlive the credential that authorised it. It is
+    // authenticated once, here, and then held open indefinitely by the poll and
+    // heartbeat below — so without a deadline it keeps delivering after the token
+    // expires, after sign-out, and after roles are revoked. Same defect as the
+    // terminal proxy (app#145), different transport.
+    const clearDeadline = armCredentialDeadline(
+      res as never,
+      (req as any).user?.exp,
+      () => endStreamForExpiredCredential(res as never, 'chat-events'),
+    );
+    req.on('close', () => clearDeadline?.());
     res.flushHeaders();
 
     const streams: NodeJS.ReadableStream[] = [];
