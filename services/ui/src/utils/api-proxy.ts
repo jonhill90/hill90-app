@@ -24,6 +24,29 @@ const API_URL = process.env.API_URL || 'http://localhost:3000'
  */
 const NO_SHARED_CACHE = { 'Cache-Control': 'private, no-store' } as const
 
+/**
+ * Upstream response headers this proxy forwards to the browser.
+ *
+ * An allowlist, not a copy of everything. `content-length` and
+ * `content-encoding` describe the upstream body, which this proxy re-serialises
+ * — forwarding them would describe the wrong bytes. `set-cookie` from the API
+ * has no business reaching the browser through here.
+ *
+ * This function exists because the proxy silently dropped `X-Total-Count`.
+ * Knowledge set it, the api forwarded it, and it died on this hop — so the UI
+ * could not tell a complete list from a truncated one (#180).
+ */
+const FORWARDED_HEADERS = ['x-total-count'] as const
+
+function passThroughHeaders(res: Response): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const name of FORWARDED_HEADERS) {
+    const value = res.headers.get(name)
+    if (value !== null) out[name] = value
+  }
+  return out
+}
+
 export async function proxyToApi(
   req: NextRequest,
   backendPath: string,
@@ -101,7 +124,10 @@ export async function proxyToApi(
       throw err
     }
     const data = raw === '' ? null : JSON.parse(raw)
-    return NextResponse.json(data, { status: res.status, headers: NO_SHARED_CACHE })
+    return NextResponse.json(data, {
+      status: res.status,
+      headers: { ...NO_SHARED_CACHE, ...passThroughHeaders(res) },
+    })
   } catch (err) {
     console.error(`[${label}] Error:`, err)
     return NextResponse.json(

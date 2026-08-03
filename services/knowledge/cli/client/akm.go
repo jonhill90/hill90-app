@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,34 +41,41 @@ func NewFromEnv() (*Client, error) {
 
 // doRequest performs an HTTP request with Bearer auth. On 401, attempts token refresh.
 func (c *Client) doRequest(method, path string, body interface{}) ([]byte, int, error) {
-	data, statusCode, err := c.doRequestOnce(method, path, body)
+	data, status, _, err := c.doRequestWithHeaders(method, path, body)
+	return data, status, err
+}
+
+// doRequestWithHeaders is doRequest, keeping the response headers. Listings
+// need X-Total-Count, and the plain form discarded it.
+func (c *Client) doRequestWithHeaders(method, path string, body interface{}) ([]byte, int, http.Header, error) {
+	data, statusCode, header, err := c.doRequestOnce(method, path, body)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	if statusCode == 401 {
 		// Attempt refresh
 		if refreshErr := c.refreshToken(); refreshErr != nil {
-			return data, statusCode, nil // Return original 401
+			return data, statusCode, header, nil // Return original 401
 		}
 		// Retry with new token
 		return c.doRequestOnce(method, path, body)
 	}
-	return data, statusCode, nil
+	return data, statusCode, header, nil
 }
 
-func (c *Client) doRequestOnce(method, path string, body interface{}) ([]byte, int, error) {
+func (c *Client) doRequestOnce(method, path string, body interface{}) ([]byte, int, http.Header, error) {
 	var reqBody io.Reader
 	if body != nil {
 		jsonBytes, err := json.Marshal(body)
 		if err != nil {
-			return nil, 0, fmt.Errorf("marshal request: %w", err)
+			return nil, 0, nil, fmt.Errorf("marshal request: %w", err)
 		}
 		reqBody = bytes.NewReader(jsonBytes)
 	}
 
 	req, err := http.NewRequest(method, c.BaseURL+path, reqBody)
 	if err != nil {
-		return nil, 0, fmt.Errorf("create request: %w", err)
+		return nil, 0, nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	if body != nil {
@@ -76,15 +84,15 @@ func (c *Client) doRequestOnce(method, path string, body interface{}) ([]byte, i
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("http request: %w", err)
+		return nil, 0, nil, fmt.Errorf("http request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
+		return nil, resp.StatusCode, resp.Header, fmt.Errorf("read response: %w", err)
 	}
-	return data, resp.StatusCode, nil
+	return data, resp.StatusCode, resp.Header, nil
 }
 
 // refreshToken attempts to refresh the JWT using the refresh secret.
@@ -180,23 +188,60 @@ func (c *Client) ReadEntry(path string) (map[string]interface{}, error) {
 	return result, json.Unmarshal(data, &result)
 }
 
-// ListEntries lists knowledge entries.
-func (c *Client) ListEntries(entryType string) ([]map[string]interface{}, error) {
-	path := "/api/v1/entries"
+// EntryPage is one page of a listing plus the number of entries that exist.
+//
+// Total is read from X-Total-Count and is NOT len(Entries). The distinction is
+// the point: the server caps a page, so a caller that reports len(Entries) as
+// the count prints a number that agrees with itself and calls a truncated
+// listing complete.
+//
+// Total is -1 when the server sent no header, which means it predates the
+// bound and therefore returned every row. Callers must render that as unknown
+// rather than as a total.
+type EntryPage struct {
+	Entries []map[string]interface{}
+	Total   int
+}
+
+// ListEntries lists one page of knowledge entries.
+func (c *Client) ListEntries(entryType string, limit, offset int) (*EntryPage, error) {
+	q := url.Values{}
 	if entryType != "" {
-		path += "?type=" + url.QueryEscape(entryType)
+		q.Set("type", entryType)
 	}
-	// Use the list endpoint — for now reuse the entries path
-	// The server doesn't have a dedicated list endpoint on entries, use search with empty query
-	data, status, err := c.doRequest("GET", path, nil)
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		q.Set("offset", strconv.Itoa(offset))
+	}
+	path := "/api/v1/entries"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+
+	data, status, header, err := c.doRequestWithHeaders("GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
 	if status != 200 {
 		return nil, fmt.Errorf("list entries failed (status %d): %s", status, string(data))
 	}
+
+	// Still a bare JSON array. A body object here would be a hard decode
+	// error for this client, which is why the total travels in a header.
 	var result []map[string]interface{}
-	return result, json.Unmarshal(data, &result)
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+
+	total := -1
+	if raw := header.Get("X-Total-Count"); raw != "" {
+		if n, convErr := strconv.Atoi(raw); convErr == nil && n >= 0 {
+			total = n
+		}
+	}
+	return &EntryPage{Entries: result, Total: total}, nil
 }
 
 // SearchEntries searches knowledge entries.

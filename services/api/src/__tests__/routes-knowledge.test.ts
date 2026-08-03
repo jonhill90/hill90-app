@@ -175,6 +175,67 @@ describe('Knowledge proxy routes — list entries', () => {
     expect(res.body).toHaveLength(1);
   });
 
+  it('sets X-Total-Count from the proxy total, NOT the length of the page', async () => {
+    // The two numbers must disagree or the assertion proves nothing: an
+    // implementation that sent `data.length` passes a fixture where they
+    // match, and that implementation is the defect (#180, #188).
+    mockQuery.mockResolvedValueOnce({ rows: [{ agent_id: 'my-agent' }] });
+    mockListEntries.mockResolvedValueOnce({
+      status: 200,
+      data: [{ id: '1' }, { id: '2' }],
+      total: 40000,
+    });
+
+    const res = await request(app)
+      .get('/knowledge/entries?agent_id=my-agent&limit=2')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.headers['x-total-count']).toBe('40000');
+  });
+
+  it('forwards limit and offset to the knowledge service', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ agent_id: 'my-agent' }] });
+    mockListEntries.mockResolvedValueOnce({ status: 200, data: [], total: 0 });
+
+    await request(app)
+      .get('/knowledge/entries?agent_id=my-agent&limit=25&offset=50')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(mockListEntries).toHaveBeenCalledWith('my-agent', undefined, { limit: 25, offset: 50 });
+  });
+
+  it('omits the header when the proxy reports no total', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ agent_id: 'my-agent' }] });
+    mockListEntries.mockResolvedValueOnce({ status: 200, data: [{ id: '1' }], total: null });
+
+    const res = await request(app)
+      .get('/knowledge/entries?agent_id=my-agent')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    // Absent rather than 1: "not reported" and "there is one" differ.
+    expect(res.headers['x-total-count']).toBeUndefined();
+  });
+
+  it.each([
+    ['limit=0', 'limit must be between'],
+    ['limit=5000', 'limit must be between'],
+    ['limit=abc', 'limit must be an integer'],
+    ['offset=-1', 'offset must be >= 0'],
+  ])('rejects %s rather than silently clamping it', async (qs, message) => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ agent_id: 'my-agent' }] });
+
+    const res = await request(app)
+      .get(`/knowledge/entries?agent_id=my-agent&${qs}`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    // Clamping 5000 to 2000 would hand back an answer that is not what was
+    // asked for and does not say so — the family this work exists to remove.
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(message);
+  });
+
   it('admin can list entries for any agent', async () => {
     mockListEntries.mockResolvedValueOnce({
       status: 200,

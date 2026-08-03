@@ -34,6 +34,37 @@ async function getAllowedAgentIds(req: Request): Promise<string[] | null> {
   return rows.map((r: { agent_id: string }) => r.agent_id);
 }
 
+/** Upper bound on a single page, mirroring the knowledge service's own clamp. */
+const MAX_PAGE = 2000;
+
+/**
+ * Read `limit`/`offset` from the query string.
+ *
+ * Rejected rather than clamped: a caller that asks for 5000 and silently
+ * receives 2000 is back in the family this work exists to remove — an answer
+ * that is not what was asked for and does not say so. The knowledge service
+ * returns 422 for the same input; this check exists so the api does not
+ * forward garbage and translate a validation error into a 500.
+ */
+function parsePageParams(req: Request): { limit?: number; offset?: number } | { error: string } {
+  const out: { limit?: number; offset?: number } = {};
+
+  for (const key of ['limit', 'offset'] as const) {
+    const raw = req.query[key];
+    if (raw === undefined) continue;
+
+    const n = Number(raw);
+    if (!Number.isInteger(n)) return { error: `${key} must be an integer` };
+    if (key === 'limit' && (n < 1 || n > MAX_PAGE)) {
+      return { error: `limit must be between 1 and ${MAX_PAGE}` };
+    }
+    if (key === 'offset' && n < 0) return { error: 'offset must be >= 0' };
+    out[key] = n;
+  }
+
+  return out;
+}
+
 /**
  * Check if a specific agent_id is owned by the requesting user.
  */
@@ -81,7 +112,22 @@ router.get('/entries', requireRole('user'), async (req: Request, res: Response) 
     }
 
     const type = req.query.type as string | undefined;
-    const result = await akmProxy.listEntries(agentId, type);
+    const page = parsePageParams(req);
+    if ('error' in page) {
+      res.status(400).json({ error: page.error });
+      return;
+    }
+
+    const result = await akmProxy.listEntries(agentId, type, page);
+
+    // Forward the real total. Without this the UI has no way to know its list
+    // was cut, and a short list that looks complete is the defect this whole
+    // chain exists to remove (#180). The body stays a bare JSON array: the UI
+    // does `Array.isArray(data) ? data : []`, so an object here empties the
+    // page for any UI build older than this one.
+    if (result.total !== null) {
+      res.setHeader('X-Total-Count', String(result.total));
+    }
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('[knowledge] List entries error:', err);
