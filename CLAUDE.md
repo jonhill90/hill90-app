@@ -186,10 +186,12 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   **404s**; `app-keycloak` was retired 2026-07-30.
 - Local: UI `http://localhost:13000`, API `:13001`, Keycloak `:18080` — full
   port table in the README.
-- **The api suite is not the only flaky one — measured 2026-07-31.** `services/ui`
-  (vitest) failed one test on a **docs-only** tree and passed on re-run of the same
-  commit. One observation in two runs is not a rate, but it does retire "only api
-  flakes". Re-run once before investigating a red `services/ui`, and record it.
+- **`services/ui` (vitest) is flaky too, and is now characterised —
+  [issue #117](https://github.com/jonhill90/hill90-app/issues/117).**
+  `DashboardClient › renders active agents widget with running agents` fails in CI
+  only: 3 CI failures against ~40 local runs across four emulated CI conditions.
+  Unresolved. **Do not make it green by re-running** — a retry that passes tells you
+  it is flaky and nothing more.
 - **`services/knowledge/tests/integration` does not run in CI** — 18 files, ~98 tests,
   excluded because they need a live pgvector Postgres on `localhost:5432`. The
   exclusion is deliberate and commented in `ci.yml`, but the consequence is worth
@@ -215,15 +217,23 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   Procedure, evidence checks and abort conditions:
   [`docs/runbooks/retiring-app-minio.md`](docs/runbooks/retiring-app-minio.md).
   **The local compose files stay regardless** — local runs `app-minio` deliberately.
-- **A green api-suite run is not evidence.** 7 of 20 runs of `main` fail, measured
-  2026-07-31. **Six** hypotheses are dead (this said seven), the fault is localised
-  to half A's 29 files at ~23% with no necessary member and no reproducing subset,
-  and the investigation has a **stop line**: the per-configuration table is the
-  resume point, a deterministic environment audit is the next step, and further
-  bisection is aimed at a minimal pair that probably does not exist. There is a
-  **standing hypothesis**, labelled untested reasoning rather than a finding — read
-  it before forming a seventh. **Nobody should restart from zero:**
+- **A green api-suite run is still not evidence.** Partly explained, not fixed.
+  **Explained and closed: the 501s** — a third-party daemon (Logitech's
+  `LogiPluginService`, serving `websocket-sharp`) listens in the ephemeral port range
+  supertest binds from and answers 501. **Still open: 400/401/404 and timeouts**,
+  established by measurement as a *separate* defect — do not assume the 501 finding
+  covers them, and do not re-litigate the 501. Fifteen hypotheses are dead, each with
+  what killed it. **Rates quoted before round seventeen are contaminated**, because
+  about a third of the failures counted were the foreign 501s; mechanism-level
+  conclusions survive, rate-based ones do not. **Nobody should restart from zero:**
   [`docs/decisions/api-suite-flakiness.md`](docs/decisions/api-suite-flakiness.md).
+- **Two cheap diagnostics, both decisive here — try them before theorising.**
+  **Does it pass alone?** One run. Passes alone → the defect needs company and every
+  single-file theory is dead; fails alone → the cross-file search is unnecessary.
+  **Is the response ours?** `services/api/jest.identityguard.js` is on by default and
+  fails loudly when a response carries no identity stamp (a process outside this repo
+  answered) or the wrong one (a sibling jest worker did). A status code can be a
+  legitimate answer; an identity stamp cannot.
 - **This tenant's public surface is monitored by the platform, and alerts now reach a
   human** (`Verified 2026-07-31 11:20 UTC`). `PublicSiteDown` watches `hill90.com`;
   `TenantApiDown` watches `api.hill90.com/health` — added because the first does not
