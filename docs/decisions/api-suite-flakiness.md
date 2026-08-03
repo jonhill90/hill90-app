@@ -2783,3 +2783,48 @@ anyone running a batch.
 
 **Nothing was disabled, retried or quarantined; the guard's behaviour on legitimate traffic is
 unchanged.**
+
+## The 401 classification: still unassigned after 42 runs, and one batch discarded
+
+**Where it stands: no spurious 401 has been captured, so none of the four candidates —
+expiry, wrong key, expiry racing a slow test, or reaching a verifier the test did not
+configure — can be assigned to any of the six.**
+
+### The six cannot be classified retrospectively
+
+This is worth stating once, plainly, because it will otherwise be asked again. The six 401s
+live in logs written *before* `auth.ts` preserved the cause and before the probe existed. The
+information that would classify them was discarded at the moment they happened, by the bare
+`catch {}`. **It no longer exists.** Only a *new* 401 can be classified, and it will be —
+by `auth.ts` itself, without a probe or a batch.
+
+### 42 runs, one failure, and it was a 501
+
+The single failure in that batch was `409 -> 501` / `201 -> 501`, the foreign-daemon
+signature — the failure that exposed the recycled-port hole in the identity guard. Not a 401.
+
+Every probe row so far is from a test that asserts 401 **deliberately**:
+`Cross-auth boundary AB-1/AB-2` (Ed25519 → `invalid algorithm`) and the
+`Missing or invalid Authorization header` negatives. The probe fires; what it fires on is
+intended.
+
+### The batch was discarded, and why
+
+Runs 1–42 spanned three merges — `#113`, `#114`, `#115` — because the branch was switched
+underneath a running batch. **The runs therefore did not all execute the same code**, which
+makes the corpus unusable for a rate and unsafe for a null. It is recorded as discarded rather
+than quietly reported, and restarted on merged `main` with a clean tree.
+
+That is a methodology error of the same family this document keeps finding: a measurement
+whose conditions changed mid-flight looks exactly like a measurement whose conditions did not.
+
+### What would change the answer
+
+At roughly 1% per run a spurious 401 needs ~300 runs to appear with confidence. The clean
+batch is running. But the practical point is that **the batch is no longer the mechanism that
+answers this** — `auth.ts` now logs the cause on every 401, in CI and locally, so the next
+occurrence classifies itself in the ordinary course of someone's failing build.
+
+**If a failing run ever shows a spurious 401 with no probe row and no `[auth] token rejected`
+line, suspect the instrument before the theory.** Seven have misled today, and the pattern is
+that the convenient result is the dangerous one.
