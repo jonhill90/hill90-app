@@ -46,11 +46,41 @@ async function readBody(resp: Response): Promise<unknown> {
 export interface ProxyResponse {
   status: number;
   data: unknown;
+  /**
+   * The number of rows matching the request upstream, from `X-Total-Count` —
+   * NOT the length of the page in `data`. Null when the response is not a
+   * list at all.
+   *
+   * The distinction is the whole point (#188). `data.length` was the true
+   * total until #182 bounded the knowledge endpoint at 500 rows, after which
+   * it silently became the size of the page and an agent with 40,000 entries
+   * reported 500.
+   */
+  total: number | null;
+}
+
+/**
+ * Read the real total from the response headers.
+ *
+ * Falls back to the array length when the header is absent, and that is
+ * correct rather than a compromise: a knowledge build without the header is a
+ * knowledge build without the `LIMIT`, so the array IS every row and its
+ * length IS the total. The fallback holds exactly in the case it applies to.
+ */
+function totalFrom(resp: Response, data: unknown): number | null {
+  const fallback = Array.isArray(data) ? data.length : null;
+  const header = resp.headers?.get?.('X-Total-Count');
+  if (header === null || header === undefined || header === '') return fallback;
+
+  const parsed = Number(header);
+  // A non-numeric header must not become NaN on a dashboard.
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
 }
 
 async function proxyGet(path: string, params?: Record<string, string>): Promise<ProxyResponse> {
   if (!AKM_INTERNAL_SERVICE_TOKEN) {
-    return { status: 503, data: { error: 'Knowledge service not configured' } };
+    return { status: 503, data: { error: 'Knowledge service not configured' }, total: null };
   }
 
   const url = new URL(`${AKM_SERVICE_URL}${path}`);
@@ -70,20 +100,31 @@ async function proxyGet(path: string, params?: Record<string, string>): Promise<
       },
     });
   } catch {
-    return { status: 502, data: { error: 'Knowledge service unavailable' } };
+    return { status: 502, data: { error: 'Knowledge service unavailable' }, total: null };
   }
 
   const data = await readBody(resp);
-  return { status: resp.status, data };
+  return { status: resp.status, data, total: totalFrom(resp, data) };
 }
 
 export async function listAgents(): Promise<ProxyResponse> {
   return proxyGet('/internal/admin/agents');
 }
 
-export async function listEntries(agentId: string, type?: string): Promise<ProxyResponse> {
+export interface PageOpts {
+  limit?: number;
+  offset?: number;
+}
+
+export async function listEntries(
+  agentId: string,
+  type?: string,
+  page?: PageOpts,
+): Promise<ProxyResponse> {
   const params: Record<string, string> = { agent_id: agentId };
   if (type) params.type = type;
+  if (page?.limit !== undefined) params.limit = String(page.limit);
+  if (page?.offset !== undefined) params.offset = String(page.offset);
   return proxyGet('/internal/admin/entries', params);
 }
 
@@ -99,7 +140,7 @@ export async function searchEntries(q: string, agentId?: string): Promise<ProxyR
 
 export async function createEntry(agentId: string, path: string, content: string): Promise<ProxyResponse> {
   if (!AKM_INTERNAL_SERVICE_TOKEN) {
-    return { status: 503, data: { error: 'Knowledge service not configured' } };
+    return { status: 503, data: { error: 'Knowledge service not configured' }, total: null };
   }
 
   const url = `${AKM_SERVICE_URL}/internal/admin/entries/${encodeURIComponent(agentId)}`;
@@ -115,16 +156,16 @@ export async function createEntry(agentId: string, path: string, content: string
       body: JSON.stringify({ path, content }),
     });
   } catch {
-    return { status: 502, data: { error: 'Knowledge service unavailable' } };
+    return { status: 502, data: { error: 'Knowledge service unavailable' }, total: null };
   }
 
   const data = await readBody(resp);
-  return { status: resp.status, data };
+  return { status: resp.status, data, total: totalFrom(resp, data) };
 }
 
 export async function appendJournal(agentId: string, content: string): Promise<ProxyResponse> {
   if (!AKM_INTERNAL_SERVICE_TOKEN) {
-    return { status: 503, data: { error: 'Knowledge service not configured' } };
+    return { status: 503, data: { error: 'Knowledge service not configured' }, total: null };
   }
 
   const url = `${AKM_SERVICE_URL}/internal/admin/journal/${encodeURIComponent(agentId)}`;
@@ -140,9 +181,9 @@ export async function appendJournal(agentId: string, content: string): Promise<P
       body: JSON.stringify({ content }),
     });
   } catch {
-    return { status: 502, data: { error: 'Knowledge service unavailable' } };
+    return { status: 502, data: { error: 'Knowledge service unavailable' }, total: null };
   }
 
   const data = await readBody(resp);
-  return { status: resp.status, data };
+  return { status: resp.status, data, total: totalFrom(resp, data) };
 }

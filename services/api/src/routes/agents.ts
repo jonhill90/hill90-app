@@ -2406,13 +2406,18 @@ router.get('/:id/stats', requireRole('user'), async (req: Request, res: Response
     const sess = sessionResult.rows[0];
     const skill = skillResult.rows[0];
 
-    // Knowledge entries via AKM proxy (best-effort)
+    // Knowledge entries via AKM proxy (best-effort).
+    //
+    // `total` (X-Total-Count), NOT `data.length`. The length was the true
+    // count until #182 bounded the knowledge endpoint at 500, after which it
+    // silently reported 500 for every agent above that (#188). We only need
+    // the number, so ask for the smallest page that still carries the header.
     let knowledgeEntries = 0;
     try {
       const akmProxy = await import('../services/akm-proxy');
-      const akmResult = await akmProxy.listEntries(agent.agent_id);
-      if (akmResult.status === 200 && Array.isArray(akmResult.data)) {
-        knowledgeEntries = akmResult.data.length;
+      const akmResult = await akmProxy.listEntries(agent.agent_id, undefined, { limit: 1 });
+      if (akmResult.status === 200 && akmResult.total !== null) {
+        knowledgeEntries = akmResult.total;
       }
     } catch { /* AKM unavailable */ }
 
@@ -2530,20 +2535,28 @@ router.get('/:id/artifacts', requireRole('user'), async (req: Request, res: Resp
       ),
     ]);
 
-    // Knowledge entry type counts via AKM proxy
+    // Knowledge entry type counts via AKM proxy.
+    //
+    // Each count is its own X-Total-Count, not a filter over one page (#188).
+    // Filtering the page under-counted by an amount that depended on
+    // `updated_at` ordering — invisible to the reader, and wrong in a quieter
+    // way than the total was. `limit: 1` because only the header is wanted.
     let knowledgeEntries = 0;
     let planEntries = 0;
     let decisionEntries = 0;
     let researchEntries = 0;
     try {
       const akmProxy = await import('../services/akm-proxy');
-      const akmResult = await akmProxy.listEntries(agent.agent_id);
-      if (akmResult.status === 200 && Array.isArray(akmResult.data)) {
-        knowledgeEntries = akmResult.data.length;
-        planEntries = (akmResult.data as any[]).filter((e: any) => e.entry_type === 'plan').length;
-        decisionEntries = (akmResult.data as any[]).filter((e: any) => e.entry_type === 'decision').length;
-        researchEntries = (akmResult.data as any[]).filter((e: any) => e.entry_type === 'research').length;
-      }
+      const [all, plans, decisions, research] = await Promise.all([
+        akmProxy.listEntries(agent.agent_id, undefined, { limit: 1 }),
+        akmProxy.listEntries(agent.agent_id, 'plan', { limit: 1 }),
+        akmProxy.listEntries(agent.agent_id, 'decision', { limit: 1 }),
+        akmProxy.listEntries(agent.agent_id, 'research', { limit: 1 }),
+      ]);
+      if (all.status === 200 && all.total !== null) knowledgeEntries = all.total;
+      if (plans.status === 200 && plans.total !== null) planEntries = plans.total;
+      if (decisions.status === 200 && decisions.total !== null) decisionEntries = decisions.total;
+      if (research.status === 200 && research.total !== null) researchEntries = research.total;
     } catch { /* AKM unavailable */ }
 
     const signalData = {
