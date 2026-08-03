@@ -2914,3 +2914,55 @@ The rate is 3 CI failures against 0 in 28 local runs. That is enough to say **CI
 and not enough to quote a rate, and no rate is quoted. **Nothing was retried to green** — the
 job was diagnosed rather than re-run, because a retry that passes establishes only that it is
 flaky, which #117 already records.
+
+## The findByText check: ambiguous, and why that is the answer
+
+**The check cannot be run decisively, so it was not run to a conclusion.** Saying ambiguous
+rather than manufacturing a verdict.
+
+`findByText` only distinguishes anything under conditions where the failure occurs. It does
+not occur locally, so a green result would restate what 28 earlier runs already said.
+
+### Attempts to reproduce it locally, all negative
+
+CI-only is a lead, and the differences worth suspecting are timing, machine speed, locale,
+timezone and headless rendering. Three were tested directly:
+
+```
+file alone, unloaded                      0 / 3
+file alone, 12 busy loops on 11 cores     0 / 6      (machine speed / contention)
+TZ=UTC                                    0 / 3      (CI runners are UTC; this host is EDT)
+LANG=C LC_ALL=C                           0 / 3      (locale)
+TZ=UTC LANG=C LC_ALL=C                    0 / 3
+```
+
+With the earlier 0/20 isolated and 0/8 full-suite, that is **roughly 40 local runs across four
+emulated CI conditions and not one failure.**
+
+**Negative results, which are still results:** raw CPU contention does not cause it, timezone
+does not, locale does not. Headless rendering is not a difference at all — vitest uses jsdom
+in both places. What remains untested is worker count, memory pressure, Node version, and
+CI-specific environment.
+
+### Why this was not resolved by running it in CI
+
+The obvious move is to change the assertion to `findByText` and watch CI. **That is the move
+this record exists to prevent.** If CI then goes green, nothing has been learned: it is
+indistinguishable from the flake simply not occurring, and a change that makes a suite green
+without explaining it is the failure mode named on the first page.
+
+**A design that would be legitimate**, and is offered rather than performed: add a `findByText`
+assertion *alongside* the existing synchronous one rather than replacing it, so both run and
+their disagreement is the signal. If the sync assertion fails while the async one succeeds in
+the same run, the race is demonstrated. If both fail, the data is genuinely absent and the
+query style is innocent. Neither outcome changes behaviour, and neither can be mistaken for
+the flake having gone away.
+
+### Status
+
+**Ambiguous, and #117 stays open and unresolved.** The candidate from the previous section —
+line 202 asserting synchronously outside the `waitFor` — is neither confirmed nor eliminated.
+It remains consistent with the observed error and unsupported by any measurement.
+
+Fifth time today that declining to resolve something the evidence did not resolve was the
+correct call, and it cost one section.
