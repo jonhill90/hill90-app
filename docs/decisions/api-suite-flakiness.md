@@ -2513,3 +2513,83 @@ something because the instrument has been seen to fire.
 
 **Nothing was disabled, retried or quarantined; production files remain byte-identical to
 `main`.**
+
+---
+
+# Hunt two, round three, 2026-08-03: a mechanism that produces 401 and 404 from one cause
+
+Built on mechanism, not frequency, because frequency here is contaminated.
+
+## Why waiting was not the plan
+
+Six 401s in 623 logs is ≈1% per run, so catching one with 95% confidence needs
+`ln(0.05)/ln(0.99)` ≈ **298 runs**. The probe from the previous round is shipped and ready for
+whoever pays that, but the question is answerable at mechanism level for free.
+
+## What the 401 paths require
+
+```js
+const signingKey = await opts.getSigningKey(decoded.header);
+const payload = jwt.verify(token, signingKey, { algorithms: ['RS256'], issuer: opts.issuer });
+```
+
+A 401 needs the token to fail against **the key material or the issuer that this particular
+app instance was configured with.** So "the request reached a verifier the test did not
+configure" is not a vague worry — it is precisely what this code punishes.
+
+## The corpus makes that possible, and the numbers are stark
+
+```
+test files generating their OWN keypair: 42 of 59
+distinct issuers across files:           41x realms/hill90   (one value)
+```
+
+**Forty-two of fifty-nine test files mint a fresh RSA keypair at module load.** Every jest
+worker therefore runs an app that trusts a *different* public key, while all of them use the
+same issuer. So the issuer is not the discriminator — **the key is**, and a token is valid for
+exactly one worker's app and invalid for all the others.
+
+## The demonstration
+
+A token minted for app A, presented to app B — the sibling-worker case:
+
+```
+CONTROL  token A -> app A, route exists : 200
+CROSS    token A -> app B (other key)   : 401
+CROSS    token B -> app B, route ABSENT : 404
+```
+
+**One mechanism produces both dominant surviving symptoms.** A request arriving at another
+worker's server yields **401** when the key differs, and **404** when that app does not mount
+the route the test asked for. The surviving set is 8× timeout, 6× `200->404`, 4× `200->400`,
+4× `200->401` — and 401-plus-404 is what this predicts, without needing a second theory for
+each.
+
+It is the same shape as the port collision closed earlier today: **the request arriving
+somewhere other than where the test believes.** That shape is no longer speculative in this
+codebase — it was demonstrated once with a foreign daemon and is now demonstrated to produce
+the surviving symptom set when the wrong destination is a sibling worker.
+
+## Stated as a lead, and the gap it exposes
+
+**This is not proof that cross-worker arrival happens.** It proves that *if* it happens the
+symptoms match. No instance has been captured.
+
+And there is a hole worth naming immediately: **the foreign-response guard shipped in round
+fifteen cannot detect this case.** It identifies a stranger by the presence of a `Server:`
+header, which express does not set — so a sibling worker's response looks exactly like our
+own. The guard closes the daemon case and is blind to the worker case.
+
+## The detector this needs
+
+Each app instance should stamp a response header identifying the worker and test file that
+produced it, and the client side should assert that the stamp matches the app it believes it
+called. A mismatch is then caught at the moment it happens, with both identities named, rather
+than inferred from a status code.
+
+That is test-side, needs no production change, and — unlike a status code — **cannot be
+confused with a legitimate response**, which is the property every instrument in this
+investigation has needed and three of them lacked.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
