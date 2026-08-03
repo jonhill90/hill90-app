@@ -1,72 +1,46 @@
 # Infra/App Separation
 
-**Status:** decided, not implemented
-**Decided:** 2026-07-11
-**Recorded:** 2026-07-25 (salvaged from working session notes before those
-notes were deleted)
+**Status: SUPERSEDED by events. Kept as a stub because six documents cite it.**
 
-## Context
+**Decided 2026-07-11. Overtaken 2026-07-26 to 2026-07-29.**
 
-Hill90 grew into a combined repository: infrastructure automation (Ansible
-bootstrap, deploy scripts, Traefik/Portainer/observability compose, SOPS
-secrets, Tailscale) alongside an AI agent application stack under `services/`
-(api, ai, ui, mcp, knowledge, chat, agentbox).
+## What it decided
 
-In June 2026 the prod VPS was destroyed and rebuilt on AlmaLinux 10 as a
-deliberate scope reduction. Only the infra and observability stacks were
-redeployed; the application stack was left undeployed. That change is recorded
-in commit `ee94b43`.
+That Hill90 would become a homelab domain rather than an application host, the AI
+agent application would be **shelved**, and the reusable value of both Hill90 and
+`k8s-homelab` would be extracted into **two fresh, generic, public boilerplate
+repositories** — a Docker one and a Kubernetes one (kubeadm + containerd + Calico
+over k3s, chosen for the etcd experience). Hill90 and `k8s-homelab` would be
+archived and left untouched as sources.
 
-A separate `k8s-homelab` repository (kind cluster, cert-manager, ArgoCD,
-observability, AdGuard) exists from earlier work and is likewise stale.
+## What actually happened
 
-## Decision
+**None of that.** No boilerplate repository was created and nothing was archived.
+Instead the application was extracted into
+[`hill90-app`](https://github.com/jonhill90/hill90-app) as a working repository on
+2026-07-26, and since 2026-07-29 it has run in production as a **tenant** of
+Hill90 rather than being shelved. Hill90 remained the live platform and gained a
+tenancy contract it did not previously have.
 
-Hill90 becomes a homelab domain rather than an application host. The AI agent
-application is shelved.
+So the *separation* happened and the *shelving* did not, which is why this
+document's conclusions read as wrong rather than merely old.
 
-The reusable value in both repositories is extracted into **two generic infra
-boilerplates**:
+## Why this stub exists rather than a deletion
 
-1. **Both repos are generic boilerplates**, not Hill90-specific live infra.
-   They may be used for a homelab or for hosting an application.
-2. **The two repos are independent**, not layered — you pick one per project
-   rather than stacking one on the other.
-3. **Both are fresh repositories.** Hill90 and `k8s-homelab` stay archived and
-   untouched as sources to extract from. The `services/` tree and
-   app-specific `platform/` configs are archived separately or deleted.
-4. **The Kubernetes boilerplate uses kubeadm + containerd + Calico** with
-   stacked etcd — "the real thing" rather than k3s, chosen for the etcd
-   backup/restore experience that k3s's SQLite datastore would not provide.
-   Single-node capable today, `kubeadm join` for more nodes later over
-   Tailscale.
-5. **They live on the personal GitHub account, public**, with descriptive
-   names — e.g. `docker-infra-boilerplate` and `k8s-cluster-boilerplate`.
+The original 72 lines argued a question that is settled and described a plan that
+was abandoned, so keeping them invites someone to re-propose two boilerplate
+repos. But `SPEC.md`, `README.md`, `PRD.md`, `PROVENANCE.md`, `VERIFICATION.md`
+and `running-the-app-on-hill90-infra.md` all cite this path, and deleting the file
+would break every one of those links while erasing the record that the option was
+considered at all.
 
-### Why kubeadm over k3s
+The live successors are:
 
-k3s and kubeadm give an identical Kubernetes API, kubectl, and manifest/Helm
-experience; the differences are bootstrap and footprint. kubeadm was chosen
-deliberately for hands-on exposure to etcd, CNI, and certificate management,
-which is closer to managing a real on-prem cluster. kubeadm v1.35 with
-containerd and Calico is confirmed working on AlmaLinux 10 / Rocky 10.1.
+- **[running-the-app-on-hill90-infra.md](running-the-app-on-hill90-infra.md)** —
+  what was actually built
+- **Hill90's `app-tenancy-on-the-vps.md`** — the contract the platform offers a
+  tenant
 
-## Status and Open Items
-
-Nothing has been implemented. No branch, no extraction, no new repositories.
-This repo remains structurally unchanged — `services/`, `platform/`, `infra/`,
-and `deploy/compose` are all still present.
-
-Deferred details, to be settled when the work actually starts:
-
-- Exact content inventory for each boilerplate repo
-- The cert-manager / ingress-nginx / ArgoCD / observability manifest set
-- Secrets and config templating approach
-- Whether the Kubernetes boilerplate carries its own node preparation or
-  references the Docker one
-
-## Provenance
-
-The decision was reached in a working session on 2026-07-11 and never written
-down at the time. It survived only in local session transcripts, which were
-removed during the harness cleanup. This document is the salvaged record.
+The one durable technical note worth not losing: **kubeadm v1.35 with containerd
+and Calico was confirmed working on AlmaLinux 10 / Rocky 10.1.** No Kubernetes
+work followed, so it has not been revisited since 2026-07-11.

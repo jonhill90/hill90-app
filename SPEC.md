@@ -328,8 +328,7 @@ New commits on top of the preserved history:
 
 | File | Content |
 |---|---|
-| `README.md` | First paragraph: *shelved — not verified runnable since June 2026.* Then: what the app is, the service table, where it came from (`Hill90@<SOURCE_SHA>`), and a pointer to `RESURRECTION.md` |
-| `RESURRECTION.md` | Every known-broken thing with file path and required change — seeded from `PRD.md` "End state". **Removed 2026-07-31** once its items were resolved; the durable parts moved to `docs/reference/secret-layout.md`, `docs/extraction/PROVENANCE.md` and `CONTRIBUTING.md` |
+| `README.md` | What the app is, the service table, where it came from, and the dated production status table. Its first paragraph records the deployed state, not a shelved one. |
 | `.gitignore` | App subset of Hill90's: `node_modules/`, `.next/`, `next-env.d.ts`, `*.tsbuildinfo`, `dist/`, Python/`.ruff_cache`, `.playwright-*`, `tests/e2e/{test-results,playwright-report}/`. Terraform/Ansible/SOPS rules dropped |
 | `.editorconfig` | Copied verbatim; it is generic |
 | `CONTRIBUTING.md` | Rewritten: branch naming and commit format kept; the deploy rule, command map, and vault/secrets workflow dropped — none of that tooling comes here |
