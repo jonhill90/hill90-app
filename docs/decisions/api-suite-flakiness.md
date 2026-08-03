@@ -951,3 +951,147 @@ Still open, narrowed:
 
 **Nothing was disabled, retried or quarantined.** The rate is unchanged because
 nothing was done to change it.
+
+---
+
+# Round four, 2026-08-03: contention-as-starvation is eliminated, and one stated mechanism is false
+
+**20 runs of half A, default workers. 2 failed — 10%.** The flake reproduced normally;
+nothing was skipped, retried, reordered or quarantined, and the rate is unchanged because
+nothing was done to change it.
+
+Round three's closing instruction was to instrument `routes-agents-events`'s asynchronous
+work, because its 8.8s-to-83.2s variance was the largest unexplained quantity here. That was
+done, and it answers a question the record could not previously ask.
+
+## The instrument, and the control that caught it lying
+
+"Contention" has two mechanisms that look identical from outside — a slow test, then a
+timeout or a wrong status — and have opposite fixes:
+
+- **STARVED** — the process has work and cannot get CPU. The loop is blocked, timers fire
+  late, a 5s jest timeout expires while the callback that would satisfy it waits in the queue.
+- **WAITING** — the process is idle on I/O or a timer that never comes. The loop is free.
+
+`services/api/jest.loopdelay.js` (`LOOP_AUDIT=1`, off by default) records per test:
+duration, and `monitorEventLoopDelay`'s max/mean/p99. High delay means starved; low delay
+across a long test means waiting.
+
+**Its first version was wrong and its own positive control caught it.** A deliberate 400ms
+block was reported as **0.0ms**, because the histogram is fed by a libuv timer that cannot
+fire while the loop is blocked — the sample only lands on the next turn, and the audit read
+it synchronously. After yielding 20ms before the read:
+
+```
+CONTROL=block   tests: 11 | loopMax median 401.6ms, worst 404.5ms | starvedPct>50%: 11/11
+CONTROL=wait    tests: 11 | loopMax median  12.1ms, worst  26.2ms | starvedPct>50%:  0/11
+```
+
+Blocking is detected; an identical duration spent *waiting* is not flagged. Only then was
+it believed.
+
+## Result: the failure was not starved
+
+6,020 test executions captured. The two failures were
+`routes-agents › POST /agents with valid container_profile_id persists it` (timeout) and
+`docs.test.ts › G1: POST /user-models without connection_id` (**expected 400, received 501**).
+
+```
+     ms  loopMax  starved%  test
+   5003     36.5       0.7  routes-agents :: POST /agents with valid container_profile_id
+```
+
+**The one execution that hit the 5000ms ceiling ran with a free event loop** — 36.5ms of
+delay across 5 seconds, 0.7%. It was not competing for CPU. It was waiting for a response
+that never came.
+
+The same holds for every slow execution:
+
+```
+  durations vs jest's 5000ms ceiling:   <1s: 5978 | 1-3s: 1 | 3-4s: 20 | 4-4.5s: 20 | >=5s: 1
+  executions within 1.5s of the timeout: 40
+    their loop delay: median 34.5ms, worst 129.9ms
+```
+
+Blocking does happen — 12 of the 66 executions slower than 500ms were >50% blocked, the
+worst being 835.7ms in an 842ms `routes-agents-skill` test — **but never on the path that
+failed.**
+
+**So contention-in-the-sense-of-CPU-starvation is eliminated as the mechanism of the
+timeout.** The shape round three read as "contention" is real, and it is *waiting*.
+
+## A structural fragility, measured
+
+Forty executions sit between 3s and 4.5s against a **5000ms** ceiling. They are the SSE poll
+tests, and the cause is in production code, not the test:
+
+```
+services/api/src/routes/agents.ts:1729:  const INFERENCE_POLL_MS = 3000;
+```
+
+A test that must observe one poll cannot finish in under 3s, and lands near 4s. **The margin
+to jest's default timeout is about one second.** That is why `routes-agents-events` is the
+most frequent victim and why TIMEOUT is in the symptom set — no carrier required, only a
+delay of more than a second from any source.
+
+## A mechanism this document asserts, which is false
+
+Round two states:
+
+> if the queue empties, the handler awaits a promise that never resolves and the test times
+> out at 5s
+
+**A drained `mockResolvedValueOnce` queue does not return a pending promise. It returns
+`undefined`:**
+
+```
+  1st call: object
+  2nd call (queue drained) returns: undefined
+```
+
+`await undefined` resolves immediately, so that sentence's mechanism cannot produce a hang.
+
+**But the conclusion survives on a different mechanism, and it was tested rather than
+reasoned.** The handler then reads `.rows` off `undefined` and throws — and **Express 4.22.1
+does not catch a rejection from an async handler**, so no response is ever sent:
+
+```
+  /awaited     -> HUNG (no response after 2004ms)
+  /unawaited   -> HUNG (no response after 2002ms)
+```
+
+A drained queue therefore *does* hang the request, by throwing into a void rather than by
+awaiting forever. That matches the observed failure exactly: `await request(app)` in a test
+queueing four `Once` values, 5003ms, event loop free.
+
+## Where this leaves the search space
+
+Eliminated by measurement, cumulative:
+
+- `process.env` and `globalThis` as carriers (round two, positive-controlled)
+- "symptoms are purely logical" — timeout, 401 and 400 are in the set
+- order-dependence, n=80
+- the runInBand-worse-than-workers asymmetry, n=80
+- **CPU starvation as the timeout mechanism** — free loop during the only ≥5s execution
+- **"drained queue → promise never resolves"** — a drained queue returns `undefined`
+
+Still open, and now stated mechanically rather than as a mood:
+
+1. **What drains the queue.** The hang is now explained end to end *given* a drained queue.
+   What is not explained is why the queue is out of step. Round one's "extra caller" lead is
+   the live one, and it now has a confirmed downstream mechanism instead of a guessed one.
+   Note the constraint that killed it before still stands: a file with **zero** `Once(` calls
+   flakes too, so this cannot be the whole defect — it is the explanation of the TIMEOUT
+   class, not of the 501/401/400 class.
+2. **The one-second margin.** Independent of any carrier, `INFERENCE_POLL_MS = 3000` against
+   a 5000ms timeout means any delay over ~1s becomes a failure. This is worth fixing on its
+   own merits, and it is a **fragility, not the cause** — the 501/400/401 failures have
+   nothing to do with it.
+
+**The next instrument** follows round two's own suggestion, now better targeted: wrap
+`mockQuery` in the affected files to record, per test, calls made against `Once` values
+queued, and flag any test where the counts disagree. The mechanism above says a mismatch
+must precede every timeout; if a run times out with the counts in agreement, that kills this
+lead outright.
+
+**Nothing was disabled, retried or quarantined.**
