@@ -30,7 +30,7 @@
  */
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
 vi.mock('@/app/chat/XTerminal', () => ({
@@ -134,6 +134,55 @@ describe('SessionPane browser pane across a thread switch', () => {
     expect(screen.queryByDisplayValue('https://a.example/private')).not.toBeInTheDocument()
     expect(screen.queryByTestId('browser-screenshot')).not.toBeInTheDocument()
     expect(screen.queryByTestId('browser-url-input')).not.toBeInTheDocument()
+  })
+
+  /*
+   * The reset adjusts state DURING RENDER, and that pattern misapplied is how you
+   * get an infinite loop — so the question was whether it can fail QUIETLY, in a
+   * way that would present as a flaky pane we then chase.
+   *
+   * MEASURED, NOT ASSUMED. Relaxing the condition to `if (true)` — which still
+   * converges, since clearing already-cleared state is a no-op — does NOT go quiet.
+   * React counts render-phase updates regardless of whether the value changed, and
+   * every test in this file fails with "Too many re-renders". So the unconditional
+   * misapplication is loud and needs no test of its own. The first version of this
+   * comment claimed the opposite; the positive control refuted it.
+   *
+   * What this test covers is the realistic regression from the reset itself, which
+   * none of the three above touch: an unrelated re-render must not discard what the
+   * user has TYPED. ChatView re-renders on every SSE message, so a reset that fired
+   * on renders rather than on changes would wipe the URL box mid-typing — and that
+   * value is the body handleNavigate POSTs.
+   *
+   * Its limit, stated so it is not read wider: it drives re-renders with identical
+   * props, so it catches a condition that is unstable across identical renders. A
+   * condition keyed on some OTHER changing prop would slip past it.
+   */
+  it('a re-render with the same threadId does not discard what the user typed', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      const m = /^\/api\/chat\/([^/]+)\/screenshot$/.exec(String(url))
+      if (m) return Promise.resolve(screenshotOf(`https://${m[1]}.example/page`))
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    })
+
+    const { rerender } = render(<SessionPane threadId="thread-a" initialTab="browser" />)
+    await waitFor(() => expect(urlBox().value).toBe('https://thread-a.example/page'))
+
+    // A user typing in the box is thread-derived state the reset must not touch on
+    // an unrelated re-render — and it is the value handleNavigate would POST.
+    fireEvent.change(urlBox(), { target: { value: 'https://typed.example/by-hand' } })
+
+    // Re-renders with the threadId UNCHANGED, as any parent state change produces.
+    for (let i = 0; i < 3; i++) {
+      rerender(<SessionPane threadId="thread-a" initialTab="browser" />)
+    }
+
+    expect(urlBox().value).toBe('https://typed.example/by-hand')
+    expect(screen.getByTestId('browser-screenshot')).toBeInTheDocument()
+
+    // And the change still resets, so this has not passed by disabling the fix.
+    rerender(<SessionPane threadId="thread-b" initialTab="browser" />)
+    expect(screen.queryByDisplayValue('https://typed.example/by-hand')).not.toBeInTheDocument()
   })
 
   // Guard rail: the ordinary case must still work, or the reset has just broken
