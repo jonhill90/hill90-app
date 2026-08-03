@@ -56,6 +56,19 @@ const adminToken = makeToken('admin-user', ['admin', 'user']);
 const userToken = makeToken('regular-user', ['user']);
 const otherUserToken = makeToken('other-user', ['user']);
 
+
+/**
+ * How long to wait for one inference poll to have fired.
+ *
+ * Derived from the interval the server is actually using, not hardcoded. These
+ * two tests used to sleep 4000ms and 3500ms because production polls every
+ * 3000ms — real wall-clock spent per run, in the file that is this suite's most
+ * frequent victim. jest.setup.js now sets a small interval for tests, so the
+ * wait tracks it and the same property is proven in a fraction of the time.
+ */
+const POLL_MS = parseInt(process.env.INFERENCE_POLL_MS || '3000', 10);
+const POLL_WAIT_MS = POLL_MS + 500;
+
 const AGENT_UUID = '550e8400-e29b-41d4-a716-446655440000';
 
 // Helper: creates a Readable stream from a string
@@ -678,7 +691,7 @@ describe('GET /agents/:id/events', () => {
               server.close();
               done(err);
             }
-          }, 3500);
+          }, POLL_WAIT_MS);
 
           res.on('end', () => {
             server.close();
@@ -843,7 +856,7 @@ describe('GET /agents/:id/events', () => {
             type: 'command_start', tool: 'shell', input_summary: 'ls',
           }) + '\n');
 
-          // Wait for inference poll (3s interval), then check order
+          // Wait for one inference poll, then check order.
           setTimeout(() => {
             try {
               const containerPos = body.indexOf('container-first');
@@ -859,7 +872,7 @@ describe('GET /agents/:id/events', () => {
               controlStream.destroy();
               server.close(done);
             }
-          }, 4000);
+          }, POLL_WAIT_MS);
         },
       );
     });
