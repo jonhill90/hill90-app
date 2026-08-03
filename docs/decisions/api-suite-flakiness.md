@@ -3218,20 +3218,51 @@ tests read by hand.
 
 ## What changed, and what it is worth
 
-`INFERENCE_POLL_MS` is now read from the environment (default 3000, production unchanged),
-`jest.setup.js` sets it to 50 for tests, and the two tests derive their wait from it rather
-than hardcoding 4000/3500.
+`INFERENCE_POLL_MS` is now read **per request** (default 3000, production unchanged), and the
+two tests opt into 25ms for their own duration and delete it afterwards. Per request rather
+than at module scope on purpose: a module-level constant would force every test in the process
+onto one cadence, and this suite has an unexplained flake class that a global timing change
+would put beyond ruling out.
 
-**This is a speed change, not a flake fix, and it is not offered as one.** The file drops from
-**11.0s to 3.1s**; the two executions that sat at 4005ms and 3518ms now sit at 555ms and 556ms.
-Roughly seven seconds of deliberate sleeping leaves each full-suite run.
+**They wait on the condition, not the clock.** A shorter fixed sleep is still a race, just a
+tighter one — and a tightened race is how a rare flake becomes a common one. Each test now
+polls for the thing it is waiting for and stops when it is true, with a ceiling that fails
+loudly:
 
-**No effect on the failure rate was detected, and none is claimed.** Ten runs of the file with
-the change and ten without both produced zero failures — which at this sample size cannot
-distinguish small differences and is reported as "no difference detected", not "no difference".
-The file passes alone in both arms, consistent with everything else in this document about
-needing company.
+    waitUntil(() => body.includes('container-first') && body.includes('inference-t8-poll'), ...)
+    waitUntil(() => mockQuery.mock.calls.length >= 3, ...)
 
-**One failure was observed during this work and is not attributed to the change**: it occurred
-in a run with `LOOP_AUDIT=1` enabled, an instrument this document already records as altering
-timing. Twenty subsequent runs without the audit, ten per arm, were clean.
+**That made T8 stricter, not just faster.** Its assertion used to read *"the poll may or may
+not have fired yet"* and passed either way — it could not fail for the reason it existed.
+Waiting for the event makes the ordering assertion unconditional.
+
+Wall clock: the file drops from **11.0s to 2.8s**; the two executions that sat at 4005ms and
+3518ms are gone.
+
+## Whether this touches the 400/401/timeout classes: NOT ESTABLISHED, and here is everything
+
+This suite has an unexplained flake class, so a timing change to it needs more than a shrug.
+Three measurements, reported whole because the first one looked alarming.
+
+| Design | with change | without | Fisher two-sided |
+|---|---|---|---|
+| Blocked — 12 runs of one arm, then 12 of the other | **5/12** | **1/12** | p = 0.155 |
+| **Alternated** — with, without, with, without, 10 pairs | **3/10** | **4/10** | **p = 1.000** |
+| Pooled | 8/22 | 5/22 | p = 0.510 |
+
+**The blocked result is the one to discard, and this document already said why** before I
+produced it: *"machine load drifts over half an hour and a block design confounds that drift
+with the treatment"*. I ran the design this record warns against, got a frightening number, and
+it did not survive alternation. It is recorded rather than deleted because a 5-versus-1 that
+evaporates under a better design is exactly the shape of finding that gets published elsewhere.
+
+**An earlier version of this section reported 10 runs with and 10 without at zero failures
+each. That measurement was worthless and is withdrawn:** it ran the file ALONE, and this
+document establishes across many rounds that the defect does not appear alone. It had no power
+to detect anything.
+
+**What cannot be claimed: independence.** 10 pairs cannot separate small differences — this
+document's own arithmetic puts ~120 runs per arm behind separating 15% from 30%. The honest
+statement is *no effect detected under a valid design*, not *no effect*. A reviewer who would
+rather hold any timing change to this suite until the flake class is understood has a
+defensible position, and the change is small to revert.

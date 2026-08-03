@@ -26,6 +26,12 @@ import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 /**
  * How often the SSE handler polls for new inference rows.
  *
+ * Read PER REQUEST, deliberately. A module-level constant would force every test
+ * in the process to share one cadence; read here, only the two tests that opt in
+ * change anything, and every other test keeps production's 3000ms exactly. That
+ * matters because this suite has an unexplained flake class and a global timing
+ * change would put it beyond ruling out.
+ *
  * 3000ms in production, and OVERRIDABLE because that number sets the floor on how
  * long a test takes. A test that must observe one poll cannot finish in under
  * 3s and lands near 4s, against jest's 5000ms default — about one second of
@@ -37,10 +43,10 @@ import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
  * 3000. Read once at import, so it is the process's setting, not a per-request
  * one.
  */
-const INFERENCE_POLL_MS = (() => {
+function inferencePollMs(): number {
   const raw = parseInt(process.env.INFERENCE_POLL_MS || '', 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 3000;
-})();
+}
 
 import { createBoundedSseWriter, SSE_DEFAULTS } from '../services/sse-writer';
 import {
@@ -1792,6 +1798,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         });
 
         // Phase 3: inference poll
+        const pollMs = inferencePollMs();
         const pollInterval = setInterval(async () => {
           if (res.writableEnded || res.destroyed) return;
           try {
@@ -1811,7 +1818,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
           } catch (err) {
             console.error('[agents] SSE inference poll failed (continuing):', err);
           }
-        }, INFERENCE_POLL_MS);
+        }, pollMs);
 
         // The producer to slow down when the client falls behind. Without this the
         // writer can only refuse writes; with it, `tail -f` stops being read and
