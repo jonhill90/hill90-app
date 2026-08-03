@@ -103,6 +103,7 @@ describe('docs openapi proxy', () => {
     mockFetch.mockResolvedValue({
       status: 200,
       json: () => Promise.resolve(spec),
+      text: () => Promise.resolve(JSON.stringify(spec)),
     })
 
     await GET()
@@ -117,6 +118,7 @@ describe('docs openapi proxy', () => {
     mockFetch.mockResolvedValue({
       status: 200,
       json: () => Promise.resolve(spec),
+      text: () => Promise.resolve(JSON.stringify(spec)),
     })
 
     await GET()
@@ -149,6 +151,7 @@ describe('docs openapi proxy', () => {
     mockFetch.mockResolvedValue({
       status: 503,
       json: () => Promise.resolve({ error: 'Service Unavailable' }),
+      text: () => Promise.resolve(JSON.stringify({ error: 'Service Unavailable' })),
     })
 
     await GET()

@@ -85,6 +85,7 @@ describe('proxyToApi', () => {
       status: 200,
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve([{ id: '1' }]),
+      text: () => Promise.resolve(JSON.stringify([{ id: '1' }])),
     })
 
     await proxyToApi(makeRequest() as any, '/provider-connections')
@@ -100,6 +101,7 @@ describe('proxyToApi', () => {
       status: 200,
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve({}),
+      text: () => Promise.resolve(JSON.stringify({})),
     })
 
     await proxyToApi(makeRequest('GET', { agent_id: 'abc' }) as any, '/usage')
@@ -113,6 +115,7 @@ describe('proxyToApi', () => {
       status: 201,
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve({ id: 'new-id' }),
+      text: () => Promise.resolve(JSON.stringify({ id: 'new-id' })),
     })
 
     const body = JSON.stringify({ name: 'test' })

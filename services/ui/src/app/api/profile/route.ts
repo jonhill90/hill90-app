@@ -5,6 +5,9 @@ import {
   bodyTooLargeResponse,
   BodyTooLargeError,
   BODY_LIMIT_JSON,
+  readUpstreamTextLimited,
+  upstreamTooLargeResponse,
+  UpstreamTooLargeError,
 } from '@/utils/request-body'
 
 const API_URL = process.env.API_URL || 'http://localhost:3000'
@@ -43,7 +46,14 @@ async function proxyRequest(req: NextRequest) {
 
   try {
     const res = await fetch(url.toString(), fetchOpts)
-    const data = await res.json()
+    let raw: string
+    try {
+      raw = await readUpstreamTextLimited(res)
+    } catch (err) {
+      if (err instanceof UpstreamTooLargeError) return upstreamTooLargeResponse(err)
+      throw err
+    }
+    const data = raw === '' ? null : JSON.parse(raw)
     return NextResponse.json(data, { status: res.status })
   } catch (err) {
     console.error('[profile-proxy] Error:', err)

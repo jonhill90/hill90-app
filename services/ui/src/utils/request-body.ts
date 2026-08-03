@@ -150,3 +150,82 @@ export function bodyTooLargeResponse(err: BodyTooLargeError): Response {
     },
   )
 }
+
+/**
+ * The other direction, and the half #146 did not close.
+ *
+ * #146 bounded what a CALLER can send into this process. It said nothing about
+ * what the API sends back, and every JSON proxy path buffers the whole upstream
+ * response with `await res.json()`. That is user-drivable rather than
+ * theoretical: the listings behind `/api/knowledge/entries` carry no SQL LIMIT,
+ * and an agent writes entries on its own, so the response grows without anyone
+ * doing anything unusual.
+ *
+ * The streamed paths — SSE and images — already pass `res.body` through
+ * untouched and are deliberately not routed here. Buffering those would be a
+ * regression, not a fix.
+ *
+ * WHY 502 AND NOT 413. An oversized response is not the caller's fault and there
+ * is no request they could have made smaller. The upstream answer was unusable,
+ * which is what a bad gateway means. As with the request half, the one thing it
+ * must never be is an empty 200 — a proxy that swallowed this and returned `[]`
+ * would tell a user their knowledge base is empty.
+ */
+export const UPSTREAM_LIMIT_JSON = 16 * 1024 * 1024
+
+export class UpstreamTooLargeError extends Error {
+  constructor(readonly limit: number) {
+    super(`upstream response exceeds ${limit} bytes`)
+    this.name = 'UpstreamTooLargeError'
+  }
+}
+
+/** Read an upstream response body, counting bytes, or refuse. */
+export async function readUpstreamTextLimited(
+  res: {
+    headers?: { get(name: string): string | null }
+    body?: ReadableStream<Uint8Array> | null
+    text?: () => Promise<string>
+  },
+  limit: number = UPSTREAM_LIMIT_JSON,
+): Promise<string> {
+  // No stream to count (a mocked or already-consumed response): fall back to the
+  // declared length plus text(). Stated rather than hidden — this branch is NOT
+  // bounded during the read, so it is only reachable where there is no body to
+  // stream in the first place.
+  if (!res.body) {
+    // Optional: an absent headers object is the same fact as an absent header —
+    // no declared length. Throwing here would turn "the caller told us nothing"
+    // into a 500.
+    const declared = Number(res.headers?.get('content-length') ?? NaN)
+    if (Number.isFinite(declared) && declared > limit) {
+      throw new UpstreamTooLargeError(limit)
+    }
+    if (!res.text) {
+      // Neither a stream nor text(). Returning '' here would hand the caller an
+      // empty result that looks like an empty API response — the silent-success
+      // shape this whole file exists to avoid. A real fetch Response always has
+      // one or the other, so this is a programming error, and it says so.
+      throw new Error('upstream response exposes neither body nor text()')
+    }
+    return await res.text()
+  }
+  return readTextLimited({ headers: res.headers ?? { get: () => null }, body: res.body }, limit)
+}
+
+/** The 502 an oversized upstream response must produce. Never an empty 200. */
+export function upstreamTooLargeResponse(err: UpstreamTooLargeError): Response {
+  return new Response(
+    JSON.stringify({
+      error: 'Upstream response too large',
+      limit_bytes: err.limit,
+      detail:
+        `The API returned more than ${err.limit} bytes for this request. ` +
+        'This is not a client error and the result is incomplete — it has not been truncated and served as if whole.',
+    }),
+    {
+      status: 502,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' },
+    },
+  )
+}

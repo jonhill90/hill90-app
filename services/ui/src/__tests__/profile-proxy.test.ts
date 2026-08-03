@@ -104,6 +104,7 @@ describe('profile catch-all proxy — conditional headers', () => {
       status: 200,
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve({ ok: true }),
+      text: () => Promise.resolve(JSON.stringify({ ok: true })),
     })
 
     const req = makeCatchAllRequest('GET', { 'if-none-match': '"abc123"' })
@@ -118,6 +119,7 @@ describe('profile catch-all proxy — conditional headers', () => {
       status: 200,
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve({ ok: true }),
+      text: () => Promise.resolve(JSON.stringify({ ok: true })),
     })
 
     const req = makeCatchAllRequest('GET', { 'if-modified-since': 'Wed, 21 Oct 2025 07:28:00 GMT' })
@@ -132,6 +134,7 @@ describe('profile catch-all proxy — conditional headers', () => {
       status: 200,
       headers: { get: () => 'application/json' },
       json: () => Promise.resolve({ ok: true }),
+      text: () => Promise.resolve(JSON.stringify({ ok: true })),
     })
 
     const req = makeCatchAllRequest('GET')
@@ -280,6 +283,7 @@ describe('profile base proxy', () => {
     mockFetch.mockResolvedValue({
       status: 200,
       json: () => Promise.resolve({ firstName: 'Jon', lastName: 'Hill' }),
+      text: () => Promise.resolve(JSON.stringify({ firstName: 'Jon', lastName: 'Hill' })),
     })
 
     const req = makeBaseRequest('GET')
@@ -303,6 +307,7 @@ describe('profile base proxy', () => {
     mockFetch.mockResolvedValue({
       status: 200,
       json: () => Promise.resolve({ firstName: 'Updated' }),
+      text: () => Promise.resolve(JSON.stringify({ firstName: 'Updated' })),
     })
 
     const req = makeBaseRequest('PATCH', { 'content-type': 'application/json' })
@@ -333,6 +338,7 @@ describe('profile base proxy', () => {
     mockFetch.mockResolvedValue({
       status: 500,
       json: () => Promise.resolve({ error: 'Internal Server Error' }),
+      text: () => Promise.resolve(JSON.stringify({ error: 'Internal Server Error' })),
     })
 
     const req = makeBaseRequest('GET')

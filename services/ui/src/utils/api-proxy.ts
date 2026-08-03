@@ -2,8 +2,11 @@ import { auth } from '@/auth'
 import { NextRequest, NextResponse } from 'next/server'
 import {
   readTextLimited,
+  readUpstreamTextLimited,
   bodyTooLargeResponse,
+  upstreamTooLargeResponse,
   BodyTooLargeError,
+  UpstreamTooLargeError,
   BODY_LIMIT_JSON,
 } from '@/utils/request-body'
 
@@ -88,7 +91,16 @@ export async function proxyToApi(
       })
     }
 
-    const data = await res.json()
+    // Counted, like the request half. `res.json()` buffered whatever the API
+    // sent, and the listings behind some of these routes carry no SQL LIMIT.
+    let raw: string
+    try {
+      raw = await readUpstreamTextLimited(res)
+    } catch (err) {
+      if (err instanceof UpstreamTooLargeError) return upstreamTooLargeResponse(err)
+      throw err
+    }
+    const data = raw === '' ? null : JSON.parse(raw)
     return NextResponse.json(data, { status: res.status, headers: NO_SHARED_CACHE })
   } catch (err) {
     console.error(`[${label}] Error:`, err)
