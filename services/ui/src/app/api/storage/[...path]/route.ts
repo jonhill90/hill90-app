@@ -4,6 +4,10 @@ import { proxyToApi } from '@/utils/api-proxy'
 
 const API_URL = process.env.API_URL || 'http://localhost:3000'
 
+// This route does NOT go through proxyToApi — it streams the multipart body
+// itself — so it needs its own copy of the header the helper applies.
+const NO_SHARED_CACHE = { 'Cache-Control': 'private, no-store' } as const
+
 async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   const { path } = await params
   const pathStr = path.join('/')
@@ -13,7 +17,7 @@ async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ pa
 async function proxyUpload(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   const session = await auth()
   if (!session?.accessToken) {
-    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401, headers: NO_SHARED_CACHE })
   }
 
   const { path } = await params
@@ -32,10 +36,10 @@ async function proxyUpload(req: NextRequest, { params }: { params: Promise<{ pat
       signal: AbortSignal.timeout(60000),
     })
     const data = await res.json()
-    return NextResponse.json(data, { status: res.status })
+    return NextResponse.json(data, { status: res.status, headers: NO_SHARED_CACHE })
   } catch (err) {
     console.error('[storage-proxy-upload] Error:', err)
-    return NextResponse.json({ error: 'API request failed' }, { status: 502 })
+    return NextResponse.json({ error: 'API request failed' }, { status: 502, headers: NO_SHARED_CACHE })
   }
 }
 

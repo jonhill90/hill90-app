@@ -49,7 +49,11 @@ export const NAV_ITEMS: NavItem[] = [
     children: [
       { type: 'link', id: 'connections', label: 'Connections', href: '/harness/connections', icon: Plug },
       { type: 'link', id: 'models', label: 'Models', href: '/harness/models', icon: Cpu },
-      { type: 'link', id: 'storage', label: 'Storage', href: '/harness/storage', icon: HardDrive },
+      // The bucket browser lists objects, uploads to an arbitrary bucket and
+      // deletes by key — all three are admin on the API. Offering it to every
+      // signed-in user handed them a page that 403s. Ordinary users still reach
+      // storage where they are meant to: chat attachment upload.
+      { type: 'link', id: 'storage', label: 'Storage', href: '/harness/storage', icon: HardDrive, adminOnly: true },
       { type: 'link', id: 'discord', label: 'Discord', href: '/harness/discord', icon: MessageSquare },
       { type: 'link', id: 'secrets', label: 'Secrets', href: '/harness/secrets', icon: Shield, adminOnly: true },
     ],

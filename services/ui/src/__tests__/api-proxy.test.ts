@@ -59,7 +59,9 @@ describe('proxyToApi', () => {
 
     expect(NextResponse.json).toHaveBeenCalledWith(
       { error: 'Not authenticated' },
-      { status: 401 }
+      // The header travels with the refusal, not only with the payload: a cached
+      // 401 would be served to a signed-in user. See api-proxy-cache-headers.
+      { status: 401, headers: { 'Cache-Control': 'private, no-store' } }
     )
   })
 
@@ -133,7 +135,7 @@ describe('proxyToApi', () => {
 
     expect(NextResponse.json).toHaveBeenCalledWith(
       { error: 'API request failed' },
-      { status: 502 }
+      { status: 502, headers: { 'Cache-Control': 'private, no-store' } }
     )
   })
 

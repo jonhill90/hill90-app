@@ -42,11 +42,18 @@ describe('Storage routes', () => {
     mockS3Send.mockReset();
   });
 
-  it('GET /storage/buckets requires admin role', async () => {
+  // This case used to assert 403 for a user token, which pinned the defect: the
+  // bucket LIST is what the monitoring page reads, and that page is offered to
+  // every signed-in user, so refusing them was the bug rather than the contract.
+  // Object contents and every write stay admin — routes-storage-roles.test.ts
+  // pins each row in both directions.
+  it('GET /storage/buckets is open to an ordinary user', async () => {
+    mockS3Send.mockResolvedValueOnce({ Buckets: [] });
+
     const res = await request(app)
       .get('/storage/buckets')
       .set('Authorization', `Bearer ${userToken}`);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it('GET /storage/buckets lists buckets', async () => {
