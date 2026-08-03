@@ -1770,10 +1770,43 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
       }
 
       // Phase 2: tail -f for container events
+      //
+      // OWNERSHIP IS REGISTERED BEFORE THE STREAM EXISTS, AND RE-CHECKED AFTER.
+      // `execInContainer` is awaited below. A client that goes away DURING that
+      // await — an ordinary page navigation — makes Node emit 'close' before any
+      // handler capable of destroying the stream exists. 'close' is not replayed,
+      // so a listener registered afterwards never fires: the `tail -f` then runs
+      // in the container for the life of this process, read and discarded.
+      //
+      // TWO CONDITIONS, BOTH REQUIRED. Registering the cleanup first is necessary
+      // but not sufficient, because when it runs the stream it must destroy has
+      // not been created yet. So `closed` is re-checked AFTER the await and the
+      // stream destroyed there. Neither half closes the hole alone.
+      //
+      // The sibling at chat.ts (threads/:id/stream) has had the first half since
+      // its own leak; these three container-stream routes never got either.
+      let closed = false;
+      let pollInterval: ReturnType<typeof setInterval> | null = null;
+      let liveStream: { destroy?: () => void } | null = null;
+      const clearPoll = () => {
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+      };
+      const cleanup = () => {
+        closed = true;
+        clearPoll();
+        liveStream?.destroy?.();
+        liveStream = null;
+      };
+      req.on('close', cleanup);
+
       try {
         const stream = await execInContainer(agent.agent_id, [
           'tail', '-f', '-n', String(tail), '/var/log/agentbox/events.jsonl',
         ]);
+        liveStream = stream as unknown as { destroy?: () => void };
+        // The client left while the exec was in flight; cleanup has already run and
+        // found nothing to destroy.
+        if (closed) { liveStream.destroy?.(); return; }
 
         // Every SSE frame goes through this. res.write() returns false when the
         // socket is full and Node will happily buffer past that, without limit —
@@ -1785,7 +1818,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
             console.error(
               `[agents] SSE aborted: ${queued} bytes queued for a client that is not reading`,
             );
-            clearInterval(pollInterval);
+            clearPoll();
             (stream as unknown as { destroy?: () => void }).destroy?.();
             res.write(
               `event: error\ndata: ${JSON.stringify({
@@ -1799,7 +1832,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
 
         // Phase 3: inference poll
         const pollMs = inferencePollMs();
-        const pollInterval = setInterval(async () => {
+        pollInterval = setInterval(async () => {
           if (res.writableEnded || res.destroyed) return;
           try {
             const newRows = await getRecentInference(
@@ -1831,8 +1864,17 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         // that never ends, which `buffer` would grow to hold forever.
         let pendingBytes = 0;
         // Destroying a stream does not un-queue the 'data' events already
-        // scheduled, so without this the abort path runs twice and the second
-        // res.write() throws "write after end".
+        // scheduled, so without this the abort path runs twice and emits a second
+        // error frame for one abort.
+        //
+        // This comment used to end "and the second res.write() throws 'write after
+        // end'". That is false, and it was measured rather than argued: on Node
+        // v26.5.0 a `res.write()` after `res.end()`, and a `res.write()` after the
+        // client has disconnected, both return false silently — no throw, no
+        // 'error' event even with a listener attached, no uncaught exception. The
+        // flag is still right; the reason given for it was not. A confidently wrong
+        // comment is the same hazard as a check that cannot fire: it survives review
+        // because it sounds like it was verified.
         let aborted = false;
         stream.on('data', (chunk: Buffer) => {
           if (aborted || res.writableEnded || res.destroyed) return;
@@ -1855,7 +1897,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
                 detail: `A single log line exceeded the ${MAX_READ_BYTES}-byte read limit; the stream was stopped.`,
               })}\n\n`,
             );
-            clearInterval(pollInterval);
+            clearPoll();
             (stream as unknown as { destroy?: () => void }).destroy?.();
             res.end();
             return;
@@ -1870,7 +1912,7 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         });
 
         stream.on('end', () => {
-          clearInterval(pollInterval);
+          clearPoll();
           if (buffer.trim()) {
             try { JSON.parse(buffer.trim()); res.write(`data: ${buffer.trim()}\n\n`); } catch { /* skip */ }
           }
@@ -1879,15 +1921,11 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         });
 
         stream.on('error', (err: Error) => {
-          clearInterval(pollInterval);
+          clearPoll();
           res.write(`event: error\ndata: ${err.message}\n\n`);
           res.end();
         });
 
-        req.on('close', () => {
-          clearInterval(pollInterval);
-          (stream as any).destroy?.();
-        });
       } catch (err: any) {
         res.write(`event: error\ndata: ${err.message}\n\n`);
         res.end();
@@ -2120,8 +2158,24 @@ router.get('/:id/logs', requireRole('admin'), async (req: Request, res: Response
       req.on('close', () => clearDeadline?.());
       res.flushHeaders();
 
+      // Same two conditions as the events follow stream above: own the stream
+      // before it exists, then re-check after the await. A 'close' arriving while
+      // `getContainerLogs` is in flight is not replayed to a listener registered
+      // afterwards, so without the second check this `follow: true` log stream
+      // runs for the life of the process with nobody to stop it.
+      let closed = false;
+      let liveStream: { destroy?: () => void } | null = null;
+      const cleanup = () => {
+        closed = true;
+        liveStream?.destroy?.();
+        liveStream = null;
+      };
+      req.on('close', cleanup);
+
       try {
         const stream = await getContainerLogs(agent.agent_id, { tail, follow: true });
+        liveStream = stream as unknown as { destroy?: () => void };
+        if (closed) { liveStream.destroy?.(); return; }
 
         stream.on('data', (chunk: Buffer) => {
           // Docker stream has 8-byte header per frame; strip it
@@ -2142,9 +2196,6 @@ router.get('/:id/logs', requireRole('admin'), async (req: Request, res: Response
           res.end();
         });
 
-        req.on('close', () => {
-          (stream as any).destroy?.();
-        });
       } catch (err: any) {
         res.write(`event: error\ndata: ${err.message}\n\n`);
         res.end();
