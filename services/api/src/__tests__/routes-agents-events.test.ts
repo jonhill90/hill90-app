@@ -58,16 +58,41 @@ const otherUserToken = makeToken('other-user', ['user']);
 
 
 /**
- * How long to wait for one inference poll to have fired.
+ * WAIT ON THE CONDITION, NOT THE CLOCK.
  *
- * Derived from the interval the server is actually using, not hardcoded. These
- * two tests used to sleep 4000ms and 3500ms because production polls every
- * 3000ms — real wall-clock spent per run, in the file that is this suite's most
- * frequent victim. jest.setup.js now sets a small interval for tests, so the
- * wait tracks it and the same property is proven in a fraction of the time.
+ * These two tests used to sleep a fixed 4000ms and 3500ms, because production
+ * polls every 3000ms. That is real wall-clock per run in this suite's most
+ * frequent victim file — but shortening the sleep would only tighten the race,
+ * not remove it, and a tightened race is how a rare flake becomes a common one.
+ *
+ * So they now poll for the thing they are actually waiting for and stop the
+ * moment it is true, with a ceiling that fails loudly rather than silently
+ * passing. That is both faster and STRICTER: T8's assertion used to be
+ * conditional — "the poll may or may not have fired" — so it passed whether or
+ * not the behaviour under test happened. Waiting for the event makes it
+ * unconditional.
+ *
+ * FAST_POLL_MS is applied per test, not globally, so no other test's timing
+ * changes. See the note on inferencePollMs() in routes/agents.ts.
  */
-const POLL_MS = parseInt(process.env.INFERENCE_POLL_MS || '3000', 10);
-const POLL_WAIT_MS = POLL_MS + 500;
+const FAST_POLL_MS = '25';
+
+afterEach(() => {
+  delete process.env.INFERENCE_POLL_MS; // never leak a cadence into another test
+});
+
+async function waitUntil(
+  predicate: () => boolean,
+  what: string,
+  timeoutMs = 4000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for: ${what}`);
+}
 
 const AGENT_UUID = '550e8400-e29b-41d4-a716-446655440000';
 
@@ -635,6 +660,7 @@ describe('GET /agents/:id/events', () => {
   });
 
   it('no duplicate inference events between SSE backfill and first poll', (done) => {
+    process.env.INFERENCE_POLL_MS = FAST_POLL_MS; // per-test, restored in afterEach
     // Proves the cursor handoff: backfill emits a row, then the first poll
     // query uses (created_at, id) > (backfill_row.created_at, backfill_row.id)
     // which strictly excludes the already-emitted row.
@@ -666,8 +692,12 @@ describe('GET /agents/:id/events', () => {
             body += chunk.toString();
           });
 
-          // Wait for the 3s poll to fire + buffer
-          setTimeout(() => {
+          // Wait for the poll query to have been issued — that is the event this
+          // test is about — rather than for a duration chosen to outlast it.
+          waitUntil(
+            () => mockQuery.mock.calls.length >= 3,
+            'the first poll query to be issued',
+          ).then(() => {
             try {
               // 1. Verify the backfill inference event appears exactly once
               const inferenceEventId = `inference-${backfillRow.id}`;
@@ -691,7 +721,7 @@ describe('GET /agents/:id/events', () => {
               server.close();
               done(err);
             }
-          }, POLL_WAIT_MS);
+          }).catch(done);
 
           res.on('end', () => {
             server.close();
@@ -827,6 +857,7 @@ describe('GET /agents/:id/events', () => {
   // T8: SSE inference poll events arrive after initial container events
   it('T8: SSE inference poll events arrive after initial container events', (done) => {
     mockRunningAgent();
+    process.env.INFERENCE_POLL_MS = FAST_POLL_MS; // per-test, restored in afterEach
 
     // Empty backfill
     mockInferenceRows([]);
@@ -856,23 +887,25 @@ describe('GET /agents/:id/events', () => {
             type: 'command_start', tool: 'shell', input_summary: 'ls',
           }) + '\n');
 
-          // Wait for one inference poll, then check order.
-          setTimeout(() => {
+          // Wait for BOTH events to have arrived, then assert their order. The
+          // old version slept and then tolerated the poll not having fired,
+          // which passed whether or not the behaviour under test happened.
+          waitUntil(
+            () => body.includes('container-first') && body.includes('inference-t8-poll'),
+            'the container event and the polled inference event to both arrive',
+          ).then(() => {
             try {
               const containerPos = body.indexOf('container-first');
               const inferencePos = body.indexOf('inference-t8-poll');
               expect(containerPos).toBeGreaterThan(-1);
-              // Inference poll may or may not have fired yet depending on timing,
-              // but if it did, it arrives after the container event
-              if (inferencePos > -1) {
-                expect(containerPos).toBeLessThan(inferencePos);
-              }
+              expect(inferencePos).toBeGreaterThan(-1);
+              expect(containerPos).toBeLessThan(inferencePos);
             } finally {
               req.destroy();
               controlStream.destroy();
               server.close(done);
             }
-          }, POLL_WAIT_MS);
+          }).catch(done);
         },
       );
     });
