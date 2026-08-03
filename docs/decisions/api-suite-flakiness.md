@@ -1423,3 +1423,97 @@ status did not come from this handler at all, which would refute the unique-orig
 this lead rests on and is equally worth having.
 
 **Nothing was disabled, retried or quarantined, and no handler behaviour was changed.**
+
+---
+
+# Round eight, 2026-08-03: the unique-origin argument does not hold, so the experiment is not sharp
+
+## How many runs a meaningful null would take, stated first
+
+Measured rates: ~10% of half-A runs fail (rounds four to seven), and roughly a third of
+failures are 501-class (round three ×2, round four ×1, round six ×2 of the classified set).
+So P(501 event per run) ≈ **0.03**, and a null result means something only at
+
+```
+N >= ln(0.05) / ln(0.97)  ≈  98 runs
+```
+
+**About 100 runs**, roughly an hour. Round seven's 25 runs were nowhere near that, which is
+why they were reported as undecided rather than as evidence.
+
+Those runs were not spent, because the premise they would test does not survive inspection —
+which is cheaper and settles more.
+
+## The claim that fails
+
+Round six said:
+
+> There is exactly one site in the entire application that can produce a 501.
+
+**That was a grep for the literal `status(501)`, and the literal is not the only way a 501
+reaches a client.** Twelve sites forward whatever status an upstream returned:
+
+```
+src/routes/knowledge.ts:51,85,104,126,151,160        res.status(result.status).json(result.data)
+src/routes/shared-knowledge.ts:89,105,116,147,159,175  res.status(result.status).json(result.data)
+```
+
+`result.status` is `resp.status` from a proxied call (`src/services/shared-knowledge-proxy.ts:58`,
+`src/services/task-proxy.ts:52`). Any upstream status passes straight through, 501 included.
+**So uniqueness cannot be established by grepping for the literal, and round six's reasoning
+rests on exactly that.**
+
+## Being precise: unproven, not disproven
+
+No alternative origin has been *demonstrated*. The proxies return their own **503** when the
+service is unconfigured and **502** when it is unreachable — not 501 — and they only pass
+through an upstream status when a real response arrived. In tests the upstream is mocked, and
+`grep -rln 501 src/__tests__/` returns **one** file, `routes-profile.test.ts`, which is not in
+half A.
+
+So the honest state is: **the uniqueness claim is unproven, not refuted.** What is refuted is
+the *argument* — "only one site emits 501, therefore a 501 anywhere else is cross-talk" — and
+the experiment built on it, which treated presence or absence of one handler's audit row as
+decisive. It is not decisive if other origins are possible, and they are.
+
+## What was checked on the two actual victims
+
+Both round-six 501s came from routes that cannot emit one:
+
+- `platform-connections › P2` calls `POST /provider-connections`. That route emits
+  **503, 400, 403, 201** — checked line by line. No 501.
+- `docs.test.ts › GET /nonexistent returns 404` got **501** for a path with no route at all,
+  and `app.ts` has no catch-all or error handler that could produce one.
+
+A request to a route with no 501 path, and a request to no route at all, both receiving 501,
+remains the strangest observation in this document. It is *consistent* with a response
+generated elsewhere arriving on the wrong socket — but "elsewhere" is now a dozen candidate
+sites rather than one, so the observation no longer points anywhere specific.
+
+## The audit
+
+Reapplied and re-controlled as before; the control still passes (the same router on two
+mounts is recorded with two distinct `originalUrl`s). It is **not committed** — production
+route files are byte-identical to `main`, and the exact patch remains in round seven.
+
+Running it ~100 times was not done, deliberately: it would spend an hour testing whether one
+particular handler fired, when the inference from that answer has just been shown not to hold.
+
+## The next question, which is a different shape
+
+Stop instrumenting one handler and instrument the **response**: wrap `res.status` for the
+duration of a run and record, for every response with status 501, the route that produced it
+and the socket it went out on. That does not assume where 501s come from — it observes it —
+and it answers the question round six was really asking:
+
+- if a 501 is emitted by a route the failing test never called, on the socket that test is
+  waiting on, the carrier is the connection;
+- if no 501 is emitted anywhere while a test receives one, the status is not coming from this
+  application at all, which would be a much larger finding;
+- if a 501 is emitted by a route the failing test *did* call, then some upstream mock is
+  returning it and this whole class is local, not cross-talk.
+
+All three are worth having, and unlike the round-six design, none of them depends on an
+assumption about how many places can emit the status.
+
+**Nothing was disabled, retried or quarantined, and no handler behaviour was changed.**
