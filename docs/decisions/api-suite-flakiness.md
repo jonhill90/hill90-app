@@ -1704,3 +1704,100 @@ Leading, on direct evidence for the first time: **connection-level cross-talk.**
 
 **Nothing was disabled, retried or quarantined; production route files remain byte-identical
 to `main`.**
+
+---
+
+# Round eleven, 2026-08-03: the conjunction holds on one event — and it is not express cross-talk
+
+**Both instruments in one run, 35 runs, the event captured at run 34.** The conjunction that
+round ten could only infer across two runs is now a measurement of a single event.
+
+## Socket identity, established rather than inferred
+
+Round ten noticed port adjacency by accident and refused to read anything into it. This run
+establishes pairing by the **swap rule**: a server row `(local=S, remote=C)` and a client row
+`(local=C, remote=S)` are the same connection. Controlled first — every delivered response
+paired with its emitter, by code and url:
+
+```
+client HTTP/1.1 501 Not Impleme ports 53051->53050 | server match: code 501 url /x -> PAIRED
+client HTTP/1.1 403 Forbidden   ports 53053->53052 | server match: code 403 url /y -> PAIRED
+-> PASS: the swap rule pairs every response with its emitter
+```
+
+## The event
+
+```
+● Platform Connections › P1: POST /provider-connections ... created_by = NULL
+    Expected: 201    Received: 501
+
+install markers=29   server rows=110   client rows=256
+server rows with code 501:  0
+client rows with a 501 status line:  1
+
+CLIENT  HTTP/1.1 501 Not Implemented   ports 50444->50441  pid=50433
+        test: Platform Connections (P1-P5) P1: POST /provider-connections ...
+PAIRED SERVER ROW -> NONE. No express response was emitted on this connection.
+```
+
+**Both instruments were live in the same run and both spoke about the same event.** The wire
+carried a literal 501; no express route emitted a 501 anywhere in the run; and — the part
+that could only be seen with pairing — **no express response was emitted on that connection
+at all.**
+
+Following the server port further:
+
+```
+express responses emitted from server port 50441: 0
+client sockets that talked to port 50441:         1   (the 501)
+```
+
+## What is demonstrated, plainly
+
+**The 501 was produced by something that is not an express response in this application.**
+The conjunction holds: it is on the wire, and this app did not put it there.
+
+## And what is NOT demonstrated — including by me
+
+**This is not express-to-express cross-talk, and that was my leading hypothesis going in.**
+Classic cross-talk has a signature: the client row would pair with a *server row belonging to
+a different request* — someone else's response arriving here. That signature **did not
+appear.** There is no paired server row at all, and the server port in question emitted
+nothing, ever, for anybody.
+
+So round ten's reading — "bytes no route wrote were delivered to a socket a test was reading,
+therefore connection-level cross-talk" — was too strong. The first half is confirmed. The
+conclusion is not: a response can fail to come from this app without coming from another of
+its responses.
+
+## Where that leaves the mechanism
+
+Something answered on an ephemeral port with `HTTP/1.1 501 Not Implemented` while express
+served nothing on it. Candidates, none tested:
+
+- **Node's HTTP server answering below express.** Probed twice in round nine and it did not
+  reproduce — an unknown method gave 400 and a bad `Transfer-Encoding` gave 200 — so this is
+  not supported by what has been tried, but the probes were not exhaustive.
+- **A server that had already closed, or a port reused between listeners**, so the connection
+  reached a listener that never handed the request to express.
+- **supertest's own ephemeral listener** in a state where it answers before the app.
+
+The next measurement is narrow: record, per supertest server, its port and its open/closed
+lifetime, and check whether port 50441 was live and owned by the app at the moment of the
+connection. If the port was closed or owned by a previous server, this is a port-reuse defect
+in the harness and has nothing to do with application state at all — which after eleven rounds
+would be the plainest explanation yet offered for a class of failures that has resisted every
+state-based theory.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; the client layer as its inventor; and now
+**express-to-express cross-talk**, which was the leading hypothesis one round ago.
+
+Established: **the 501 is real on the wire and this application did not emit it.**
+
+**Nothing was disabled, retried or quarantined; production route and test files remain
+byte-identical to `main`.**
