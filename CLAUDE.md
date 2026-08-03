@@ -243,7 +243,7 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   `LogiPluginService`, serving `websocket-sharp`) listens in the ephemeral port range
   supertest binds from and answers 501. **Still open: 400/401/404 and timeouts**,
   established by measurement as a *separate* defect — do not assume the 501 finding
-  covers them, and do not re-litigate the 501. Fifteen hypotheses are dead, each with
+  covers them, and do not re-litigate the 501. Sixteen hypotheses are dead, each with
   what killed it. **Rates quoted before round seventeen are contaminated**, because
   about a third of the failures counted were the foreign 501s; mechanism-level
   conclusions survive, rate-based ones do not. **Nobody should restart from zero:**
