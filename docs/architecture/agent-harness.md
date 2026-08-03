@@ -469,7 +469,7 @@ The Agent Knowledge Manager is an internal-only FastAPI service that provides pe
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/internal/admin/agents` | List agents with entry counts |
-| GET | `/internal/admin/entries?agent_id=` | List entries for a specific agent |
+| GET | `/internal/admin/entries?agent_id=&limit=&offset=` | List entries for a specific agent — one page (`limit` 1–2000, default 500), with the full match count in the `X-Total-Count` response header |
 | GET | `/internal/admin/entries/{agent_id}/{path}` | Read a specific entry |
 | GET | `/internal/admin/search?q=&agent_id=` | Search entries (optionally scoped) |
 
