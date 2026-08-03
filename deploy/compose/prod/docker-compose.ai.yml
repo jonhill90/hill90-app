@@ -68,6 +68,9 @@ services:
     mem_limit: 1g
     cpus: 1.0
     labels:
+      # Which commit this container was created from. Nothing else on the
+      # host can answer that — see #158. Set by scripts/deploy.sh.
+      - "com.hill90.revision=${DEPLOY_REVISION:-unstamped}"
       - "traefik.enable=true"
       - "traefik.http.routers.app-litellm.rule=Host(`${LITELLM_HOST:-litellm}.${BASE_DOMAIN:-hill90.com}`)"
       - "traefik.http.routers.app-litellm.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
@@ -119,4 +122,7 @@ services:
     mem_limit: 512m
     cpus: 1.0
     labels:
+      # Which commit this container was created from. Nothing else on the
+      # host can answer that — see #158. Set by scripts/deploy.sh.
+      - "com.hill90.revision=${DEPLOY_REVISION:-unstamped}"
       - "traefik.enable=false"

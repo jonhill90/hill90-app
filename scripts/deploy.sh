@@ -527,6 +527,22 @@ To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"
         ai|knowledge) materialise_akm_keys ;;
     esac
 
+    # The commit the host checkout is on, exported so compose can stamp it onto
+    # every container it creates. Without this nothing on the host can answer
+    # "which code is this container running" — see #158, where the drift alarm
+    # reported the goal state while two merged api fixes sat outside the running
+    # image. A git SHA on disk is not evidence about a process.
+    #
+    # SIDE EFFECT, stated because it is a real behaviour change: the label value
+    # changes every deploy, and a label change is a config change, so compose
+    # RECREATES the container even when the image is byte-identical. That costs a
+    # few seconds of restart per deploy. It also removes a failure this estate
+    # has hit in other forms — a deploy that succeeds while changing nothing and
+    # looks identical to one that worked.
+    DEPLOY_REVISION="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unstamped)"
+    export DEPLOY_REVISION
+    log "revision stamp: ${DEPLOY_REVISION:0:12}"
+
     docker compose -p "$project_name" "${files[@]}" build --parallel
     docker compose -p "$project_name" "${files[@]}" pull --ignore-buildable
     docker compose -p "$project_name" "${files[@]}" up -d

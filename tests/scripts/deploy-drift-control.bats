@@ -224,10 +224,21 @@ setup() {
 
 @test "WORDING: the scope banner states the comparison before any verdict" {
     # A reader who stops at the first two lines must still not be able to infer
-    # image coverage.
+    # coverage that is absent.
+    #
+    # The banner is now CONDITIONAL, because a fixed "does NOT inspect any
+    # container image" became false the moment revisions were supplied — the same
+    # overclaim as the sentence #162 removed, pointing the other way. Both arms
+    # are asserted so neither can drift into describing the other's run.
     run env DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
     [[ "$output" == *"SCOPE: compares the git CHECKOUT"* ]]
-    [[ "$output" == *"Does NOT inspect any container image"* ]]
+    [[ "$output" == *"No container revisions were supplied"* ]]
+    [[ "$output" != *"AND"* ]] || true
+
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" \
+        CONTAINER_REVISIONS="app-api=$(git rev-parse HEAD)" bash "$CHECK"
+    [[ "$output" == *"the revision each running container was created from"* ]]
+    [[ "$output" != *"No container revisions were supplied"* ]]
 }
 
 @test "WORDING drifted: says NOT IN THE HOST CHECKOUT, not 'not running'" {
@@ -271,4 +282,173 @@ setup() {
     [[ "$output" != *"no checkout SHA was supplied"* ]]
     # ...and must not accidentally match a phrase nothing emits.
     [[ "$output" != *"verified the running image"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# COMPARING WHAT IS RUNNING, not what the checkout says.
+#
+# The wording fix (#162) made the alarm honest about its scope. This is the
+# scope itself widening: CONTAINER_REVISIONS carries what each running container
+# was created from, read from the `com.hill90.revision` label that
+# scripts/deploy.sh now stamps.
+#
+# The case that matters is the one that bit on 2026-08-03: the checkout is
+# CURRENT and a container is BEHIND. Under the old check that combination was
+# indistinguishable from success, and was reported as the goal state.
+# ---------------------------------------------------------------------------
+
+@test "RUNNING: checkout current but a container behind is CAUGHT — the #158 case" {
+    # Exactly the shape that produced a green alarm while two api fixes sat
+    # unrun. The checkout equals the target; only the container is old.
+    old=$(git rev-parse HEAD)
+    commit_at 2 "services/api/x.ts" "fix(api): a bound nobody is running"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"RUNNING CODE IS BEHIND"* ]]
+    [[ "$output" == *"running OLD CODE"* ]]
+}
+
+@test "RUNNING: the old check would have passed that exact input" {
+    # The control that proves the case above is not vacuous. Same tree, same
+    # checkout SHA, no revisions supplied — the pre-#158 behaviour — passes.
+    old=$(git rev-parse HEAD)
+    commit_at 2 "services/api/x.ts" "fix(api): a bound nobody is running"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOT CHECKED"* ]]
+}
+
+@test "RUNNING: a container behind only on DOCS is not an alarm" {
+    old=$(git rev-parse HEAD)
+    commit_at 2 "docs/x.md" "docs: a note"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"none touch a deployable path"* ]]
+}
+
+@test "RUNNING: a container current with the target reports current" {
+    sha=$(git rev-parse HEAD)
+    run env DEPLOYED_SHA="$sha" CONTAINER_REVISIONS="app-api=${sha} app-ui=${sha}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"app-api: ${sha:0:12} — current with"* ]]
+    [[ "$output" == *"app-ui: ${sha:0:12} — current with"* ]]
+}
+
+@test "RUNNING: an UNSTAMPED container is not a pass" {
+    # A container created before the stamp existed, or by hand. Absence must not
+    # read as agreement — the same rule the exit-2 path enforces for the checkout.
+    sha=$(git rev-parse HEAD)
+    run env DEPLOYED_SHA="$sha" CONTAINER_REVISIONS="app-api=unstamped" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"UNSTAMPED"* ]]
+    [[ "$output" == *"Not a pass"* ]]
+}
+
+@test "RUNNING: docker's empty-label output is treated as unstamped, not as a SHA" {
+    # `docker inspect --format` prints `<no value>` for a missing label. Passing
+    # that through as if it were a revision would compare garbage and report it
+    # as a mismatch for the wrong reason.
+    sha=$(git rev-parse HEAD)
+    run env DEPLOYED_SHA="$sha" CONTAINER_REVISIONS="app-api=<no value>" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"UNSTAMPED"* ]]
+}
+
+@test "RUNNING: a revision this repo has never seen is reported, not silently skipped" {
+    sha=$(git rev-parse HEAD)
+    run env DEPLOYED_SHA="$sha" \
+        CONTAINER_REVISIONS="app-api=0000000000000000000000000000000000000000" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is not a commit in this repository"* ]]
+}
+
+@test "RUNNING: with no revisions supplied it says so rather than implying agreement" {
+    sha=$(git rev-parse HEAD)
+    run env DEPLOYED_SHA="$sha" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not reported"* ]]
+    [[ "$output" == *"UNKNOWN, not agreement"* ]]
+}
+
+@test "RUNNING: the container check runs BEFORE the in-sync early exit" {
+    # The bug this file would otherwise reproduce: the in-sync branch used to
+    # exit 0 immediately, so a behind container was never examined when the
+    # checkout matched — which is the only situation it matters in.
+    old=$(git rev-parse HEAD)
+    commit_at 2 "services/ui/x.ts" "fix(ui): a bound"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-ui=${old}" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    # and the checkout line still printed, so the two facts stay separable
+    [[ "$output" == *"host checkout"* ]]
+}
+
+@test "RUNNING: a commit in ANOTHER service does not mark this container behind" {
+    # The false positive the first version produced against real data: a change
+    # to services/ui made app-api report OLD CODE. A guard that fires on things
+    # it does not describe gets relaxed, and then guards nothing.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "services/ui/src/thing.ts" "fix(ui): unrelated to api"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"none touch a deployable path"* ]]
+}
+
+@test "RUNNING: a change to the CHECK ITSELF does not mark a container behind" {
+    # It also counted scripts/checks/check_deploy_drift.sh against app-api. The
+    # alarm is not inside any image.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "scripts/checks/check_deploy_drift.sh" "fix(ci): the alarm"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+}
+
+@test "RUNNING: a TEST-only change inside this service does not mark it behind" {
+    # The container does not run the tests. a10f5d0 was exactly this shape.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "services/api/src/__tests__/x.test.ts" "test(api): a case"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 0 ]
+}
+
+@test "RUNNING: but this service's OWN runtime code still fires" {
+    # The complement, so the three exclusions above cannot have muted the check.
+    old=$(git rev-parse HEAD)
+    commit_at 5 "services/api/src/routes/thing.ts" "fix(api): real runtime change"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"running OLD CODE"* ]]
+}
+
+@test "RUNNING: this service's own COMPOSE file fires too" {
+    old=$(git rev-parse HEAD)
+    commit_at 5 "deploy/compose/prod/docker-compose.api.yml" "fix(api): change the container"
+    git branch -f origin-main main
+    current=$(git rev-parse HEAD)
+
+    run env DEPLOYED_SHA="$current" CONTAINER_REVISIONS="app-api=${old}" bash "$CHECK"
+    [ "$status" -eq 1 ]
 }
