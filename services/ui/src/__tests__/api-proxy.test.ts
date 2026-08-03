@@ -138,12 +138,18 @@ describe('proxyToApi', () => {
   })
 
   it('uses custom label in error logging', async () => {
+    // try/finally, not a trailing mockRestore(). This is the app#127 shape exactly —
+    // a skipped restore leaves console.error swallowed for the rest of the file.
+    // Inert only because this test is currently last; ordering is not a guarantee.
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    mockFetch.mockRejectedValue(new Error('timeout'))
+    try {
+      mockFetch.mockRejectedValue(new Error('timeout'))
 
-    await proxyToApi(makeRequest() as any, '/agents', { label: 'test-label' })
+      await proxyToApi(makeRequest() as any, '/agents', { label: 'test-label' })
 
-    expect(consoleSpy).toHaveBeenCalledWith('[test-label] Error:', expect.any(Error))
-    consoleSpy.mockRestore()
+      expect(consoleSpy).toHaveBeenCalledWith('[test-label] Error:', expect.any(Error))
+    } finally {
+      consoleSpy.mockRestore()
+    }
   })
 })

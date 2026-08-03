@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // Capture the config passed to NextAuth
 let capturedConfig: any = null
@@ -38,6 +38,14 @@ function mockAccessToken(claims: Record<string, unknown> = {}): string {
 }
 
 describe('jwt callback', () => {
+  // Unstub in afterEach, not at the end of a test body. Two tests below replace the
+  // global fetch; a trailing vi.unstubAllGlobals() is skipped when an assertion above
+  // it throws, leaving the stub in place for every later test in this file — the
+  // app#127 leak class. afterEach runs whether the test passed or threw.
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('stores accessToken, refreshToken, and roles on initial sign-in', async () => {
     const account = {
       access_token: mockAccessToken(),
@@ -103,8 +111,6 @@ describe('jwt callback', () => {
     expect(result.accessToken).toBe('new-at')
     expect(result.refreshToken).toBe('new-rt')
     expect(result.error).toBeUndefined()
-
-    vi.unstubAllGlobals()
   })
 
   it('sets error on refresh failure', async () => {
@@ -127,8 +133,6 @@ describe('jwt callback', () => {
     expect(result.refreshToken).toBeUndefined()
     expect(result.idToken).toBeUndefined()
     expect(result.accessTokenExpires).toBeUndefined()
-
-    vi.unstubAllGlobals()
   })
 })
 
