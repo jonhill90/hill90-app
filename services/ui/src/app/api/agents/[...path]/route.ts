@@ -1,5 +1,11 @@
 import { auth } from '@/auth'
 import { NextRequest, NextResponse } from 'next/server'
+import {
+  readBodyLimited,
+  bodyTooLargeResponse,
+  BodyTooLargeError,
+  BODY_LIMIT_AVATAR,
+} from '@/utils/request-body'
 
 const API_URL = process.env.API_URL || 'http://localhost:3000'
 
@@ -38,7 +44,13 @@ async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ pa
   }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    fetchOpts.body = await req.arrayBuffer()
+    // Avatar and file uploads. multer caps these at 5MB on the API side.
+    try {
+      fetchOpts.body = await readBodyLimited(req, BODY_LIMIT_AVATAR)
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) return bodyTooLargeResponse(err)
+      throw err
+    }
     ;(fetchOpts as any).duplex = 'half'
   }
 
