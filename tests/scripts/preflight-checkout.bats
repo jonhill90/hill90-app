@@ -132,11 +132,30 @@ setup() {
   run grep -q "preflight-checkout.sh" .github/workflows/reusable-deploy-service.yml
   [ "$status" -eq 0 ]
 
-  # And it must come BEFORE the reset in the same ssh command, or it guards
-  # nothing. Compare positions within the file.
-  pf_line=$(grep -n "preflight-checkout.sh" .github/workflows/reusable-deploy-service.yml | head -1 | cut -d: -f1)
-  reset_line=$(grep -n "reset --hard origin/main" .github/workflows/reusable-deploy-service.yml | tail -1 | cut -d: -f1)
-  [ "$pf_line" -lt "$reset_line" ]
+  # And it must come BEFORE the reset, or it guards nothing.
+  #
+  # THIS COMPARES STEP NAMES, not occurrences of the words. Two earlier versions
+  # compared line numbers of text and both were dead:
+  #
+  #   v1 matched the literal "reset --hard origin/main". When the deploy moved to
+  #      pinning a SHA the only match left was a COMMENT about the old form.
+  #   v2 matched "git reset --hard" outside comments — and picked up
+  #      "[ ] git fetch / git reset --hard on the VPS checkout", a line of the
+  #      dry-run SUMMARY. Being last in the file, it made the comparison true no
+  #      matter where the preflight sat. Its control did not fire.
+  #
+  # A step name is the thing that actually orders execution, so that is what is
+  # asserted. The control below moves the step and must fail.
+  local wf=.github/workflows/reusable-deploy-service.yml
+  pf_line=$(grep -n '^      - name: Checkout preflight' "$wf" | head -1 | cut -d: -f1)
+  deploy_line=$(grep -n '^      - name: Deploy \${{ inputs.service }}' "$wf" | head -1 | cut -d: -f1)
+
+  [ -n "$pf_line" ]
+  [ -n "$deploy_line" ]
+  [ "$pf_line" -lt "$deploy_line" ]
+
+  # And the deploy step is still the thing that resets, so the ordering matters.
+  awk -v a="$deploy_line" 'NR>=a && NR<=a+20' "$wf" | grep -q "git reset --hard"
 }
 
 @test "the bind-mount list matches the prod compose files it is derived from" {

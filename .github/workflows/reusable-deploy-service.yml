@@ -174,6 +174,37 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # The deploy resolves origin/main to a SHA below, which a shallow
+          # clone cannot do.
+          fetch-depth: 0
+
+      # WHAT THIS DEPLOY SHIPS, DECIDED ONCE AND NAMED.
+      #
+      # The host used to `git reset --hard origin/main`, so it shipped whatever
+      # main happened to be at the instant the reset ran — a moving target, and
+      # the run could not say which commit it hit until afterwards. #158 caught
+      # that race live: main advanced mid-deploy and the intended cut held by
+      # luck.
+      #
+      # Resolving here fixes the target before anything touches the host. It
+      # changes NO capability: the SHA can only ever be a commit that was on
+      # origin/main when this run started, so branch protection remains the only
+      # gate on what reaches production. Accepting an arbitrary ref would be a
+      # capability change and is deliberately not done — see #158.
+      - name: Resolve the commit to deploy
+        id: target
+        run: |
+          sha="$(git rev-parse origin/main)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Deploying origin/main @ ${sha}"
+          {
+            echo "### Deploy target"
+            echo ""
+            echo "\`${sha}\`"
+            echo ""
+            echo "$(git log -1 --format='%s' "$sha")"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Setup Tailscale
         uses: tailscale/github-action@v2
@@ -318,7 +349,7 @@ jobs:
           ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
             deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
             "cd ${VPS_APP_PATH} && \
-             git reset --hard origin/main && \
+             git reset --hard ${{ steps.target.outputs.sha }} && \
              export SOPS_AGE_KEY_FILE=${VPS_AGE_KEY} && \
              export CONFIRM_PUBLIC_DEPLOY=${CONFIRM} && \
              bash scripts/deploy.sh ${{ inputs.service }} prod"
@@ -368,6 +399,16 @@ jobs:
       # Last, and deliberately loud. A dry run that ends in silence looks exactly
       # like a successful deploy in the Actions UI — same green tick, same
       # duration. This states what was proven and what was not.
+      # A dry run that does not name the target it checked is checking an
+      # unnamed thing. It still cannot validate the deploy BODY — every
+      # host-touching step is gated on dry_run != true, so the reset and
+      # deploy.sh never execute — but it can at least state what a live run
+      # would have shipped.
+      - name: Dry run — the target a live run would ship
+        if: inputs.dry_run == true
+        run: |
+          echo "::notice::A live run would deploy ${{ steps.target.outputs.sha }}"
+
       - name: Dry run summary — NOTHING WAS DEPLOYED
         if: inputs.dry_run == true && success()
         run: |

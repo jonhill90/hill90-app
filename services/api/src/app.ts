@@ -115,6 +115,16 @@ export function createApp(opts: AppOptions = {}): Application {
     res.json({
       status: dbStatus === 'connected' ? 'healthy' : 'degraded',
       service: 'api',
+      // WHICH CODE IS RUNNING — the question #158 was filed about, and which
+      // nothing outside the host could answer. Set by the deploy from the
+      // commit it pinned; 'unstamped' means the container predates the
+      // mechanism or was made by hand, and that is reported rather than hidden.
+      //
+      // Here and NOT on /health. That one is public — the platform's
+      // TenantApiDown and the container healthcheck both probe it — and a build
+      // SHA there would re-open what #136 closed. #158's text says /health; the
+      // issue is wrong and has been amended.
+      revision: process.env.DEPLOY_REVISION || 'unstamped',
       uptime_seconds: Math.floor(process.uptime()),
       node_version: process.version,
       database: {
