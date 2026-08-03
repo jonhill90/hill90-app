@@ -1894,3 +1894,90 @@ uninformative — it is not a reason to doubt the event, which was captured whol
 
 **Nothing was disabled, retried or quarantined; production and test files remain
 byte-identical to `main`.**
+
+---
+
+# Round thirteen, 2026-08-03: the closing-server race does not reproduce it
+
+**280 forced attempts, two shapes, zero 501s. The leading candidate is weakened, not
+confirmed.**
+
+Round twelve ranked a closing-server race first on the strength of one timing:
+`listen@631, connection@667, close@671` — a 40ms listener taking a connection 4ms before it
+closed. Forcing that window deliberately is worth more than waiting for it, so it was forced.
+
+## Shape one — connect after `close()` is called
+
+```
+CONTROL (server left open)      -> HTTP/1.1 200 OK
+ARM (connect while closing, 120 attempts):
+  120x  ERR ECONNREFUSED
+-> NOT reproduced
+```
+
+A connection attempted after `close()` is **refused**, not answered. Note this is also the
+wrong model of the event: in run 76 the connection landed *before* the close, not after.
+
+## Shape two — the shape actually observed: request in flight, then `close()`
+
+```
+CONTROL (no close during request) -> HTTP/1.1 200 OK
+close 0ms after send, fast handler   -> 38x HTTP/1.1 200 OK | 2x ERR ECONNRESET
+close 0ms after send, 20ms handler   -> 38x HTTP/1.1 200 OK | 2x ERR ECONNRESET
+close 5ms after send, 20ms handler   -> 40x HTTP/1.1 200 OK
+```
+
+A server closing under an in-flight request either **completes the response normally** or
+**resets the connection**. It never answers 501.
+
+## Saying it plainly
+
+**This weakens the closing-server explanation.** The window was forced at three offsets
+against both a fast and a slow handler, 280 attempts, and the control confirms the harness
+delivers normally throughout — so the arms were live and the failure to reproduce is not an
+artefact of a dead experiment.
+
+It is *not* being written off as "the window was too narrow". That excuse is available and it
+is refused: the two behaviours a closing server actually exhibits here — a clean 200 and an
+ECONNRESET — are both observable and neither is a 501, so the mechanism does not merely need
+finer timing, it produces the wrong output entirely.
+
+**A reproduction on demand would have identified the mechanism. Its absence does not identify
+anything, and that is the honest result of this round.**
+
+## What survives
+
+The four established facts about run 76 are untouched, since none of them depended on the
+race being the cause:
+
+1. the wire carried a literal `HTTP/1.1 501 Not Implemented`
+2. no express route emitted a 501 anywhere in that run
+3. no express response was emitted on that connection
+4. the server on that port was live, app-owned and singly-bound
+
+**Something answered 501 on a live application-owned socket, and neither express, nor the
+client layer, nor port reuse, nor a closing-server race accounts for it.**
+
+## What is left, ranked
+
+- **Node's HTTP server answering below express.** Probed in round nine with an unknown method
+  (400) and a bad `Transfer-Encoding` (200), so two paths are excluded and the space is not.
+  Node's own 501 paths should be enumerated from its source rather than guessed at — that is
+  a reading task, not a running task, and it is the cheapest thing left.
+- **supertest's per-request listener answering before the app.** Untested.
+- A source outside both, reached because the connection went somewhere unexpected. Round
+  twelve rules out port *reuse*, not every form of misdirection.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; the client layer as its inventor;
+express-to-express cross-talk; port reuse; and now **the closing-server race**.
+
+Thirteen rounds, thirteen dead ends, and one fact that has survived all of them: **the 501 is
+real on the wire and this application did not write it.**
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
