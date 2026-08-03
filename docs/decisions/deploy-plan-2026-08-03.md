@@ -6,6 +6,54 @@ deploy rather than reconstructed after it.
 
 **Status: not run.** Nothing here has been executed.
 
+## THE CUT — `435f87a`
+
+The batch grew three times while this plan was being written (#152, then #153/#154,
+then #155 — the plan itself). A batch with no boundary never ships, and the point of
+batching was fewer deploys, not indefinite deferral. So the line is drawn here.
+
+**In this deploy** — everything in `54986372f..435f87a`:
+
+| PR | Service |
+|---|---|
+| #148 terminal relay bound | `api` |
+| #153 chat events route bounds | `api` |
+| #146 request bodies read whole | `ui` |
+| #147 upstream responses buffered | `ui` |
+| #149 permission error shown as outage | `ui` |
+| #152 one place maps a probe to a status | `ui` |
+| #151, #154, #155 | docs — no host effect |
+
+**Rolling to the next deploy:**
+
+| PR | Why |
+|---|---|
+| #150 SSE write backpressure | OPEN and DIRTY on a conflict. It belongs to the other lane and two lanes must not touch one branch — excluded rather than blocked on. |
+| #156 SSE streams outlived the credential | OPEN. |
+| anything merged after `435f87a` | after the line. |
+
+### The cut is a declaration, not an enforcement — and that matters
+
+`reusable-deploy-service.yml:321` runs `git reset --hard origin/main` on the host. The
+workflow takes **no ref or SHA input**, so a deploy ships whatever `origin/main` is at
+the moment it executes, not the commit named above.
+
+There is therefore no way to *pin* this deploy to `435f87a`. What can be done, and is
+done below, is to record `origin/main` immediately before and after each step and state
+whether the cut held. If main moved mid-deploy, more shipped than this table claims, and
+that must be reported rather than papered over.
+
+That gap is worth an issue of its own: a deploy that cannot name what it deployed is one
+more instrument that cannot see the thing it is measuring.
+
+### One correction to the ordering rationale
+
+An earlier version of this file argued `api` should go first partly because it was **one
+commit** and therefore trivially attributable. With #153 merged it is **two**. The
+ordering still stands, but the reason is now only *separating the services* so a failure
+is attributable to `api` or `ui` rather than to five changes at once. The stronger claim
+no longer holds and is withdrawn.
+
 ## Recommendation, up front
 
 **Deploy it. Two runs, standard dry-run-then-live, no special ceremony — with exactly
