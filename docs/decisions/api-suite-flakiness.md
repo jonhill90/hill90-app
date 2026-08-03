@@ -2241,3 +2241,82 @@ process; the closing-server race; Node's HTTP server; supertest.
 
 **Nothing was disabled, retried or quarantined; production files remain byte-identical to
 `main`.**
+
+---
+
+# Round seventeen, 2026-08-03: the classes are separate — the collision explains only the 501s
+
+## How many runs a null would need, stated first
+
+From prior data, P(a foreign response in a run) ≈ 1/67 ≈ **0.015**, so a null on *"no foreign
+response ever occurs"* would need `ln(0.05)/ln(0.985)` ≈ **200 runs**.
+
+**That null was not needed, because the result is a contrast rather than an absence.** Foreign
+responses did occur, non-501 failures also occurred, and the question is whether they coincide.
+
+## The data — 60 runs, 4 failures
+
+| Run | foreign responses | received | class |
+|---|---|---|---|
+| 3 | **8** | 501 | 501 |
+| 43 | **8** | 501 | 501 |
+| 26 | **0** | — | **TIMEOUT** |
+| 45 | **0** | 401 | **401** |
+
+```
+foreign response statuses across all 60 runs:
+   8x  HTTP/1.1 501 Not Implemented  (Server: websocket-sharp/1.0)   from 127.0.0.1:50441
+```
+
+**Every foreign response ever captured is a 501.** Not one carries a 400, 401, 404 or anything
+else, across every run of this batch and the batches before it.
+
+**And the separation is exact:** both 501-class failures came with foreign responses — eight
+apiece, so the collision is bursty rather than a single stray packet — while both non-501
+failures came with **zero**.
+
+## The answer, plainly
+
+**The collision explains only the 501s. The 400/401/404 and timeout classes are a separate
+defect and need their own hunt from the start.** They are not a variant of this one:
+
+- the timeout in run 26 happened with no foreign response anywhere in the run
+- the 401 in run 45 likewise
+- and the daemon has never been observed answering with anything but 501, which is what
+  websocket-sharp does for a non-WebSocket request — it has no reason to emit a 401 or a 404
+
+## Confidence, stated honestly
+
+The separation is perfect at **n=4** — two of each class — which is a clean contrast and a
+small sample. What strengthens it beyond those four is the status evidence: **8 foreign
+captures, all 501**, with no non-501 foreign response ever seen in any batch across the whole
+investigation. A shared cause would have to explain why a daemon that only ever answers 501 is
+also producing 401s and timeouts, and nothing suggests it does.
+
+So this is stated as a **finding with a named limit**: the classes are separate on the evidence
+available, the evidence is a four-failure contrast plus a uniform status distribution, and the
+guard now labels every future occurrence so the sample grows on its own without anyone
+re-running this.
+
+## What the next hunt starts from — and what it must not inherit
+
+The remaining defect is: **400/401/404 and timeouts, on responses this application really
+does write.** That is a different problem from the one closed today, and it starts clean.
+
+It should not inherit this investigation's assumptions. Specifically, these are now known
+*false* for the surviving classes and cost sixteen rounds to establish:
+
+- it is not `process.env`, `globalThis`, ordering, worker count, CPU starvation, the mock
+  queue, the SSE poll margin, or anything about the 501 path
+- and the one instrument lesson worth carrying over: **every check in this file that reported
+  a clean result was wrong at least once until it was positive-controlled** — the mock counter
+  that double-counted, the global hook that intercepted nothing, the byte recorder that read
+  only three digits.
+
+## Standing state
+
+- **501 class: explained** (foreign daemon) and **guarded** (fails loudly, on by default).
+- **400/401/404 and timeout classes: unexplained, and now positively established as separate.**
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
