@@ -6,6 +6,8 @@ user-level authorization before calling these endpoints.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import time
 from typing import Any
 
@@ -293,7 +295,11 @@ async def search_shared(
 @router.get("/stats")
 async def get_stats(
     request: Request,
-    since: str | None = Query(None, description="ISO timestamp to scope time-based stats"),
+    # `datetime`, not `str`. asyncpg requires a datetime for a timestamptz parameter
+    # and raises TypeError on a string, so this endpoint returned 500 for every
+    # request that supplied `since`. Typing it here also gets ISO-8601 parsing and a
+    # 422 on malformed input from FastAPI, instead of a crash deep in the driver.
+    since: datetime | None = Query(None, description="ISO timestamp to scope time-based stats"),
 ) -> dict[str, Any]:
     _verify_service_token(request)
     pool = request.app.state.pool
