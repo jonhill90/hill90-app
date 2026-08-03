@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
+import { fetchKnowledgePage, describePage } from '@/utils/knowledge-page'
 import Markdown from 'react-markdown'
 
 interface NotebookEntry {
@@ -32,24 +33,38 @@ function timeAgo(dateStr: string): string {
 
 export default function AgentNotebook({ agentId }: Props) {
   const [entries, setEntries] = useState<NotebookEntry[]>([])
+  // The server's count, not entries.length — null reads as unknown, never as
+  // complete (#180).
+  const [total, setTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [selectedEntry, setSelectedEntry] = useState<NotebookEntry | null>(null)
   const [selectedContent, setSelectedContent] = useState<string | null>(null)
   const [contentLoading, setContentLoading] = useState(false)
 
-  const fetchEntries = useCallback(async () => {
+  const entriesRef = useRef<NotebookEntry[]>([])
+  entriesRef.current = entries
+
+  const fetchEntries = useCallback(async (append = false) => {
+    const offset = append ? entriesRef.current.length : 0
+    if (append) setLoadingMore(true)
     try {
-      const res = await fetch(`/api/knowledge/entries?agent_id=${agentId}&type=notebook`)
-      if (res.ok) {
-        const data = await res.json()
-        const list: NotebookEntry[] = Array.isArray(data) ? data : []
-        list.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-        setEntries(list)
-      }
+      const page = await fetchKnowledgePage<NotebookEntry>(
+        '/api/knowledge/entries',
+        { agent_id: agentId, type: 'notebook' },
+        { offset },
+      )
+      // Sort the accumulated set, not each page in isolation: two pages sorted
+      // separately and concatenated are not one sorted list.
+      const list = append ? [...entriesRef.current, ...page.entries] : page.entries
+      list.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+      setEntries(list)
+      setTotal(page.total)
     } catch {
       // Non-fatal
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
   }, [agentId])
 
@@ -116,7 +131,7 @@ export default function AgentNotebook({ agentId }: Props) {
         <h2 className="text-lg font-semibold text-white">Notebook</h2>
         {entries.length > 0 && (
           <p className="text-xs text-mountain-400 mt-1" data-testid="entry-count">
-            {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+            {describePage(entries.length, total)}
           </p>
         )}
       </div>
@@ -141,6 +156,16 @@ export default function AgentNotebook({ agentId }: Props) {
               <p className="text-xs font-mono text-mountain-400 truncate">{entry.path}</p>
             </button>
           ))}
+          {total !== null && entries.length < total && (
+            <button
+              onClick={() => fetchEntries(true)}
+              disabled={loadingMore}
+              className="w-full rounded-md border border-navy-700 bg-navy-900 p-2 text-sm text-mountain-300 hover:border-navy-500 disabled:opacity-50 transition-colors cursor-pointer"
+              data-testid="load-more"
+            >
+              {loadingMore ? 'Loading…' : `Load more (${(total - entries.length).toLocaleString()} remaining)`}
+            </button>
+          )}
         </div>
       ) : (
         <p className="text-sm text-mountain-500" data-testid="empty-state">

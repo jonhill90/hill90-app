@@ -22,7 +22,16 @@ describe('AgentMemory', () => {
         return { ok: true, json: async () => ({ results: [{ ...MOCK_ENTRIES[0], score: 0.95, headline: 'Setup **Notes** found' }] }) }
       }
       if (typeof url === 'string' && url.includes('/api/knowledge/entries?agent_id=')) {
-        return { ok: true, json: async () => MOCK_ENTRIES }
+        // The type filter is applied UPSTREAM now, so the double must honour
+        // it — a double that ignores `type` would let a client-side filter
+        // pass a test the real server-side one fails.
+        const type = new URL(url, 'http://t').searchParams.get('type')
+        const rows = type ? MOCK_ENTRIES.filter(e => e.entry_type === type) : MOCK_ENTRIES
+        return {
+          ok: true,
+          json: async () => rows,
+          headers: { get: (h: string) => (h.toLowerCase() === 'x-total-count' ? String(rows.length) : null) },
+        }
       }
       if (typeof url === 'string' && url.includes('/api/knowledge/entries/')) {
         return { ok: true, json: async () => ({ content: 'Full entry content here' }) }
@@ -47,22 +56,27 @@ describe('AgentMemory', () => {
     expect(screen.getByText('Daily Journal')).toBeInTheDocument()
   })
 
-  it('T2: filters entries by type', async () => {
+  it('T2: filters entries by type, and asks the SERVER for the filtered set', async () => {
     render(<AgentMemory agentId="bot-1" />)
 
     await waitFor(() => {
       expect(screen.getAllByTestId('entry-item')).toHaveLength(3)
     })
 
-    // Click "note" filter button (inside the type-filters bar)
     const filterBar = screen.getByTestId('type-filters')
     const noteButton = Array.from(filterBar.querySelectorAll('button')).find(b => b.textContent === 'note')
     expect(noteButton).toBeTruthy()
     fireEvent.click(noteButton!)
 
-    const items = screen.getAllByTestId('entry-item')
-    expect(items).toHaveLength(1)
+    await waitFor(() => {
+      expect(screen.getAllByTestId('entry-item')).toHaveLength(1)
+    })
     expect(screen.getByText('Setup Notes')).toBeInTheDocument()
+
+    // The request carried type=note. Filtering the loaded page instead would
+    // show 1 of the 3 fetched rows while thousands went unfetched.
+    const urls = mockFetch.mock.calls.map(c => String(c[0]))
+    expect(urls.some(u => u.includes('type=note'))).toBe(true)
   })
 
   it('T3: shows entry count summary', async () => {
@@ -73,6 +87,8 @@ describe('AgentMemory', () => {
     })
 
     const summary = screen.getByTestId('entry-count-summary')
+    // 3 shown out of 3 total: the page IS the set, so it reads as a plain
+    // count and the per-type breakdown is trustworthy.
     expect(summary).toHaveTextContent('3 entries')
     expect(summary).toHaveTextContent('1 note')
     expect(summary).toHaveTextContent('1 plan')

@@ -165,3 +165,78 @@ func TestNewFromEnvMissingToken(t *testing.T) {
 		t.Fatal("expected error when AKM_TOKEN not set")
 	}
 }
+
+// TestListEntriesReadsTotalFromHeader is the positive control for the Go half
+// of #180. The page length and the real total MUST disagree — two rows with
+// X-Total-Count: 3 — because an implementation that returns len(Entries) as
+// the total passes any fixture where they match. That implementation is the
+// defect: it prints a number that agrees with itself and calls a truncated
+// listing complete.
+func TestListEntriesReadsTotalFromHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("limit") != "2" {
+			t.Errorf("limit not forwarded: %s", r.URL.RawQuery)
+		}
+		if r.URL.Query().Get("offset") != "4" {
+			t.Errorf("offset not forwarded: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("X-Total-Count", "3")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"path":"a.md"},{"path":"b.md"}]`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, Token: "t", HTTPClient: srv.Client()}
+	page, err := c.ListEntries("", 2, 4)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+
+	if len(page.Entries) != 2 {
+		t.Errorf("page length = %d, want 2", len(page.Entries))
+	}
+	if page.Total != 3 {
+		t.Errorf("Total = %d, want 3 (the set, not the page)", page.Total)
+	}
+	if page.Total == len(page.Entries) {
+		t.Error("Total equals the page length — the fixture cannot detect the defect")
+	}
+}
+
+// An older server sends no header. Total must read as unknown (-1), never as
+// len(Entries): "no total reported" and "this is the total" are different
+// claims, and only the first is true.
+func TestListEntriesUnknownTotalWhenHeaderAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"path":"a.md"},{"path":"b.md"}]`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, Token: "t", HTTPClient: srv.Client()}
+	page, err := c.ListEntries("", 0, 0)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if page.Total != -1 {
+		t.Errorf("Total = %d, want -1 (unknown)", page.Total)
+	}
+}
+
+// A malformed header must not be believed.
+func TestListEntriesIgnoresNonNumericTotal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Total-Count", "lots")
+		_, _ = w.Write([]byte(`[{"path":"a.md"}]`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, Token: "t", HTTPClient: srv.Client()}
+	page, err := c.ListEntries("", 0, 0)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if page.Total != -1 {
+		t.Errorf("Total = %d, want -1 for a non-numeric header", page.Total)
+	}
+}
