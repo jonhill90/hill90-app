@@ -2593,3 +2593,91 @@ investigation has needed and three of them lacked.
 
 **Nothing was disabled, retried or quarantined; production files remain byte-identical to
 `main`.**
+
+---
+
+# Hunt two, round four, 2026-08-03: the identity guard, and it supersedes the Server-header guard
+
+## What it does
+
+Every response this worker writes is stamped `x-test-app-id: <pid>:<JEST_WORKER_ID>`, patched
+onto `http.ServerResponse` from a jest setup file. The client side reads the stamp off the
+wire and asserts it is **ours**. One check catches two different intruders:
+
+- **NO STAMP** — the responder is not this suite at all. The round-fifteen daemon writes raw
+  HTTP and never touches `ServerResponse`, so it cannot be stamped.
+- **FOREIGN STAMP** — a **sibling jest worker** answered. Its app carries a different RSA
+  keypair (42 of 59 files mint their own) and a different route table, which is how a spurious
+  401 or 404 reaches a test that did nothing wrong.
+
+**Why this is the strongest instrument in the investigation:** a status code can always be a
+legitimate answer, so every earlier check had to infer. A stamp cannot be mistaken for a
+legitimate response — it is ours or it is not. That is the property the mock counter, the
+global `jest.fn` hook and the byte recorder all lacked, and all three reported clean results
+that were wrong.
+
+## Controlled — and the first attempt at the control failed
+
+A sound design is not a working implementation, so all three cases were forced.
+
+```
+✓ A: a normal response from OUR app passes
+✕ B: FOREIGN STAMP — a sibling worker answering must fail this test
+     FOREIGN STAMP  HTTP/1.1 401 Unauthorized  from 127.0.0.1:59606
+         produced by 99999:9, this worker is 78273:1
+```
+
+**Control C failed on its first attempt — it timed out at 5002ms instead of firing**, because
+it emulated the stranger with an `http.createServer` whose response the guard stamps anyway,
+then tried to remove the header after it was sent. Rewritten as a **raw TCP server** writing
+HTTP by hand — which is exactly what the daemon does on the wire:
+
+```
+✕ NO STAMP — a raw stranger writing HTTP by hand must fail this test
+     NO STAMP       HTTP/1.1 501 Not Implemented  from 127.0.0.1:59942
+         Server: websocket-sharp/1.0
+```
+
+Had that control been left as written, the NO-STAMP path would have shipped unproven. It is
+the fourth time in this investigation an instrument would have lied if it had not been forced.
+
+## Does it supersede the Server-header guard? Yes — demonstrated, not argued
+
+**Control C is the 501 collision reproduced byte for byte**, down to
+`Server: websocket-sharp/1.0`, and the identity guard catches it as `NO STAMP`.
+
+So the round-fifteen guard detects a strict subset of what this detects:
+
+| Case | Server-header guard | Identity guard |
+|---|---|---|
+| foreign daemon (501) | caught | **caught** |
+| sibling worker (401/404) | **blind** | **caught** |
+| our own response | ignored | ignored |
+
+`jest.portguard.js` is therefore **deleted, not retained.** Carrying two overlapping guards is
+how one rots unnoticed — and the one that would have rotted is the weaker one, which is worse,
+because its silence would have read as evidence.
+
+## Verified non-destructive
+
+The guard patches `http.ServerResponse` globally, so it had to be shown not to change the
+suite:
+
+```
+Test Suites: 29 passed, 29 total
+Tests:       301 passed, 301 total
+```
+
+Half A passes unchanged with every response stamped, and the guard is **on by default** —
+it is a guard, not a diagnostic.
+
+## What it will now tell us, and what it does not claim
+
+Round three demonstrated that cross-worker arrival *would* produce 401 and 404. **No instance
+has been captured, and this section claims none.** What has changed is that the next one
+identifies itself: the failure message names the worker that answered and the worker that
+should have, so the question is settled by a single occurrence rather than by another
+investigation.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
