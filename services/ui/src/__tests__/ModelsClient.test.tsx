@@ -177,19 +177,25 @@ describe('ModelsClient', () => {
   })
 
   it('confirms before deleting', async () => {
+    // try/finally, not a trailing mockRestore(). This file's afterEach only calls
+    // cleanup(), and vi.clearAllMocks() does not restore a spy — so if an assertion
+    // below throws, window.confirm stays mocked returning false for the 24 later
+    // tests in this file. Same leak class as app#127.
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      render(<ModelsClient />)
 
-    render(<ModelsClient />)
+      await waitFor(() => {
+        expect(screen.getByText('GPT-4o Mini')).toBeInTheDocument()
+      })
 
-    await waitFor(() => {
-      expect(screen.getByText('GPT-4o Mini')).toBeInTheDocument()
-    })
+      const deleteButtons = screen.getAllByText('Delete')
+      fireEvent.click(deleteButtons[0])
 
-    const deleteButtons = screen.getAllByText('Delete')
-    fireEvent.click(deleteButtons[0])
-
-    expect(confirmSpy).toHaveBeenCalled()
-    confirmSpy.mockRestore()
+      expect(confirmSpy).toHaveBeenCalled()
+    } finally {
+      confirmSpy.mockRestore()
+    }
   })
 
   // D1: Connection select fetches provider models

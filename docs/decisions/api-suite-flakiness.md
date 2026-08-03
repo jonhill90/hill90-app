@@ -3011,3 +3011,95 @@ on a green CI run that proved nothing.
 One section against a wrong mechanism in the record is not a close call. And the asymmetry
 compounds: a retracted mechanism is not merely wrong, it redirects whoever reads it next, which
 is how this investigation lost several rounds to a rate that was never measuring one thing.
+
+---
+
+# The #127 leak class, swept across both suites, 2026-08-03
+
+`#127` fixed one instance of a specific shape: **a global is replaced, and the call that
+puts it back sits on a path a rejection skips** — there, `warn.mockRestore()` inside a
+`.then()`. The obvious follow-up question is whether that shape occurs anywhere else. It
+was asked of every file in `services/api/src/__tests__` (60) and `services/ui/src` (68).
+
+**The shape is broader than `.then()`.** A restore written as the last statement of a test
+body is the same defect: an assertion that throws above it skips it just as a rejection
+skips a `.then()`. Both suites were searched for the general form — spy/stub created, and
+its restore reachable only on the success path.
+
+## The instrument, and its null arm
+
+Neither `services/api/jest.config.js` nor `services/ui/vitest.config.ts` sets
+`restoreMocks`, so nothing restores a spy automatically. That was **not** taken on
+inspection. A two-arm control was run under the ui project's own config:
+
+```
+positive arm: test A spies on window.confirm, throws before mockRestore()
+              → B reports vi.isMockFunction(window.confirm) === true   (LEAK)
+null arm:     test A identical but reaches mockRestore(), with the
+              vi.clearAllMocks() beforeEach the real files use
+              → B reports false                                       (NO LEAK)
+```
+
+Both arms behaved as designed, so the instrument distinguishes the thing it claims to.
+`vi.clearAllMocks()` — which several of these files do call — clears call history and does
+**not** restore an implementation; that is why a `beforeEach` already present is not cover.
+
+## `services/api`: no instance. The #127 fix was the only one
+
+Every other spy in the api suite is created in `beforeEach` and restored in `afterEach`,
+which runs whether the test passed or threw: `audit`, `terminal-proxy-handshake`,
+`routes-container-profiles`, `routes-agents-skills`, `routes-skills`, `docker-service`,
+`sse-timer-cleanup`, and both `routes-chat` audit describes. `routes-chat.test.ts:995`
+already uses `try/finally`.
+
+**Environment mutation inside test bodies was checked as the same class and is also
+covered**: the `delete process.env.DATABASE_URL` in `routes-agents`, `routes-model-policies`
+and `routes-eligible-models`, and the `CHAT_CALLBACK_TOKEN`/`AGENTBOX_CONFIG_HOST_PATH`
+deletions, are all re-set by a `beforeEach`. A skipped restore there changes nothing.
+
+**One candidate looked live and is not — recorded so it is not "fixed" again.**
+`routes-chat.test.ts:1190` and `:1217` assign `MAX_CHAIN_HOPS` and `MAX_CHAIN_DURATION_MS`
+and delete them at the end of the test body, with no `beforeEach` covering them. But
+`services/api/src/routes/chat.ts:39-40` reads both into module-level `const`s at import
+time, so neither the assignment nor a leaked value can reach a handler. The writes are
+inert in both directions. (They are also equal to the defaults, which is why those tests
+pass: the assertion is real, the env line is decoration and reads as though it is not.)
+
+**One latent instance was hardened:** `tool-installer.test.ts:446` restored
+`HILL90_TOOL_INSTALL_RETRIES` after its assertion, and set `global.fetch` without ever
+restoring it. Inert only because it is the file's last test — an accident of ordering, not
+a property. Now `try/finally`.
+
+## `services/ui`: five instances, three of them live
+
+| File | Site | Global left behind | Live? |
+|---|---|---|---|
+| `ModelsClient.test.tsx` | `:180` | `window.confirm` → `false` | **yes** — 24 later tests |
+| `ConnectionsClient.test.tsx` | `:208` | `window.confirm` → `false` | **yes** — ~20 later tests, incl. the Health Tab describe |
+| `auth-callbacks.test.ts` | `:98`, `:121` | stubbed `fetch` | **yes** — leaks into the session-callback describe |
+| `PoliciesClient.test.tsx` | `:207` | `window.confirm` → `false` | no — last test in file |
+| `api-proxy.test.ts` | `:141` | `console.error` swallowed | no — last test in file |
+
+`api-proxy.test.ts:141` is the closest match to #127 of all of them: a swallowed
+`console.error`, the same global, the same consequence. It is inert purely because nothing
+follows it.
+
+All five are now `try/finally`, or `afterEach` where the file's shape made that cleaner
+(`auth-callbacks`). Full ui suite after: **68 files, 767 passed, 7 skipped**.
+`tool-installer.test.ts` alone after: **31 passed**. The api suite was not run as a whole,
+because a green run of it is not evidence and quoting one here would contradict this
+document's first page.
+
+## What this is worth, stated narrowly
+
+**No live instance was found in the api suite**, so this does not touch the flake this
+document is about, and nothing here should be read as a lead on it. What it changes is
+the *failure mode after a failure*: in three ui files a single failing assertion silently
+mutated a global for every later test in the file, which turns one honest failure into a
+run whose later results cannot be trusted either. That is worth removing on its own
+merits, and it is the whole claim.
+
+**No regression test, for #127's reason.** A test that drives these leaks needs the guarded
+test to fail, which is exactly what a suite cannot assert about itself. The two-arm control
+above is the evidence, and it was run rather than reasoned; it is deliberately not committed,
+because a test file whose positive arm must fail cannot live in a green suite.
