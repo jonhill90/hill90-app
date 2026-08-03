@@ -45,6 +45,38 @@ if (typeof Layer !== 'function' || typeof Layer.prototype?.handle_request !== 'f
   );
 }
 
+/**
+ * HOW MUCH DEPENDS ON THIS, measured 2026-08-03.
+ *
+ * `@typescript-eslint/no-misused-promises`, run with type information over
+ * `services/api/src`, reports **191** call sites of the shape
+ *
+ *     router.get('/x', async (req, res) => { ... })
+ *
+ * — an async function passed where a void return is expected. Twenty-seven are
+ * in `app.ts` alone. Every one of them is a promise Express will not hold.
+ *
+ * They are safe ONLY because of the patch below. Not because the handlers are
+ * careful, not because the rejections are unlikely: because this file replaces
+ * Express's dispatcher so a rejecting handler reaches `next(err)` instead of
+ * reaching Node's default unhandled-rejection behaviour, which is to terminate.
+ *
+ * So this is a load-bearing dependency that is invisible from both ends. Nothing
+ * in `app.ts` names it — the handlers look ordinary. Nothing here names them —
+ * the patch looks like a small utility. **Delete or bypass this file and 191
+ * latent process-killers reappear at once**, in a service with no
+ * `process.on('unhandledRejection')` of its own.
+ *
+ * Two consequences worth carrying:
+ *
+ *   - A floating-promise audit of this service MUST separate
+ *     `no-floating-promises` from `no-misused-promises`. The first found six
+ *     sites; the second found 191, all of them this. Reporting 197 would be
+ *     counting a solved problem as an open one.
+ *   - If this patch is ever removed, the correct replacement is not "await the
+ *     handlers" — it is an explicit `process.on('unhandledRejection')` plus a
+ *     wrapper at every route registration. Both, not either.
+ */
 const PATCH_FLAG = '__hill90AsyncErrorsPatched';
 const original = Layer.prototype.handle_request;
 
