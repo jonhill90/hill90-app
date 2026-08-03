@@ -34,6 +34,7 @@ function jsonRequest(url: string, method = 'GET') {
     headers: new Headers(),
     text: async () => '',
     arrayBuffer: async () => new ArrayBuffer(0),
+    body: null,
   } as never
 }
 

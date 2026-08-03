@@ -1,5 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+// The proxy now reads the body as a COUNTED STREAM rather than calling text()
+// or arrayBuffer(), so a mock that only stubs those methods hands it no body at
+// all. That is not a weakening of the limit — it is the mock not modelling a
+// Request. streamOf gives these fixtures a real one.
+function streamOf(s: string): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(s)
+  return new ReadableStream<Uint8Array>({
+    pull(c) {
+      if (bytes.byteLength) c.enqueue(bytes)
+      c.close()
+    },
+  })
+}
+
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -51,6 +66,7 @@ function makeCatchAllRequest(
     },
     nextUrl: { searchParams },
     arrayBuffer: vi.fn(() => Promise.resolve(new ArrayBuffer(0))),
+    body: null,
   }
 }
 
@@ -65,6 +81,7 @@ function makeBaseRequest(method: string, headerOverrides: Record<string, string 
       get: vi.fn((name: string) => headerMap[name.toLowerCase()] ?? null),
     },
     text: vi.fn(() => Promise.resolve('{}')),
+    body: streamOf('{}'),
   }
 }
 

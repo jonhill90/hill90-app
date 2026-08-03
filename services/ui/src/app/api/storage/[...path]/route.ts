@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { proxyToApi } from '@/utils/api-proxy'
+import {
+  readBodyLimited,
+  bodyTooLargeResponse,
+  BodyTooLargeError,
+  BODY_LIMIT_UPLOAD,
+} from '@/utils/request-body'
 
 const API_URL = process.env.API_URL || 'http://localhost:3000'
 
@@ -25,6 +31,17 @@ async function proxyUpload(req: NextRequest, { params }: { params: Promise<{ pat
   const url = new URL(`${API_URL}/storage/${pathStr}`)
   const contentType = req.headers.get('content-type') || ''
 
+  // Before the fetch, and counted during the read. multer refuses above 50MB on
+  // the API side, but that refusal used to arrive AFTER this process had already
+  // allocated the whole body.
+  let payload: ArrayBuffer
+  try {
+    payload = await readBodyLimited(req, BODY_LIMIT_UPLOAD)
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) return bodyTooLargeResponse(err)
+    throw err
+  }
+
   try {
     const res = await fetch(url.toString(), {
       method: 'POST',
@@ -32,7 +49,7 @@ async function proxyUpload(req: NextRequest, { params }: { params: Promise<{ pat
         'Authorization': `Bearer ${session.accessToken}`,
         'Content-Type': contentType,
       },
-      body: await req.arrayBuffer(),
+      body: payload,
       signal: AbortSignal.timeout(60000),
     })
     const data = await res.json()
