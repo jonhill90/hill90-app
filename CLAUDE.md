@@ -96,7 +96,7 @@ Most of these were bought with a real bug. They are not style preferences.
 
 ## Finding defects by shape, not by symptom
 
-Nine defects in `services/api` were found on 2026-08-03 by grepping for a *shape* and then
+Ten defects in `services/api` were found on 2026-08-03 by grepping for a *shape* and then
 checking reachability. None was found by something failing. The shapes are the part that
 transfers.
 
@@ -105,8 +105,9 @@ reject (#133), and async handler rejections that Express 4 drops on the floor (#
 at the boundary, so the next handler written inherits it). *Unbounded memory:*
 caller-controlled sizes with a floor and no ceiling (#141, #153), reads with no byte cap
 (#143, #153), a WebSocket relay and SSE writes that never consulted backpressure (#148,
-#150). *Credential lifetime:* a terminal session outliving its token (#145). *Anonymous
-exposure:* `/health/detailed` served the runtime and the tenant inventory (#136).
+#150). *Credential lifetime:* a terminal session outliving its token (#145), and the same on all
+four SSE endpoints (#156). *Anonymous exposure:* `/health/detailed` served the runtime and
+the tenant inventory (#136).
 
 **The greps that earned their keep:**
 
@@ -130,6 +131,43 @@ only `new RegExp` is a constant), SQL built by concatenation, `.then()` without 
 unreachable from the affected paths. `services/ai`'s single `asyncio.create_task` is
 guarded, and Python does not exit on an un-retrieved task exception, so this seam is
 **Node-specific**.
+
+### Where the search stopped, and on what basis
+
+Stated so the next lane can act on it rather than re-run it. Each row is a method, not a
+recollection — rerun any of them.
+
+| Shape | How it was searched | Found |
+|---|---|---|
+| fire-and-forget chains | `grep "void [a-z]"`, then read each | #133; rest guarded |
+| async handler rejections | fixed at the boundary | #135 — structural, no twins possible |
+| accumulation with no ceiling | `chunks.push` / `buffer +=` | #143, #153 |
+| caller-controlled sizes | `parseInt(req.query…)`, every route | #141, #153; rest clamped |
+| backpressure consulted? | `res.write` result, `drain`, `writableLength` | **zero consulted** → #148, #150. Rerunning today returns **one** — `sse-writer.ts`, which is the fix |
+| authenticated once, long-lived | WebSocket, then every `text/event-stream` | #145, then all **four** SSE routes → #156. The grep also returns four `openapi.yaml` matches, which are spec, not code |
+| reachable without auth | every route registered before `requireAuth` | #136; rest are `/health` by design and four service-token `/internal/*` |
+| unbounded query results | 104 `SELECT`s without `LIMIT`, triaged | **nothing material** — nearly all single-row lookups; the thread-load query returns a whole thread by design, with no caller-controlled multiplier |
+| ui body / upstream reads | every `src/app/api/**/route.ts` | **zero unguarded** (covered by #146, #147) |
+
+**Counts move as fixes land, and that is expected** — the accumulation grep returned three
+before #153 and two after. A number here is a measurement of a state, not a constant. Rerun
+the method; do not trust the figure.
+
+**Found nothing of:** ReDoS from request input (the only `new RegExp` is a constant), SQL by
+string concatenation, `.then()` without `.catch()`, `forEach(async)`, and unawaited
+`pool.query` outside `await Promise.all` — two exist, both unreachable from the affected
+paths.
+
+**What the claim does NOT cover**, so it is not read wider than it is: `services/mcp`,
+`services/knowledge` and `services/agentbox` were not swept for their own families. They are
+FastAPI, which catches handler exceptions, and both carry existing limits — but that is an
+argument from framework, not a search that was run.
+
+**The first exhaustion call here was premature, and what corrected it was continuing to
+look.** It was made after #150; writing the summary then produced #153, and carrying on
+produced #156 — the twin of #145, on four endpoints. No new technique was involved: the same
+greps, run once more. Treat a confident "dry" from a lane that has just stopped finding
+things as a hypothesis, not a result.
 
 **The recurring cause was drift, not ignorance.** #141 existed because the clamp sat on the
 export endpoint and not its twin; #153 because that fix went to one route and not the other.
