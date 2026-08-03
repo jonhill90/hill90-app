@@ -1801,3 +1801,96 @@ Established: **the 501 is real on the wire and this application did not emit it.
 
 **Nothing was disabled, retried or quarantined; production route and test files remain
 byte-identical to `main`.**
+
+---
+
+# Round twelve, 2026-08-03: not port reuse — the port was live and app-owned
+
+**77 runs of half A, 4 failures, the event captured at run 76 with all three recorders live.**
+The appealing explanation is **refuted by its own measurement.**
+
+## The lifetime recorder, controlled on a real reuse
+
+Wrapping `net.Server.prototype.listen`/`close`, each listener gets an id so a port used twice
+is two rows. The control forces an actual reuse — bind, close, rebind the same port:
+
+```
+listen rows=3 close rows=3 install=1
+port 51792 used by serverIds [1, 2] -> REUSE DETECTED
+swap-rule pairing still works: True
+-> PASS: detects reuse AND pairs responses
+```
+
+## The event
+
+```
+● Platform Connections › P5: DELETE /provider-connections/:id as admin ...
+    Expected: 200    Received: 501
+
+install=29  server=111  client=241  listen=241  close=241
+server rows with code 501: 0        client 501 rows: 1
+
+CLIENT 501  ports 50442->50441  at ts=...992667
+  paired express response: NONE
+  listeners that ever owned port 50441: 1  (serverIds [5])
+    serverId=5 listen@...992631 close@...992671
+    -> connection at ...992667 was INSIDE (live)
+```
+
+## What that settles
+
+**Port reuse is refuted.** Port 50441 had **exactly one listener in the entire run** — no
+second `serverId`, so nothing rebound it — and the connection landed **inside** that
+listener's live window. The harness did not hand the client a stale or foreign port.
+
+This was the explanation that would have been plainest after eleven rounds, and it is the one
+the measurement rules out. Recording that rather than reaching for it.
+
+## What is now established, cumulatively, about a single event
+
+1. The wire carried a literal `HTTP/1.1 501 Not Implemented` (round ten, controlled).
+2. No express route emitted a 501 anywhere in the run — 111 `res.status` calls recorded, zero
+   of them 501 (rounds nine and eleven, liveness-proven).
+3. No express response was emitted on that connection at all (round eleven, swap-rule pairing).
+4. **The server on that port was live, app-owned, and singly-bound** (this round).
+
+So a live supertest server, owned by this application, accepted a connection and the client
+received a 501 that express never produced.
+
+## The sharpest untested candidate, and it is new
+
+The lifetime numbers hand over something the earlier rounds could not see:
+
+```
+listen@...631   connection@...667   close@...671
+```
+
+**The whole server lived 40ms, and the connection arrived 4ms before it closed.** That is a
+closing-server race: a connection accepted while `close()` is in flight, on a listener whose
+entire existence is shorter than one event-loop tick under load.
+
+That is now the leading candidate and it is **not** yet tested. It is testable directly:
+force a connection into the window between `close()` being called and the listener finishing,
+and observe what status the client receives. If it is 501, the mechanism is found and it lives
+in supertest's per-request server lifecycle, not in application state — which would end an
+investigation that has eliminated every state-based theory for eleven rounds.
+
+The other candidates named in round eleven — Node answering below express, supertest's
+listener answering before the app — remain untested and are not displaced by this, only
+ranked below it.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; the client layer as its inventor;
+express-to-express cross-talk; and **port reuse in the harness.**
+
+One caution on rates: these batches ran at **4 failures in 77** against the ~10% of rounds
+four to six. Three wrappers per response is not free, and an instrument that changes the rate
+may be changing the thing it measures. That is a reason to treat the *rate* here as
+uninformative — it is not a reason to doubt the event, which was captured whole.
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
