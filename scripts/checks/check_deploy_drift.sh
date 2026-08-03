@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 #
-# Is what is RUNNING the same as what was MERGED?
+# Is the host's CHECKOUT the same as what was MERGED?
+#
+# NOT "is what is running the same as what was merged" — that is the question
+# worth answering and this cannot answer it. It compares one git SHA read from
+# the host against origin/main. A deploy resets the whole checkout and rebuilds
+# ONE stack, so a service can be running code several commits older than the
+# checkout reports. On 2026-08-03 this printed "what is running is what was
+# merged" while two merged api fixes sat in the checkout and outside the running
+# image — the guard making exactly the overclaim it was built to catch (#158).
+#
+# The wording below therefore states what was compared AND what was not. That is
+# weaker than the sentence it replaces, and the weakness is the true reading:
+# the fix is to compare more (per-service build provenance, #158), not to word
+# the current comparison more confidently.
 #
 # WHY THIS EXISTS. On 2026-08-03 a fix for an anonymous information leak
 # (#136) was merged at 18:07 and did not reach production until 18:30. In
@@ -69,10 +82,14 @@ fail() { printf '::error::%s\n' "$*" >&2; }
 
 say "Deploy drift — ${LABEL}"
 say "=============================================="
+say "  SCOPE: compares the git CHECKOUT on the host against ${TARGET_REF}."
+say "         Does NOT inspect any container image, so it cannot tell you"
+say "         which commit a running service was built from. See issue #158."
+say ""
 
 # ---------------------------------------------------------------- unknown ---
 if [ -z "$DEPLOYED_SHA" ]; then
-    fail "DEPLOY DRIFT UNKNOWN for ${LABEL}: no deployed SHA was supplied. This is NOT a pass — nothing was compared. Whatever is running on the host is unverified."
+    fail "DEPLOY DRIFT UNKNOWN for ${LABEL}: no checkout SHA was supplied. This is NOT a pass — nothing was compared, so neither the checkout nor anything running on the host is verified."
     exit 2
 fi
 
@@ -89,7 +106,7 @@ fi
 target_sha=$(git rev-parse "$TARGET_REF")
 deployed_sha=$(git rev-parse "$DEPLOYED_SHA")
 
-say "  deployed: ${deployed_sha:0:12}"
+say "  host checkout: ${deployed_sha:0:12}"
 say "  ${TARGET_REF}: ${target_sha:0:12}"
 say ""
 
@@ -105,12 +122,15 @@ fi
 
 # ---------------------------------------------------------------- in sync ---
 if [ "$deployed_sha" = "$target_sha" ]; then
-    say "  PASS: what is running is what was merged."
+    say "  PASS: the host checkout matches ${TARGET_REF}."
+    say "  NOT CHECKED: which commit each container was built from. A deploy"
+    say "  resets the whole checkout but rebuilds ONE stack, so a service can be"
+    say "  running older code while this line is green."
     exit 0
 fi
 
 behind=$(git rev-list --count "${deployed_sha}..${target_sha}")
-say "  ${behind} commit(s) merged and not deployed."
+say "  ${behind} commit(s) merged and not in the host checkout."
 
 # --------------------------------------------------- deployable or not? ----
 # shellcheck disable=SC2086
@@ -156,5 +176,5 @@ if [ "$age_hours" -lt "$GRACE_HOURS" ]; then
     exit 0
 fi
 
-fail "DEPLOY DRIFT for ${LABEL}: ${#deployable[@]} commit(s) touching deployable paths have been merged for ${age_hours}h and are NOT running. The oldest is $(git log -1 --format='%h %s' "$oldest_sha"). Every health check will keep reporting the OLD code as healthy, because it is. Deploy, or say why not."
+fail "DEPLOY DRIFT for ${LABEL}: ${#deployable[@]} commit(s) touching deployable paths have been merged for ${age_hours}h and are NOT IN THE HOST CHECKOUT. The oldest is $(git log -1 --format='%h %s' "$oldest_sha"). They are certainly not running. Every health check will keep reporting the OLD code as healthy, because it is. Deploy, or say why not."
 exit 1
