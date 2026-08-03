@@ -1517,3 +1517,105 @@ All three are worth having, and unlike the round-six design, none of them depend
 assumption about how many places can emit the status.
 
 **Nothing was disabled, retried or quarantined, and no handler behaviour was changed.**
+
+---
+
+# Round nine, 2026-08-03: no route emits the 501, and a test receives it anyway
+
+**This is the third of the three outcomes named in round eight, and the largest of them:
+the 501 does not come from this application's route layer.**
+
+## How long a null would have needed, and why it was not needed
+
+At the observed rate — 1 run in 38 where a test receives a 501 — a null result carries weight
+at `N >= ln(0.05)/ln(1 - 1/38)` ≈ **112 runs**. That budget was not spent, because the run
+produced a **positive observation** rather than a null: the event occurred at run 6.
+
+## The instrument
+
+`express.response.status` was wrapped for the whole worker, so it observes **every** 501
+regardless of which route emits it. This is the correction round eight called for: it assumes
+nothing about how many sites can produce the status.
+
+Controlled before use — two routes emitting 501 on different paths, one emitting 403:
+
+```
+GET /alpha  socket local=64670 remote=64671
+GET /beta   socket local=64672 remote=64673
+rows=2 distinct urls=2 -> PASS: records each 501 with its real url, and no 403
+```
+
+**Then the first batch was thrown away.** 38 runs produced `rows=0` everywhere — which is
+ambiguous between *no 501 was emitted* and *the wrapper never loaded*, the exact trap that
+has caught this investigation twice. A liveness marker was added (one row per test file at
+install), verified to appear and to coexist with real captures:
+
+```
+installed markers: 1 | 501s captured: 2 -> PASS
+```
+
+Every subsequent half-A run then reports **29 rows** — one marker per file — so any emission
+shows as a row beyond 29, and an empty result can no longer be confused with a dead
+instrument.
+
+## The observation
+
+```
+run 6:  FAIL   rows=29   received501=2
+  run6b rows=29  liveness markers=29  actual 501 emissions=0
+  ● ... Expected: 404 / Received: 501
+```
+
+**Twenty-nine liveness markers, zero 501 emissions, and a test that expected 404 received
+501.** The wrapper was demonstrably installed in every worker and no route in the application
+called `res.status(501)` — or `res.status(...)` with any 501-valued variable, since the
+wrapper sees the resolved code, not the literal.
+
+Nothing bypasses it inside the app either: `grep -rn "writeHead(" src` excluding tests returns
+**0**, so there is no path that writes a status header without going through `res.status`.
+
+## What this kills, and what it does not
+
+**Killed:** every explanation in which some route of this application produces the 501 —
+including round six's `POST /profile/password` reasoning, and round eight's status-forwarding
+sites (`res.status(result.status)`). Neither fired. The forwarding sites were a valid reason
+to doubt uniqueness; they are now excluded as the actual source by measurement rather than by
+counting.
+
+**Not established: where the 501 does come from.** Two candidate mechanisms were probed
+directly and **neither reproduces it**:
+
+```
+unknown method -> HTTP/1.1 400 Bad Request | app handler ran: false
+bad TE         -> HTTP/1.1 200 OK          | app handler ran: true
+```
+
+Node's HTTP server answers a malformed request with **400**, not 501, on this version. So
+"Node emitted it below express" is not supported by evidence, and is not claimed.
+
+The remaining candidates, none of them tested: superagent/supertest synthesising a status when
+a response is malformed or truncated; a response belonging to another request arriving on this
+socket, where the status line is read from bytes this application never wrote; or something in
+the test harness. **These are candidates, not findings.**
+
+## The next instrument, and what would settle it
+
+Capture the **raw bytes** of the response the failing assertion read. If the socket carries a
+literal `HTTP/1.1 501 Not Implemented` status line, something wrote those bytes and the
+question becomes who — and since no express route did, the writer is outside the app, which
+would make connection-level cross-talk the leading explanation for the first time on direct
+evidence. If instead the bytes show a different status and supertest reports 501, the defect
+is in the client layer and has nothing to do with the server at all.
+
+That is a smaller and sharper question than any asked so far, and it does not depend on any
+assumption about the application.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause (49% on
+green runs); the SSE timing margin; and now **every route-level origin of the 501**.
+
+**Nothing was disabled, retried or quarantined; no handler behaviour was changed; production
+route files remain byte-identical to `main`.**
