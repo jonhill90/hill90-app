@@ -210,15 +210,37 @@ async def list_entries(
     pool: asyncpg.Pool,
     claims: AgentClaims,
     entry_type: str | None = None,
-) -> list[dict[str, Any]]:
-    """List entries for the authenticated agent."""
+    limit: int = 500,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """List one page of entries for the authenticated agent.
+
+    Returns ``(rows, total)`` where ``total`` is a ``COUNT(*)`` over the same
+    ``WHERE`` as the page — never ``len(rows)``. A total derived from the page
+    is a number that agrees with itself and reports truncation as
+    completeness, which is the defect this bound exists to prevent (#183).
+
+    The ``id`` tiebreak is load-bearing: entries written in the same instant
+    share an ``updated_at``, and paging over a non-unique sort key can hand
+    one row to two pages and no page to another.
+    """
     if entry_type:
         rows = await pool.fetch(
             """SELECT id, path, title, entry_type, tags, status, sync_status,
                       created_at, updated_at
                FROM knowledge_entries
                WHERE agent_id = $1 AND status = 'active' AND entry_type = $2
-               ORDER BY updated_at DESC""",
+               ORDER BY updated_at DESC, id DESC
+               LIMIT $3 OFFSET $4""",
+            claims.sub,
+            entry_type,
+            limit,
+            offset,
+        )
+        total = await pool.fetchval(
+            """SELECT COUNT(*)
+               FROM knowledge_entries
+               WHERE agent_id = $1 AND status = 'active' AND entry_type = $2""",
             claims.sub,
             entry_type,
         )
@@ -228,10 +250,19 @@ async def list_entries(
                       created_at, updated_at
                FROM knowledge_entries
                WHERE agent_id = $1 AND status = 'active'
-               ORDER BY updated_at DESC""",
+               ORDER BY updated_at DESC, id DESC
+               LIMIT $2 OFFSET $3""",
+            claims.sub,
+            limit,
+            offset,
+        )
+        total = await pool.fetchval(
+            """SELECT COUNT(*)
+               FROM knowledge_entries
+               WHERE agent_id = $1 AND status = 'active'""",
             claims.sub,
         )
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows], total
 
 
 async def search_entries(
