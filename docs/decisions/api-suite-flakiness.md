@@ -1619,3 +1619,88 @@ green runs); the SSE timing margin; and now **every route-level origin of the 50
 
 **Nothing was disabled, retried or quarantined; no handler behaviour was changed; production
 route files remain byte-identical to `main`.**
+
+---
+
+# Round ten, 2026-08-03: the wire carries a literal 501, so the client did not invent it
+
+**71 runs of half A, 5 failures, one carrying the event. The status line on the socket is
+real.**
+
+## The instrument
+
+A recorder taps every client socket and captures the first status line actually delivered,
+with the socket's ports and the running test. It carries a liveness marker for the same
+reason as round nine — a byte recorder that silently records nothing looks exactly like a
+clean run, and that has already happened once in this investigation.
+
+Controlled before use, against three known statuses:
+
+```
+wire: HTTP/1.1 403 Forbidden       | ports 52393 -> 52392
+wire: HTTP/1.1 501 Not Implemented | ports 52395 -> 52394
+wire: HTTP/1.1 200 OK              | ports 52397 -> 52396
+installed=1 captures=3 statuses=['403','501','200'] -> PASS
+```
+
+## The observation
+
+```
+run 35   FAIL   received501=4   wire501=2   caps=253   install markers=29
+
+● Agent create/update scope RBAC › update with vps_system skill as non-admin returns 403
+    Expected: 403   Received: 501
+● Agent CRUD routes › POST /agents returns 409 on duplicate agent_id
+    Expected: 409   Received: 501
+
+{"statusLine":"HTTP/1.1 501 Not Implemented","localPort":50442,"remotePort":50441,
+ "pid":33670,"test":"...vps_system skill as non-admin returns 403","testFile":"routes-agents-skill.test.ts"}
+{"statusLine":"HTTP/1.1 501 Not Implemented","localPort":50443,"remotePort":50437,
+ "pid":33669,"test":"...POST /agents returns 409 on duplicate agent_id","testFile":"routes-agents.test.ts"}
+```
+
+**A literal `HTTP/1.1 501 Not Implemented` was delivered on the socket**, in two different
+worker processes, to two tests that asked for entirely different things (a 403 RBAC check and
+a 409 duplicate check).
+
+## What this rules out
+
+**The client layer.** supertest/superagent did not synthesise the status: the bytes say 501.
+Everything downstream of the wire — assertion helpers, response parsing, the harness — is
+exonerated. The status is real, and something wrote it.
+
+That was one of the two outcomes named in round nine, and it is the one that occurred.
+
+## What it makes leading, and the caveat that keeps it a lead
+
+Round nine measured, with liveness proven, that **no express route emitted a 501** while a
+test received one. This round measures that **the 501 is genuinely on the wire**. Together
+those say: bytes that no route in this application wrote were delivered to a socket a test was
+reading — which is connection-level cross-talk, and it is the first time in ten rounds that
+anything points there on direct evidence rather than by elimination.
+
+**The caveat is real and is not buried: those are two different runs.** The
+`res.status` wrapper and the byte recorder have never been active in the same run, so "no
+route emitted it" and "the wire says 501" have not been observed of the *same* event. Both are
+`setupFilesAfterEnv` files; running them together is one command, and it is the next thing to
+do. Until then the conjunction is an inference across runs, not a measurement of one.
+
+One further observation, recorded without interpretation: in the control every capture paired
+consecutive ports (`52393 -> 52392`), and in run 35 the first 501 did too (`50442 -> 50441`)
+while the second did **not** (`50443 -> 50437`). Ephemeral ports carry no guarantee of
+adjacency, so this is not evidence of anything on its own — it is written down because if
+cross-talk is real, socket pairing is where it would show, and the next run should record it
+deliberately rather than notice it by accident.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; and now **the client layer as the inventor
+of the 501**.
+
+Leading, on direct evidence for the first time: **connection-level cross-talk.**
+
+**Nothing was disabled, retried or quarantined; production route files remain byte-identical
+to `main`.**
