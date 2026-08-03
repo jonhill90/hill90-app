@@ -1981,3 +1981,98 @@ real on the wire and this application did not write it.**
 
 **Nothing was disabled, retried or quarantined; production and test files remain
 byte-identical to `main`.**
+
+---
+
+# Round fourteen, 2026-08-03: Node cannot emit 501 — the enumeration is complete
+
+**Source read, not remembered: Node `v26.5.0`, the exact binary running this suite**, via
+`process.binding('natives')`, which returns the embedded source of the internal modules.
+Modules examined: `_http_server`, `_http_common`, `_http_incoming`, `_http_outgoing`,
+`internal/http`.
+
+## Being exact about what the earlier probes achieved
+
+Round nine probed two inputs — an unknown method (got **400**) and a bad `Transfer-Encoding`
+(got **200**). Those excluded **two paths, not the category**, and the round-thirteen ranking
+said so. This enumerates the category.
+
+## Every occurrence of 501 in Node's HTTP server
+
+```
+_http_server:176:   501: 'Not Implemented',            // RFC 7231 6.6.2
+```
+
+**One occurrence, in the `STATUS_CODES` lookup table** — a label used to render a status line
+if some caller asks for 501. It is not an emission.
+
+## The reading, positive-controlled
+
+A grep that finds nothing proves nothing unless it can find something. The same scan over the
+same module locates every canned response Node actually sends:
+
+```
+_http_server:972-973:  const badRequestResponse     = ... `HTTP/1.1 400 ${STATUS_CODES[400]}`
+_http_server:976-977:  const requestTimeoutResponse = ... `HTTP/1.1 408 ${STATUS_CODES[408]}`
+_http_server:981:                                     ... `HTTP/1.1 431 ${STATUS_CODES[431]}`
+_http_server:986:                                     ... `HTTP/1.1 413 ${STATUS_CODES[413]}`
+_http_server:1014:     response = requestTimeoutResponse;
+_http_server:1017:     response = badRequestResponse;
+_http_server:269:      ServerResponse.prototype.statusCode = 200;
+_http_server:727:      res.statusCode = 500;
+```
+
+So the scan does find emissions where they exist. **Node's HTTP server has exactly four
+hard-coded error responses — 400, 408, 431, 413 — plus a 200 default and a 500 for a throwing
+request listener. 501 is not among them.**
+
+## The complete list, each marked
+
+| Candidate Node 501 path | Status |
+|---|---|
+| `STATUS_CODES[501]` table entry, `_http_server:176` | **not an emission** — a label only |
+| unknown/unsupported HTTP method | **excluded by evidence** — probe returned 400 |
+| unsupported `Transfer-Encoding` | **excluded by evidence** — probe returned 200 |
+| malformed request / parser error (`badRequestResponse`) | **excluded by source** — emits 400 |
+| request timeout (`requestTimeoutResponse`) | **excluded by source** — emits 408 |
+| headers too large | **excluded by source** — emits 431 |
+| payload too large | **excluded by source** — emits 413 |
+| throwing request listener | **excluded by source** — sets 500 |
+| any other | **none exist** — 501 appears nowhere else in the HTTP modules |
+
+## Plainly: Node is eliminated
+
+**Node's HTTP server cannot emit a 501 of its own.** The enumeration is complete for the
+version in use, it was read from the running binary rather than recalled, and the reading was
+controlled against codes Node does emit.
+
+That was the top-ranked remaining candidate and it is gone. Thirteen rounds of elimination do
+not pay off here — this closes a door rather than opening one, and that is the honest result.
+
+## What is left
+
+**One named candidate: supertest's per-request listener answering before the app.** It is
+untested, and it is now the only surviving named explanation for the fact that has outlived
+everything else:
+
+> a literal `HTTP/1.1 501 Not Implemented` was delivered on a live, application-owned socket,
+> and neither express, nor the client layer, nor port reuse, nor a closing-server race, nor
+> Node itself wrote it.
+
+If supertest is also excluded, the honest position becomes that the 501 comes from something
+not yet named at all, and the next step would be to widen rather than narrow — capture the
+full response body alongside the status line, since a body identifies its author far more
+specifically than three digits do, and every capture so far has deliberately read only the
+first line.
+
+## Standing state
+
+Eliminated by measurement or source, cumulative: `process.env` and `globalThis` as carriers;
+"symptoms are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as
+the timeout mechanism; "drained queue → promise never resolves"; the drained queue as the
+cause; the SSE timing margin; every route-level origin of the 501; the client layer as its
+inventor; express-to-express cross-talk; port reuse; the closing-server race; and **Node's
+HTTP server**.
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
