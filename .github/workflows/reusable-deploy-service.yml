@@ -385,7 +385,24 @@ jobs:
 
       # The tenancy contract runs the other way too: a tenant deploy must not
       # degrade the platform. Hill90's baseline is 13 containers, 0 unhealthy.
-      - name: Verify the Hill90 baseline is unchanged
+      # ABSENCE AND ILL-HEALTH ARE DIFFERENT QUESTIONS, and this step used to ask
+      # only the second while being named for the first. It ran
+      # `docker ps --filter health=unhealthy` and passed when nothing was
+      # unhealthy — but a container that has VANISHED is not unhealthy, it is
+      # gone, and absence is exactly what a baseline check exists to catch. Its
+      # verdict was relayed as a baseline check for a whole session.
+      #
+      # Runs on dry runs too: it reads and changes nothing, and a dry run that
+      # cannot tell you the platform is intact is worth less than one that can.
+      - name: Verify the Hill90 platform containers are present BY NAME
+        if: always()
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            'docker ps --format "{{.Names}}"' \
+            | bash scripts/checks/check_platform_baseline.sh
+
+      - name: Verify no container on the host is unhealthy
         if: always()
         run: |
           ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
