@@ -445,46 +445,53 @@ describe('tool-installer service', () => {
 describe('tool-installer retry env safety', () => {
   it('invalid HILL90_TOOL_INSTALL_RETRIES defaults to 1 retry', async () => {
     const origEnv = process.env.HILL90_TOOL_INSTALL_RETRIES;
+    const origFetchHere = global.fetch;
     process.env.HILL90_TOOL_INSTALL_RETRIES = 'not-a-number';
+    try {
 
-    // Re-import the module with fresh env
-    jest.resetModules();
-    const mockQueryInner = jest.fn();
-    const mockExecInner = jest.fn();
-    const mockExecStdinInner = jest.fn();
-    const mockFetchInner = jest.fn();
-    jest.doMock('../db/pool', () => ({ getPool: () => ({ query: mockQueryInner }) }));
-    jest.doMock('../services/docker', () => ({
-      execInContainerWithExit: (...args: any[]) => mockExecInner(...args),
-      execWithStdin: (...args: any[]) => mockExecStdinInner(...args),
-    }));
-    global.fetch = mockFetchInner as any;
+      // Re-import the module with fresh env
+      jest.resetModules();
+      const mockQueryInner = jest.fn();
+      const mockExecInner = jest.fn();
+      const mockExecStdinInner = jest.fn();
+      const mockFetchInner = jest.fn();
+      jest.doMock('../db/pool', () => ({ getPool: () => ({ query: mockQueryInner }) }));
+      jest.doMock('../services/docker', () => ({
+        execInContainerWithExit: (...args: any[]) => mockExecInner(...args),
+        execWithStdin: (...args: any[]) => mockExecStdinInner(...args),
+      }));
+      global.fetch = mockFetchInner as any;
 
-    const { ensureRequiredToolsInstalled: ensureFresh } = require('../services/tool-installer');
+      const { ensureRequiredToolsInstalled: ensureFresh } = require('../services/tool-installer');
 
-    mockQueryInner
-      .mockResolvedValueOnce({
-        rows: [{ id: 'tool-gh', name: 'gh', install_method: 'binary', install_ref: 'https://github.com/cli/cli/releases/download/v{version}/gh_{version}_linux_amd64.tar.gz' }],
-      })
-      .mockResolvedValue({ rowCount: 1 });
-    // Idempotency check: not installed (all attempts)
-    mockExecInner.mockResolvedValue({ exitCode: 1, stdout: '', stderr: '' });
-    // Download succeeds
-    mockFetchInner.mockResolvedValue(mockFetchResponse(200, new ArrayBuffer(100)));
-    // Extract: first attempt fails, retry succeeds
-    mockExecStdinInner
-      .mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'fail' })
-      .mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+      mockQueryInner
+        .mockResolvedValueOnce({
+          rows: [{ id: 'tool-gh', name: 'gh', install_method: 'binary', install_ref: 'https://github.com/cli/cli/releases/download/v{version}/gh_{version}_linux_amd64.tar.gz' }],
+        })
+        .mockResolvedValue({ rowCount: 1 });
+      // Idempotency check: not installed (all attempts)
+      mockExecInner.mockResolvedValue({ exitCode: 1, stdout: '', stderr: '' });
+      // Download succeeds
+      mockFetchInner.mockResolvedValue(mockFetchResponse(200, new ArrayBuffer(100)));
+      // Extract: first attempt fails, retry succeeds
+      mockExecStdinInner
+        .mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'fail' })
+        .mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
 
-    await ensureFresh('agent-db-id', 'agent-slug');
-    // Should have retried (2 execStdin calls), proving NaN didn't yield 0 retries
-    expect(mockExecStdinInner).toHaveBeenCalledTimes(2);
-
-    // Restore
-    if (origEnv === undefined) {
-      delete process.env.HILL90_TOOL_INSTALL_RETRIES;
-    } else {
-      process.env.HILL90_TOOL_INSTALL_RETRIES = origEnv;
+      await ensureFresh('agent-db-id', 'agent-slug');
+      // Should have retried (2 execStdin calls), proving NaN didn't yield 0 retries
+      expect(mockExecStdinInner).toHaveBeenCalledTimes(2);
+    } finally {
+      // Restore in a finally, not after the assertion. A throw above used to skip
+      // this, leaving HILL90_TOOL_INSTALL_RETRIES='not-a-number' and a mocked
+      // global.fetch behind — inert today only because this is the file's last test.
+      // Same leak class as app#127.
+      if (origEnv === undefined) {
+        delete process.env.HILL90_TOOL_INSTALL_RETRIES;
+      } else {
+        process.env.HILL90_TOOL_INSTALL_RETRIES = origEnv;
+      }
+      global.fetch = origFetchHere;
     }
   });
 });

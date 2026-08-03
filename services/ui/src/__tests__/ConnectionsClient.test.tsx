@@ -205,19 +205,24 @@ describe('ConnectionsClient', () => {
   })
 
   it('confirms before deleting', async () => {
+    // try/finally, not a trailing mockRestore() — see ModelsClient.test.tsx for the
+    // reasoning. A throw before the restore leaves window.confirm mocked for every
+    // later test in this file, including the whole Health Tab describe.
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      render(<ConnectionsClient session={session} />)
 
-    render(<ConnectionsClient session={session} />)
+      await waitFor(() => {
+        expect(screen.getByText('My OpenAI Key')).toBeInTheDocument()
+      })
 
-    await waitFor(() => {
-      expect(screen.getByText('My OpenAI Key')).toBeInTheDocument()
-    })
+      const deleteButtons = screen.getAllByText('Delete')
+      fireEvent.click(deleteButtons[0])
 
-    const deleteButtons = screen.getAllByText('Delete')
-    fireEvent.click(deleteButtons[0])
-
-    expect(confirmSpy).toHaveBeenCalled()
-    confirmSpy.mockRestore()
+      expect(confirmSpy).toHaveBeenCalled()
+    } finally {
+      confirmSpy.mockRestore()
+    }
   })
 
   it('shows provider icons on cards', async () => {

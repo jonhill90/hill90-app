@@ -204,24 +204,29 @@ describe('PoliciesClient', () => {
   })
 
   it('confirms before deleting', async () => {
+    // try/finally, not a trailing mockRestore(). Today this test is last in the file,
+    // so a skipped restore leaks into nothing — but that is an accident of ordering,
+    // not a property, and appending a test below would make it live. See app#127.
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      render(<PoliciesClient />)
 
-    render(<PoliciesClient />)
+      await waitFor(() => {
+        expect(screen.getByText('Default Policy')).toBeInTheDocument()
+      })
 
-    await waitFor(() => {
-      expect(screen.getByText('Default Policy')).toBeInTheDocument()
-    })
+      // Expand to see delete button
+      fireEvent.click(screen.getByText('Default Policy'))
 
-    // Expand to see delete button
-    fireEvent.click(screen.getByText('Default Policy'))
+      await waitFor(() => {
+        expect(screen.getByText('Delete')).toBeInTheDocument()
+      })
 
-    await waitFor(() => {
-      expect(screen.getByText('Delete')).toBeInTheDocument()
-    })
+      fireEvent.click(screen.getByText('Delete'))
 
-    fireEvent.click(screen.getByText('Delete'))
-
-    expect(confirmSpy).toHaveBeenCalled()
-    confirmSpy.mockRestore()
+      expect(confirmSpy).toHaveBeenCalled()
+    } finally {
+      confirmSpy.mockRestore()
+    }
   })
 })
