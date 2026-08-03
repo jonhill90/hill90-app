@@ -120,12 +120,78 @@ function BrowserView({ threadId, active }: { threadId: string; active: boolean }
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scrollAccRef = useRef({ x: 0, y: 0 })
 
+  /*
+   * BrowserView is rendered from SessionPane with no `key` (see the render below),
+   * SessionPane from ChatView with no `key`, and ChatLayout from
+   * app/chat/[threadId]/page.tsx with no `key`. So navigating /chat/A → /chat/B
+   * changes `threadId` WITHOUT remounting: every useState above survives the
+   * switch, and so does any request already in flight.
+   *
+   * That is two separate faults, and neither one closes the other:
+   *
+   *   1. A LATE RESPONSE from the thread you left lands on the thread you are
+   *      looking at. Bounded by the ref guard in refreshScreenshot.
+   *   2. The new thread INHERITS the previous thread's values, with no late
+   *      response involved at all. Bounded by the reset below.
+   *
+   * Neither is cosmetic. `urlInput` is not a display field — it is the body of a
+   * write: handleNavigate POSTs it to /api/chat/${threadId}/browser-navigate, the
+   * thread you are on now. So a value carried over from A navigates B's browser.
+   * This is the same shape as app#181.
+   *
+   * A `key={threadId}` on the render would fix both in one line. It is not taken
+   * deliberately: it would also discard `viewMode` and `filter` on every thread
+   * switch, which is a UX change smuggled in as a bug fix, and a fix that quietly
+   * changes behaviour is how the next person learns not to trust our fixes.
+   */
+
+  /** The thread whose response is allowed to write state. Read at response time. */
+  const currentThreadId = useRef(threadId)
+  useEffect(() => { currentThreadId.current = threadId }, [threadId])
+
+  /*
+   * FAULT 2 — INHERITANCE. Adjusting state during render when a prop changes is
+   * React's documented pattern for exactly this, and it is done here rather than
+   * in an effect so nothing ever paints with the previous thread's values.
+   *
+   * Without it, switching to a thread whose browser is NOT active leaves the URL
+   * box holding the previous thread's URL indefinitely: refreshScreenshot returns
+   * at the 404 below without touching it, so the new thread's first poll never
+   * overwrites what it inherited. No race is required to reach that state.
+   *
+   * And nothing on screen says so, because `screenshot` is inherited too: the
+   * `if (error && !screenshot)` branch below is the one that would have announced
+   * "Browser not active", and the retained screenshot suppresses it. The new
+   * thread renders the old thread's page, under the old thread's URL, with no
+   * error — and that URL is one Enter key away from being POSTed to this thread.
+   *
+   * Only thread-derived state is cleared. `takeControl` and `describeMode` are the
+   * user's own mode, not the thread's data, and are deliberately left alone.
+   */
+  const [renderedThreadId, setRenderedThreadId] = useState(threadId)
+  if (renderedThreadId !== threadId) {
+    setRenderedThreadId(threadId)
+    setScreenshot(null)
+    setUrl(null)
+    setUrlInput('')
+    setError(null)
+    setSelectedElement(null)
+    setPopoverPos(null)
+  }
+
   const refreshScreenshot = useCallback(async () => {
+    // FAULT 1 — LATE RESPONSE. Captured now, compared against the ref after each
+    // await. Comparing against `threadId` instead would be useless: this closure
+    // was built for one thread and closes over that value.
+    const requestedThreadId = threadId
+    const stillCurrent = () => currentThreadId.current === requestedThreadId
     try {
       const res = await fetch(`/api/chat/${threadId}/screenshot`)
+      if (!stillCurrent()) return
       if (res.status === 404) { setError('Browser not active'); return }
       if (!res.ok) { setError(`Screenshot failed (${res.status})`); return }
       const data = await res.json()
+      if (!stillCurrent()) return
       if (data.screenshot) {
         setScreenshot(data.screenshot)
         setUrl(data.url || null)
@@ -137,6 +203,7 @@ function BrowserView({ threadId, active }: { threadId: string; active: boolean }
         setError(data.error || 'No screenshot available')
       }
     } catch {
+      if (!stillCurrent()) return
       setError('Failed to fetch screenshot')
     }
   }, [threadId])
