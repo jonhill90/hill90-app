@@ -2681,3 +2681,47 @@ investigation.
 
 **Nothing was disabled, retried or quarantined; production files remain byte-identical to
 `main`.**
+
+## Correction, same day: the identity guard had a false positive, and CI caught it
+
+**The guard was verified against half A and shipped. CI failed on the full suite.**
+
+```
+● terminal websocket handshake › lets an allowed origin ... THROUGH both security gates
+  NO STAMP  HTTP/1.1 404 Not Found  from 127.0.0.1:34753
+● terminal websocket handshake › REFUSES a cross-origin handshake
+  NO STAMP  HTTP/1.1 403 Forbidden  from 127.0.0.1:42587
+```
+
+Those are **our own responses.** A websocket upgrade rejection is written by `ws` straight to
+the socket and never passes through `http.ServerResponse`, so it cannot be stamped. The guard
+called our own app a stranger.
+
+**The local verification missed it because it ran half A, and those tests are in half B.** The
+instrument was controlled — three cases, all passing — and still shipped a defect, because the
+control covered the cases I had thought of. That is the fifth instrument failure in this
+investigation and the first found by CI rather than by a control.
+
+**Fix:** a missing stamp is a violation only when the responder is on a port **this process
+never bound**. Our own listeners are recorded via `net.Server.prototype.listen`; a foreign
+daemon is on a port we never bound, `ws` is not.
+
+Re-controlled in both directions, the second case deliberately in **another process** so its
+port cannot be in our set:
+
+```
+✓ OUR unstampable response (ws-style raw write on OUR port) must NOT fire
+✕ CONTROL: a stranger in ANOTHER process must still fail this test
+     NO STAMP  HTTP/1.1 501 Not Implemented  Server: websocket-sharp/1.0
+```
+
+And verified against **the full suite this time**, which is what CI runs:
+
+```
+Test Suites: 61 passed, 61 total
+Tests:       786 passed, 786 total
+```
+
+**The lesson worth keeping:** "positive-controlled" means the control covered the cases the
+author imagined. Half A was a convenient corpus for fourteen rounds of hunting and a bad
+corpus for validating a global guard, and nothing in the process flagged the difference.

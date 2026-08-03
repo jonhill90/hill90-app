@@ -28,6 +28,23 @@ const HEADER = 'x-test-app-id';
 let stampValue = ID;                 // overridable by the control only
 const violations = [];
 
+// PORTS THIS PROCESS LISTENS ON.
+//
+// Not every response our own app writes goes through http.ServerResponse. The
+// terminal websocket handshake tests reject an upgrade from inside `ws`, which
+// writes `HTTP/1.1 403 Forbidden` straight to the socket — legitimately ours, and
+// unstampable. CI caught this as a false NO STAMP; the local check missed it
+// because those tests are in half B and the verification ran half A.
+//
+// So a missing stamp is only a violation when the responder is not one of OUR
+// listeners. A foreign daemon is on a port we never bound; `ws` is not.
+const ourPorts = new Set();
+const origListen = net.Server.prototype.listen;
+net.Server.prototype.listen = function (...a) {
+  this.once('listening', () => { try { const p = (this.address() || {}).port; if (p) ourPorts.add(p); } catch (e) {} });
+  return origListen.apply(this, a);
+};
+
 // --- server side: stamp every response this worker writes ---------------------
 const origWriteHead = http.ServerResponse.prototype.writeHead;
 http.ServerResponse.prototype.writeHead = function (...a) {
@@ -56,6 +73,8 @@ net.Socket.prototype.connect = function (...a) {
     const m = new RegExp(`^${HEADER}:[ \\t]*(.+)$`, 'im').exec(head);
     const statusLine = head.split('\r\n')[0];
     if (!m) {
+      // Ours but unstampable (a ws upgrade rejection) — not a violation.
+      if (ourPorts.has(sk.remotePort)) return;
       violations.push({ kind: 'NO STAMP', statusLine, port: sk.remotePort, head: head.slice(0, 300) });
     } else if (m[1].trim() !== ID) {
       violations.push({ kind: 'FOREIGN STAMP', got: m[1].trim(), expected: ID, statusLine, port: sk.remotePort });
