@@ -2,6 +2,7 @@ import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
+import { observeTextTiming } from './support/flake-capture'
 
 // Mock next/link
 vi.mock('next/link', () => ({
@@ -213,8 +214,19 @@ describe('DashboardClient', () => {
     // Running both makes their DISAGREEMENT the signal:
     //   sync fails, async passes -> the race is real
     //   both fail                -> the data is genuinely absent, the query is innocent
-    expect(await screen.findByText('Scout')).toBeInTheDocument()
-    expect(screen.getByText('Scout')).toBeInTheDocument()
+    // #117. This REPLACES the findByText/getByText pair that used to sit here.
+    // `await findByText` waits for late data, so a race that would have failed
+    // this test now passes it — which suppresses the very failure we are waiting
+    // to read. observeTextTiming fails on exactly the same condition the bare
+    // getByText did, and additionally records WHY: it looks again for 1.5s and
+    // says whether the text arrived late or never came, writing the DOM and the
+    // fetch calls to test-artifacts/ for CI to collect.
+    await observeTextTiming('Scout', 'dashboard-active-agents', {
+      context: () => ({
+        fetchCalls: mockFetch.mock.calls.map((c) => String(c[0])),
+        fetchCallCount: mockFetch.mock.calls.length,
+      }),
+    })
     // Only running agents should appear
     expect(screen.queryByText('Builder')).not.toBeInTheDocument()
     expect(screen.queryByText('Watcher')).not.toBeInTheDocument()
@@ -253,13 +265,22 @@ describe('DashboardClient', () => {
   })
 
   it('renders recent chat threads widget', async () => {
+    // The second #117 victim, and until now the one that could tell us nothing:
+    // it had no paired assertion, so a failure showed only that it failed.
     render(<DashboardClient session={MOCK_SESSION as any} />)
 
     await waitFor(() => {
       expect(screen.getByText('Recent Chats')).toBeInTheDocument()
     })
 
-    expect(screen.getByText('Deploy discussion')).toBeInTheDocument()
+    // The second #117 victim, and until now the one that could say nothing: it
+    // had no discriminator at all. Same treatment as 'Scout' above.
+    await observeTextTiming('Deploy discussion', 'dashboard-recent-chats', {
+      context: () => ({
+        fetchCalls: mockFetch.mock.calls.map((c) => String(c[0])),
+        fetchCallCount: mockFetch.mock.calls.length,
+      }),
+    })
     expect(screen.getByText('Untitled thread')).toBeInTheDocument()
     expect(screen.getByText('Looks good, ship it')).toBeInTheDocument()
     // Agent prefix for agent messages
