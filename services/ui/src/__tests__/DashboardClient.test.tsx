@@ -199,6 +199,21 @@ describe('DashboardClient', () => {
       expect(screen.getByText('Active Agents')).toBeInTheDocument()
     })
 
+    // TWO ASSERTIONS ON PURPOSE — see docs/decisions/api-suite-flakiness.md, issue #117.
+    //
+    // This test fails intermittently in CI with "Unable to find an element with the
+    // text: Scout" and has never reproduced locally (~40 runs across four emulated CI
+    // conditions). The synchronous query below is a candidate cause: it sits outside
+    // the waitFor that guards 'Active Agents' above, so it races the render if Scout
+    // arrives a tick later.
+    //
+    // The sync assertion is DELIBERATELY KEPT. Replacing it with findByText would very
+    // likely turn CI green while teaching nothing — indistinguishable from the flake
+    // not occurring, which is the failure mode this repository has spent a day closing.
+    // Running both makes their DISAGREEMENT the signal:
+    //   sync fails, async passes -> the race is real
+    //   both fail                -> the data is genuinely absent, the query is innocent
+    expect(await screen.findByText('Scout')).toBeInTheDocument()
     expect(screen.getByText('Scout')).toBeInTheDocument()
     // Only running agents should appear
     expect(screen.queryByText('Builder')).not.toBeInTheDocument()

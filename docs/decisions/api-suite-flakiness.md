@@ -2765,7 +2765,15 @@ process**:
 
 Full suite still passes with the ws case unaffected: **62 suites, 788 tests**.
 
-## The 401 classification: not yet possible, and why
+## The 401 classification, first reading — SUPERSEDED, and its runs later discarded
+
+> **Read the next section instead.** This was written at 19 runs. Those 19 are part of the
+> batch that the following section discards as contaminated — the branch was switched
+> underneath it, so its runs did not all execute the same code. **The count below is not
+> usable.** The conclusion it reached happens to have survived at 42 runs, but it survived on
+> the later corpus, not this one, and a number that came from a discarded batch should not be
+> quoted from here. Kept visible rather than deleted, because a retracted reading is evidence
+> about how the investigation went.
 
 Nineteen runs of half A with the probe live produced **one failure, and it was a 501**, not a
 401. Every probe row so far comes from tests that assert 401 deliberately —
@@ -2966,3 +2974,33 @@ It remains consistent with the observed error and unsupported by any measurement
 
 Fifth time today that declining to resolve something the evidence did not resolve was the
 correct call, and it cost one section.
+
+## The paired assertion is now in the tree
+
+`DashboardClient.test.tsx` asserts `Scout` **twice** — `findByText` and then the original
+`getByText` — with the sync one deliberately kept. Replacing it would very likely turn CI green
+while teaching nothing, which is indistinguishable from the flake not occurring.
+
+Running both makes their **disagreement** the signal:
+
+- sync fails while async passes → the race is real, and the query style is the cause
+- both fail → the data is genuinely absent and the query style is innocent
+
+Neither outcome changes behaviour, and neither can be mistaken for the flake having gone away.
+Passes locally, 11/11, as expected — locally it always did.
+
+## Why the discipline is worth its cost, in the only currency that matters
+
+Stated plainly because it is the argument for everything above:
+
+> **Refusing to resolve what the evidence did not resolve cost one section, and saved a fifth
+> wrong mechanism.**
+
+Four had already been retracted the same day — the drained queue, express-to-express
+cross-talk, port reuse, the closing-server race — each of which had matched the symptoms,
+each of which had felt like an answer. The fifth would have been the line-202 race, declared
+on a green CI run that proved nothing.
+
+One section against a wrong mechanism in the record is not a close call. And the asymmetry
+compounds: a retracted mechanism is not merely wrong, it redirects whoever reads it next, which
+is how this investigation lost several rounds to a rate that was never measuring one thing.
