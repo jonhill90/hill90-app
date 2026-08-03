@@ -112,4 +112,15 @@ afterEach(() => {
   );
 });
 
-module.exports = { __setStampForControl: (v) => { stampValue = v; }, __ID: ID };
+// __setStampForControl has existed since the guard was written, for a control
+// that was never committed. __drainViolationsForControl is its missing half: a
+// control cannot observe an afterEach throwing from inside the same test, but it
+// can read what the detector recorded and clear it before afterEach runs.
+//
+// Draining is deliberate. Leaving the entries would make the guard's own
+// afterEach throw and fail the control that just proved it works.
+module.exports = {
+  __setStampForControl: (v) => { stampValue = v; },
+  __drainViolationsForControl: () => violations.splice(0, violations.length),
+  __ID: ID,
+};

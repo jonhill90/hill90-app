@@ -3395,3 +3395,64 @@ green mean anything. Then wait.
 **Not** another 42 runs. This document's arithmetic puts ~300 behind a ~1% event, and 42 clean
 runs with an unproven guard is two unknowns multiplied together.
 
+## OBSERVED: a foreign responder producing a spurious failure in a sibling worker
+
+**Provenance, stated first because it governs what this is worth: I built the responder.**
+This is not evidence that the mechanism occurs naturally. It is evidence that the mechanism is
+**real rather than theoretical**, and that the `NO STAMP` arm of `jest.identityguard.js` is
+**live** — it fired unprompted, on a genuine foreign responder, in a worker that had done
+nothing wrong.
+
+### What happened
+
+While building a committed control for the guard, arm C spawned a child process that bound an
+**ephemeral** port and answered raw `HTTP/1.1 501`. Running the full suite:
+
+```
+without that file:   75 suites, 853 tests, all pass
+with it:             routes-notifications.test.ts FAILS
+that file alone:     11/11 pass
+```
+
+Supertest in a sibling jest worker allocated from the same ephemeral range, collided with the
+child, received its raw 501, and the guard in **that** worker reported `NO STAMP`. Nobody
+arranged the collision; it was a side effect.
+
+### Why it matters, and exactly how far it goes
+
+Until now the sibling-worker/foreign-responder mechanism was **demonstrated capable** — the
+guard's hand-forced control produced a spurious 401 — but **never observed** outside a
+deliberate arrangement. This is the first time in the investigation that a foreign responder has
+been seen turning an unrelated test red in a real run.
+
+What it establishes:
+
+- the `NO STAMP` arm works in a real parallel run, not only when forced;
+- a raw responder on the ephemeral range **does** reach sibling workers in this suite, which is
+  the transport step the daemon hypothesis needs and which had never been shown;
+- the failure it produces looks exactly like the recorded class: an unrelated test, a wrong
+  status, no crash.
+
+What it does **not** establish: that this happens without someone planting a listener. The
+observed responder was mine. `LogiPluginService` remains the only naturally-occurring instance,
+and it explains the 501 class only — runs 26 and 45 had zero foreign responses.
+
+### The control itself is NOT in the tree, and why
+
+Arm C cannot currently be shipped. Both available approaches fail for opposite reasons:
+
+- **in-process** — the guard records every port this process opens in `ourPorts` and correctly
+  suppresses a missing stamp from one of them, so an in-process raw server proves nothing;
+- **out-of-process** — a faithful model of a rogue listener, running inside the suite it models,
+  **is** a rogue listener. Binding an ephemeral port turned the suite red. Moving to a fixed port
+  below the ephemeral range (19501) still destabilised it — 3 failures on one run, 59 on the
+  next — for reasons not yet diagnosed.
+
+Teardown was verified and is not the cause: zero leaked listeners after a normal run and after a
+deliberately thrown test. The collision happens while the child is legitimately alive.
+
+**Arms A (OURS) and B (FOREIGN STAMP) are controlled and pass.** Arm C — the arm with a known
+history of breaking twice, and the one modelling the only responder observed in the wild —
+remains unproven, and is handed over rather than shipped green. A control covering two of three
+arms on this guard would be worse than none.
+
