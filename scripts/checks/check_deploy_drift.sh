@@ -77,14 +77,34 @@ LABEL="${LABEL:-hill90-app}"
 # merged and can never be "undeployed".
 DEPLOYABLE_PREFIXES="${DEPLOYABLE_PREFIXES:-services/ deploy/compose/ platform/ scripts/ infra/secrets/}"
 
+# --------------------------------------------------------------- revisions ---
+# What each RUNNING container was created from, as `name=sha` pairs, supplied by
+# the caller which reads them over ssh:
+#
+#   docker inspect app-api --format '{{index .Config.Labels "com.hill90.revision"}}'
+#
+# This is the half the checkout comparison cannot do. A deploy resets the whole
+# checkout but rebuilds ONE stack, so the checkout can be current while a
+# service runs code several commits old — which is exactly what happened on
+# 2026-08-03 and what this alarm reported as the goal state (#158).
+#
+# Empty means the caller could not read any, which is reported and never treated
+# as agreement.
+CONTAINER_REVISIONS="${CONTAINER_REVISIONS:-}"
+
 say()  { printf '%s\n' "$*"; }
 fail() { printf '::error::%s\n' "$*" >&2; }
 
 say "Deploy drift — ${LABEL}"
 say "=============================================="
-say "  SCOPE: compares the git CHECKOUT on the host against ${TARGET_REF}."
-say "         Does NOT inspect any container image, so it cannot tell you"
-say "         which commit a running service was built from. See issue #158."
+if [ -n "$CONTAINER_REVISIONS" ]; then
+    say "  SCOPE: compares the git CHECKOUT on the host against ${TARGET_REF}, AND"
+    say "         the revision each running container was created from."
+else
+    say "  SCOPE: compares the git CHECKOUT on the host against ${TARGET_REF}."
+    say "         No container revisions were supplied, so nothing is known about"
+    say "         which commit a running service was built from. See issue #158."
+fi
 say ""
 
 # ---------------------------------------------------------------- unknown ---
@@ -120,12 +140,85 @@ if [ "$ahead" -gt 0 ]; then
     exit 1
 fi
 
+# ------------------------------------------------ what is actually RUNNING ---
+# The checkout comparison above is necessary and not sufficient. This is the
+# part that answers the question the alarm's name implies.
+running_fail=0
+if [ -z "$CONTAINER_REVISIONS" ]; then
+    say ""
+    say "  RUNNING CONTAINERS: not reported."
+    say "  No revision stamps were supplied, so nothing was compared about running"
+    say "  code. That is UNKNOWN, not agreement."
+else
+    say ""
+    say "  RUNNING CONTAINERS:"
+    # Split on NEWLINES, not whitespace. `docker inspect --format` prints
+    # `<no value>` for a missing label — a value containing a space — and
+    # word-splitting tore that into two bogus entries, one of which looked like a
+    # container called `value>`. The format is one `name=revision` per line.
+    while IFS= read -r pair; do
+        [ -n "$pair" ] || continue
+        cname="${pair%%=*}"
+        crev="${pair#*=}"
+
+        # Anything that is not a hex object name is not a revision. Validating the
+        # SHAPE rather than listing known placeholders means a new placeholder
+        # cannot be mistaken for a commit.
+        if ! printf '%s' "$crev" | grep -qE '^[0-9a-f]{7,40}$'; then
+            say "    ${cname}: UNSTAMPED — created before the stamp existed, or by hand."
+            say "      Not a pass. Nothing is known about this container's code."
+            running_fail=1
+            continue
+        fi
+
+        if ! git rev-parse --verify --quiet "${crev}^{commit}" >/dev/null; then
+            say "    ${cname}: revision ${crev:0:12} is not a commit in this repository."
+            running_fail=1
+            continue
+        fi
+
+        cbehind=$(git rev-list --count "${crev}..${target_sha}" 2>/dev/null || echo 0)
+        if [ "$cbehind" -eq 0 ]; then
+            say "    ${cname}: ${crev:0:12} — current with ${TARGET_REF}"
+        else
+            say "    ${cname}: ${crev:0:12} — ${cbehind} commit(s) behind ${TARGET_REF}"
+            # Only a commit touching a DEPLOYABLE path can matter to a container,
+            # for the same reason the checkout rule uses that filter.
+            n_dep=0
+            for sha in $(git rev-list "${crev}..${target_sha}"); do
+                files=$(git show --name-only --format="" "$sha")
+                for prefix in $DEPLOYABLE_PREFIXES; do
+                    if printf '%s\n' "$files" | grep -q "^${prefix}"; then
+                        n_dep=$((n_dep+1)); break
+                    fi
+                done
+            done
+            if [ "$n_dep" -gt 0 ]; then
+                say "      ${n_dep} of them touch deployable paths — this container is running OLD CODE."
+                running_fail=1
+            else
+                say "      none touch a deployable path"
+            fi
+        fi
+    done < <(printf '%s\n' "$CONTAINER_REVISIONS" | tr ' ' '\n' | grep -F '=' || true)
+fi
+
+if [ "$running_fail" -ne 0 ]; then
+    fail "RUNNING CODE IS BEHIND for ${LABEL}: at least one container is running code older than ${TARGET_REF}, or could not be identified. The host checkout may well be current — that is the gap #158 is about, and it is why this check no longer stops at the checkout."
+    exit 1
+fi
+
 # ---------------------------------------------------------------- in sync ---
 if [ "$deployed_sha" = "$target_sha" ]; then
-    say "  PASS: the host checkout matches ${TARGET_REF}."
-    say "  NOT CHECKED: which commit each container was built from. A deploy"
-    say "  resets the whole checkout but rebuilds ONE stack, so a service can be"
-    say "  running older code while this line is green."
+    if [ -n "$CONTAINER_REVISIONS" ]; then
+        say "  Checkout matches ${TARGET_REF}. Container revisions are checked below."
+    else
+        say "  PASS: the host checkout matches ${TARGET_REF}."
+        say "  NOT CHECKED: which commit each container was built from — no"
+        say "  revision stamps were supplied."
+        say "  A deploy resets the whole checkout but rebuilds ONE stack, so a"
+        say "  service can be running older code while this line is green."
+    fi
     exit 0
 fi
 

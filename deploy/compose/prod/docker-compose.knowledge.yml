@@ -64,6 +64,9 @@ services:
       retries: 3
       start_period: 10s
     labels:
+      # Which commit this container was created from. Nothing else on the
+      # host can answer that — see #158. Set by scripts/deploy.sh.
+      - "com.hill90.revision=${DEPLOY_REVISION:-unstamped}"
       - "traefik.enable=false"
     mem_limit: 512m
     cpus: 1.0

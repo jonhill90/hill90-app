@@ -52,6 +52,9 @@ services:
       timeout: 10s
       retries: 3
     labels:
+      # Which commit this container was created from. Nothing else on the
+      # host can answer that — see #158. Set by scripts/deploy.sh.
+      - "com.hill90.revision=${DEPLOY_REVISION:-unstamped}"
       - "traefik.enable=true"
       - "traefik.http.routers.app-mcp.rule=Host(`${AI_HOST:-ai}.${BASE_DOMAIN:-hill90.com}`) && PathPrefix(`/mcp`)"
       - "traefik.http.routers.app-mcp.entrypoints=${PUBLIC_ENTRYPOINT:-websecure}"
