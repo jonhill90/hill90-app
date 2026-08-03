@@ -39,9 +39,18 @@ const violations = [];
 // So a missing stamp is only a violation when the responder is not one of OUR
 // listeners. A foreign daemon is on a port we never bound; `ws` is not.
 const ourPorts = new Set();
+// A port is ours only WHILE WE HOLD IT. This set was append-only in the first
+// version, and that silently reopened the hole it was added to close: supertest
+// binds and closes an ephemeral port per request, the OS returns it to the pool,
+// and the foreign daemon can then answer on the same number later in the run. The
+// guard treated that stranger as ours and stayed silent on a 501 that reached a
+// test — observed in a real failing run, seventh instrument failure in this
+// investigation. Removing on close is what makes "ours" mean currently-held.
 const origListen = net.Server.prototype.listen;
 net.Server.prototype.listen = function (...a) {
-  this.once('listening', () => { try { const p = (this.address() || {}).port; if (p) ourPorts.add(p); } catch (e) {} });
+  const srv = this;
+  srv.once('listening', () => { try { const p = (srv.address() || {}).port; if (p) { srv.__ourPort = p; ourPorts.add(p); } } catch (e) {} });
+  srv.once('close', () => { try { if (srv.__ourPort) ourPorts.delete(srv.__ourPort); } catch (e) {} });
   return origListen.apply(this, a);
 };
 

@@ -2725,3 +2725,61 @@ Tests:       786 passed, 786 total
 **The lesson worth keeping:** "positive-controlled" means the control covered the cases the
 author imagined. Half A was a convenient corpus for fourteen rounds of hunting and a bad
 corpus for validating a global guard, and nothing in the process flagged the difference.
+
+## Correction 2: the identity guard's own fix reopened the hole it closed
+
+**Observed in a real failing run, not in a control.** Half A run 7 failed with
+`Expected: 409 / Received: 501` and `Expected: 201 / Received: 501` — the foreign-daemon
+signature — and the guard printed **nothing**:
+
+```
+IDENTITY VIOLATION in run 7: 0
+```
+
+**Seventh instrument failure in this investigation.** Treated as an instrument problem first,
+as it should be.
+
+**Cause.** The websocket false-positive fix suppressed a missing stamp when the responder was
+on a port "we bound". That set was **append-only**. supertest binds and closes an ephemeral
+port per request, the OS returns the number to the pool, and the daemon can answer on the same
+number later in the same run — at which point the guard classified a stranger as ours and went
+quiet. The fix for one blind spot created another.
+
+**Fix:** a port is ours only *while held*. `ourPorts` now deletes on `close`.
+
+**And the first control for the fix was invalid**, which is worth recording because it passed:
+
+```
+✓ a stranger on a port WE PREVIOUSLY HELD must still be caught      <- WRONG, should fail
+```
+
+The "stranger" was created in **our own process**, and the guard wraps
+`net.Server.prototype.listen` globally — so the stranger's own `listen` re-registered its port
+as ours. A same-process stranger cannot be a stranger. Redone with the responder in a **child
+process**:
+
+```
+✕ a stranger on a port WE PREVIOUSLY HELD must still be caught
+     NO STAMP  HTTP/1.1 501 Not Implemented  Server: websocket-sharp/1.0
+```
+
+Full suite still passes with the ws case unaffected: **62 suites, 788 tests**.
+
+## The 401 classification: not yet possible, and why
+
+Nineteen runs of half A with the probe live produced **one failure, and it was a 501**, not a
+401. Every probe row so far comes from tests that assert 401 deliberately —
+`Cross-auth boundary AB-1/AB-2` (Ed25519, `invalid algorithm`) and the
+`Missing or invalid Authorization header` negative tests.
+
+**So no spurious 401 has been captured, and none of the four candidates can be assigned yet.**
+The probe fires correctly; what it fires on is intentional. A spurious 401 is only identifiable
+by correlating with a *failing* assertion, and at roughly 1% per run that needs ~300.
+
+**A caveat for whoever reads the probe output:** it cannot distinguish an intended 401 from a
+spurious one on its own. That is not a defect — it is why the `auth.ts` cause-preservation
+matters more than the probe: a spurious 401 in CI now names its own cause in the log without
+anyone running a batch.
+
+**Nothing was disabled, retried or quarantined; the guard's behaviour on legitimate traffic is
+unchanged.**
