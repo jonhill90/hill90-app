@@ -1291,13 +1291,55 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     const streams: NodeJS.ReadableStream[] = [];
     const buffers = new Map<string, string>();
 
+    /*
+     * HERE THE HOLE MULTIPLIES BY THE NUMBER OF AGENTS IN THE THREAD.
+     *
+     * The loop below awaits `execInContainer` once per running agent —
+     * MAX_AGENTS_PER_GROUP is 8. `cleanup`, which destroys them, used to be
+     * registered AFTER the whole loop, so a client that went away at agent 3 of 8
+     * emitted 'close' with no destroying listener attached. 'close' is not
+     * replayed, so the listener registered afterwards never fired and every stream
+     * the loop had opened — and every one it went on to open — ran `tail -f` for
+     * the life of the process.
+     *
+     * TWO CONDITIONS, AND THE SECOND MATTERS MORE HERE THAN ON THE AGENT ROUTES.
+     * Registering cleanup first (below) bounds the damage to streams already
+     * created. Checking `closed` at the TOP OF EACH ITERATION is what stops the
+     * loop opening seven more for a client that has gone: destroying eight streams
+     * that should never have been opened is a leak fixed and the work still wasted.
+     *
+     * The comment that used to sit below this loop already named the hazard —
+     * "the container-stream setup above contains awaits during which 'close' can
+     * arrive unobserved" — and then registered the listener after them anyway.
+     * `closed` guarded the timers; nothing guarded the streams.
+     */
+    let closed = false;
+    let messageRefreshInterval: ReturnType<typeof setInterval> | null = null;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    const cleanup = () => {
+      closed = true;
+      if (messageRefreshInterval) { clearInterval(messageRefreshInterval); messageRefreshInterval = null; }
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+      for (const stream of streams) {
+        (stream as any).destroy?.();
+      }
+      streams.length = 0;
+    };
+    req.on('close', cleanup);
+
     for (const agent of runningAgents) {
+      // The client is already gone: stop, rather than opening the rest of the
+      // thread's streams so that cleanup can immediately destroy them.
+      if (closed) break;
       try {
         const stream = await execInContainer(agent.agent_id, [
           'tail', '-f', '-n', String(tail), '/var/log/agentbox/events.jsonl',
         ]);
         streams.push(stream);
         buffers.set(agent.agent_id, '');
+        // 'close' arrived during THIS exec, so cleanup ran before this stream was
+        // pushed and did not see it.
+        if (closed) { (stream as any).destroy?.(); break; }
 
         stream.on('data', (chunk: Buffer) => {
           if (res.writableEnded || res.destroyed) return;
@@ -1340,22 +1382,8 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
       }
     }
 
-    // Same leak, same shape as /threads/:id/stream above — see the long comment there.
-    // The listener is registered before the timers exist and `closed` stops them being
-    // created for a client that has already gone, because the container-stream setup
-    // above contains awaits during which 'close' can arrive unobserved.
-    let closed = false;
-    let messageRefreshInterval: ReturnType<typeof setInterval> | null = null;
-    let heartbeat: ReturnType<typeof setInterval> | null = null;
-    const cleanup = () => {
-      closed = true;
-      if (messageRefreshInterval) { clearInterval(messageRefreshInterval); messageRefreshInterval = null; }
-      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
-      for (const stream of streams) {
-        (stream as any).destroy?.();
-      }
-    };
-    req.on('close', cleanup);
+    // Cleanup and the `closed` flag are declared ABOVE the stream loop — see the
+    // comment there. Timers are still only created for a client that is still here.
 
     if (closed || res.writableEnded || res.destroyed) return;
 
