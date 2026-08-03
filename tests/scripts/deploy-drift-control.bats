@@ -113,10 +113,14 @@ setup() {
 # Measured before this was written: 32 commits on main against 7 deploys in 24
 # hours. An alarm that cannot be quiet in this repository is one that gets muted.
 
-@test "QUIET: deployed SHA equals the target" {
+@test "QUIET: checkout SHA equals the target" {
+    # This case asserted "what is running is what was merged" until #158. It was
+    # pinning the overclaim: the check compares a git SHA and never looks at a
+    # container, so that sentence asserted something it had not verified. A test
+    # that pins a wrong message keeps the message wrong.
     run env DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"what is running is what was merged"* ]]
+    [[ "$output" == *"the host checkout matches"* ]]
 }
 
 @test "QUIET: old drift that touches only documentation" {
@@ -182,4 +186,89 @@ setup() {
     git branch -f origin-main main
     run env DEPLOYED_SHA="$deployed" GRACE_HOURS=4 bash "$CHECK"
     [ "$status" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# THE WORDING IS PART OF THE CHECK.
+#
+# This alarm compares ONE git SHA read from the host against origin/main. It
+# does not inspect a container image. It nevertheless printed "what is running
+# is what was merged", and on 2026-08-03 printed exactly that while two merged
+# api fixes sat in the checkout and outside the running image (#158) — the guard
+# asserting something it had not verified, which is the family it exists to
+# catch.
+#
+# So these cases pin the message, in both directions: it must say what it
+# compared, must say what it did not, and must not be readable as a statement
+# about running code.
+# ---------------------------------------------------------------------------
+
+@test "WORDING clean: says CHECKOUT, and never claims to know what is running" {
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"the host checkout matches"* ]]
+    # The exact sentence that overclaimed, and the phrasing family around it.
+    [[ "$output" != *"what is running is what was merged"* ]]
+    [[ "$output" != *"is what was merged"* ]]
+}
+
+@test "WORDING clean: carries the NOT CHECKED caveat, so coverage cannot be inferred" {
+    # A green line with no stated limit reads as a broader guarantee than it is.
+    # The caveat has to travel WITH the pass, not live only in a comment.
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOT CHECKED"* ]]
+    [[ "$output" == *"container"* ]]
+    [[ "$output" == *"rebuilds ONE stack"* ]]
+}
+
+@test "WORDING: the scope banner states the comparison before any verdict" {
+    # A reader who stops at the first two lines must still not be able to infer
+    # image coverage.
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
+    [[ "$output" == *"SCOPE: compares the git CHECKOUT"* ]]
+    [[ "$output" == *"Does NOT inspect any container image"* ]]
+}
+
+@test "WORDING drifted: says NOT IN THE HOST CHECKOUT, not 'not running'" {
+    # The same overclaim with the opposite sign. The check knows the commits are
+    # absent from the checkout; that they are not running follows, and the
+    # message may say so — but the thing it VERIFIED must be named first.
+    deployed=$(git rev-parse HEAD)
+    commit_at 9 "services/api/x.ts" "fix(api): a bound"
+    git branch -f origin-main main
+
+    run env DEPLOYED_SHA="$deployed" GRACE_HOURS=4 bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NOT IN THE HOST CHECKOUT"* ]]
+    [[ "$output" == *"They are certainly not running"* ]]
+}
+
+@test "WORDING drifted: the count line is about the checkout too" {
+    deployed=$(git rev-parse HEAD)
+    commit_at 9 "services/api/x.ts" "fix(api): a bound"
+    git branch -f origin-main main
+
+    run env DEPLOYED_SHA="$deployed" GRACE_HOURS=4 bash "$CHECK"
+    [[ "$output" == *"not in the host checkout."* ]]
+    [[ "$output" != *"merged and not deployed."* ]]
+}
+
+@test "WORDING unknown: names the checkout, and refuses to imply anything else" {
+    run env DEPLOYED_SHA= bash "$CHECK"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"no checkout SHA was supplied"* ]]
+    [[ "$output" == *"neither the checkout nor anything running"* ]]
+}
+
+@test "CONTROL: the wording assertions can fail — they are not matching everything" {
+    # Every case above is a string match, and a string match that is always true
+    # proves nothing. Each phrase pinned here is absent from a deliberately
+    # different message.
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" bash "$CHECK"
+    # the clean run must NOT carry the drifted vocabulary...
+    [[ "$output" != *"NOT IN THE HOST CHECKOUT"* ]]
+    [[ "$output" != *"no checkout SHA was supplied"* ]]
+    # ...and must not accidentally match a phrase nothing emits.
+    [[ "$output" != *"verified the running image"* ]]
 }
