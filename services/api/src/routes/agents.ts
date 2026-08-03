@@ -20,6 +20,7 @@ import {
   resolveAgentNetwork,
 } from '../services/docker';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
+import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import {
   generateAgentAkmToken,
   getAkmEnvVars,
@@ -1668,12 +1669,6 @@ async function getRecentInference(
   return rows.reverse(); // Oldest first
 }
 
-// The most log lines and inference rows one request may ask for. Both
-// /:id/events and /:id/events/export read `?tail=` and feed it to `tail -n` and
-// to a SQL LIMIT, so the bound belongs in one place rather than in two literals
-// that already disagreed once.
-const MAX_EVENT_TAIL = 5000;
-
 // Get agent events (structured activity timeline)
 router.get('/:id/events', requireRole('user'), async (req: Request, res: Response) => {
   try {
@@ -2030,7 +2025,10 @@ router.get('/:id/logs', requireRole('admin'), async (req: Request, res: Response
     }
 
     const agent = rows[0];
-    const tail = parseInt(req.query.tail as string) || 200;
+    // Clamped like its siblings. The read is already byte-capped by
+    // collectBounded, so this bounds the ask rather than the damage — but an
+    // unclamped literal here is how the drift starts.
+    const tail = Math.min(parseInt(req.query.tail as string) || 200, MAX_EVENT_TAIL);
     const follow = req.query.follow === 'true';
     const search = (req.query.search as string) || undefined;
     const since = (req.query.since as string) || undefined;

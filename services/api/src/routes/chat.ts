@@ -20,6 +20,8 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { getPool } from '../db/pool';
+import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
+import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { requireRole } from '../middleware/role';
 import { isAdmin, getAgentElevatedScope } from '../helpers/elevated-scope';
 import { auditLog } from '../helpers/audit';
@@ -1201,7 +1203,10 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
 
     const follow = req.query.follow === 'true';
     const parsedTail = parseInt(req.query.tail as string);
-    const tail = Number.isNaN(parsedTail) ? 20 : Math.max(0, parsedTail);
+    // Ceiling as well as floor, and it matters more here than on the agents
+    // route: this reads once PER RUNNING AGENT in the thread, up to
+    // MAX_AGENTS_PER_GROUP of them, in a single request.
+    const tail = Number.isNaN(parsedTail) ? 20 : Math.max(0, Math.min(parsedTail, MAX_EVENT_TAIL));
 
     if (!follow) {
       // One-shot: collect events from all running agents, filter, return JSON
@@ -1213,20 +1218,15 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
             'tail', '-n', String(tail), '/var/log/agentbox/events.jsonl',
           ]);
 
-          const events = await new Promise<any[]>((resolve, reject) => {
-            const chunks: Buffer[] = [];
-            stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-            stream.on('end', () => {
-              const raw = Buffer.concat(chunks).toString('utf-8');
-              const parsed = raw.split('\n')
-                .map(line => line.trim())
-                .filter(line => line.length > 0)
-                .map(line => { try { return JSON.parse(line); } catch { return null; } })
-                .filter((e: any) => e !== null);
-              resolve(parsed);
-            });
-            stream.on('error', reject);
-          });
+          // Bounded as it arrives, per agent. `tail -n` limits the number of
+          // lines asked for; nothing limits how long one line is, and the agent
+          // writes this file.
+          const raw = (await collectBounded(stream)).toString('utf-8');
+          const events = raw.split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0)
+            .map(line => { try { return JSON.parse(line); } catch { return null; } })
+            .filter((e: any) => e !== null);
 
           // Correlation filter: match on top-level correlation_id or metadata.message_id
           for (const event of events) {
@@ -1236,6 +1236,17 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
             }
           }
         } catch (err) {
+          if (err instanceof ReadTooLargeError) {
+            // Refuse the request rather than continuing round the loop. Carrying
+            // on would read the next agent's log too — the multiplier is exactly
+            // what makes this route worse than its sibling — and would return a
+            // 200 whose events are silently missing one agent's worth.
+            res.status(413).json({
+              error: 'Event log too large',
+              detail: `An agent's event log exceeds the ${MAX_READ_BYTES}-byte read limit. Lower ?tail=.`,
+            });
+            return;
+          }
           console.error(`[chat-events] Failed to read events from ${agent.agent_id}:`, err);
         }
       }
