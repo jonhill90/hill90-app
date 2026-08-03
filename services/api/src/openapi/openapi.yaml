@@ -985,6 +985,13 @@ paths:
                   service:
                     type: string
                     example: api
+                  revision:
+                    type: string
+                    description: >
+                      The commit this container was built from, or "unstamped"
+                      if it predates the deploy stamp. Reported here and not on
+                      /health, which is public.
+                    example: 340d8847ab12
                   uptime_seconds:
                     type: integer
                   node_version:
