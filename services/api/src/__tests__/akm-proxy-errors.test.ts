@@ -14,6 +14,10 @@
  * replaces the real cause with a plausible-looking wrong one. Whoever debugs it next
  * loses an hour to a JSON parser.
  */
+// Module scope, not global script scope: without a top-level import or export,
+// TypeScript shares one scope across such files and identically named top-level
+// consts collide with TS2451. That fired for real between two of these files.
+export {};
 const OLD_ENV = { ...process.env };
 
 function stubFetch(status: number, body: string, contentType = 'text/plain') {

@@ -11,6 +11,19 @@
  * 2-element array with `X-Total-Count: 3`. A fixture where they match is passed
  * by a `len(rows)` implementation, which is exactly how this defect got here.
  */
+// Makes this file a MODULE rather than a global script.
+//
+// Without it, TypeScript puts every top-level `const` in one shared global
+// scope, so this file's `OLD_ENV` collided with the identically named one in
+// akm-proxy-errors.test.ts: `TS2451: Cannot redeclare block-scoped variable`.
+//
+// I shipped that collision in #190 and neither local runs nor that PR's CI
+// caught it, because it only fires when both files land in the same ts-jest
+// program — so it passed twice and then failed on an unrelated PR. The fix is
+// the scope, not the name: renaming the variable would leave the next
+// same-named pair to find this again.
+export {};
+
 const OLD_ENV = { ...process.env };
 
 function stubFetch(body: unknown, headers: Record<string, string>) {
