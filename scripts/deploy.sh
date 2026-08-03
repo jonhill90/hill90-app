@@ -541,7 +541,7 @@ To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"
     # looks identical to one that worked.
     DEPLOY_REVISION="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unstamped)"
     export DEPLOY_REVISION
-    log "revision stamp: ${DEPLOY_REVISION:0:12}"
+    info "revision stamp: ${DEPLOY_REVISION:0:12}"
 
     docker compose -p "$project_name" "${files[@]}" build --parallel
     docker compose -p "$project_name" "${files[@]}" pull --ignore-buildable
