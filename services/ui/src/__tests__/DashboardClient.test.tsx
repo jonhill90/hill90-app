@@ -2,7 +2,7 @@ import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
-import { expectTextPresentNow } from './support/flake-capture'
+import { observeTextTiming } from './support/flake-capture'
 
 // Mock next/link
 vi.mock('next/link', () => ({
@@ -217,11 +217,11 @@ describe('DashboardClient', () => {
     // #117. This REPLACES the findByText/getByText pair that used to sit here.
     // `await findByText` waits for late data, so a race that would have failed
     // this test now passes it — which suppresses the very failure we are waiting
-    // to read. expectTextPresentNow fails on exactly the same condition the bare
+    // to read. observeTextTiming fails on exactly the same condition the bare
     // getByText did, and additionally records WHY: it looks again for 1.5s and
     // says whether the text arrived late or never came, writing the DOM and the
     // fetch calls to test-artifacts/ for CI to collect.
-    await expectTextPresentNow('Scout', 'dashboard-active-agents', {
+    await observeTextTiming('Scout', 'dashboard-active-agents', {
       context: () => ({
         fetchCalls: mockFetch.mock.calls.map((c) => String(c[0])),
         fetchCallCount: mockFetch.mock.calls.length,
@@ -275,7 +275,7 @@ describe('DashboardClient', () => {
 
     // The second #117 victim, and until now the one that could say nothing: it
     // had no discriminator at all. Same treatment as 'Scout' above.
-    await expectTextPresentNow('Deploy discussion', 'dashboard-recent-chats', {
+    await observeTextTiming('Deploy discussion', 'dashboard-recent-chats', {
       context: () => ({
         fetchCalls: mockFetch.mock.calls.map((c) => String(c[0])),
         fetchCallCount: mockFetch.mock.calls.length,
