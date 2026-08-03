@@ -22,6 +22,26 @@ import {
 } from '../services/docker';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
+
+/**
+ * How often the SSE handler polls for new inference rows.
+ *
+ * 3000ms in production, and OVERRIDABLE because that number sets the floor on how
+ * long a test takes. A test that must observe one poll cannot finish in under
+ * 3s and lands near 4s, against jest's 5000ms default — about one second of
+ * margin, which docs/decisions/api-suite-flakiness.md round four measured as the
+ * reason TIMEOUT is in that suite's symptom set: "no carrier required, only a
+ * delay of more than a second from any source".
+ *
+ * The tests set it small (jest.setup.js). Production leaves it unset and gets
+ * 3000. Read once at import, so it is the process's setting, not a per-request
+ * one.
+ */
+const INFERENCE_POLL_MS = (() => {
+  const raw = parseInt(process.env.INFERENCE_POLL_MS || '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 3000;
+})();
+
 import { createBoundedSseWriter, SSE_DEFAULTS } from '../services/sse-writer';
 import {
   generateAgentAkmToken,
@@ -1772,7 +1792,6 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         });
 
         // Phase 3: inference poll
-        const INFERENCE_POLL_MS = 3000;
         const pollInterval = setInterval(async () => {
           if (res.writableEnded || res.destroyed) return;
           try {

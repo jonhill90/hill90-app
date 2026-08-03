@@ -3181,3 +3181,57 @@ report on** — which is why #117 is still unresolved, and why the next CI failu
 is worth reading carefully rather than re-running.
 
 **#117 stays open. Nothing was retried, quarantined or skipped.**
+
+---
+
+# Round twenty-one, 2026-08-03: round four's "one-second margin" does not hold in this tree
+
+Round four recorded a structural fragility and called it the reason TIMEOUT is in this
+suite's symptom set:
+
+> Forty executions sit between 3s and 4.5s against a **5000ms** ceiling. They are the SSE
+> poll tests … **The margin to jest's default timeout is about one second.**
+
+**Measured today, and the premise is false for every test that waits on that poll.** There
+are exactly two, both in `routes-agents-events.test.ts`, and both declare their own timeout:
+
+| Test | sleeps | declares | margin |
+|---|---|---|---|
+| `T8: SSE inference poll events arrive after initial container events` | 4000ms | **10000ms** | 6000ms |
+| `no duplicate inference events between SSE backfill and first poll` | 3500ms | **10000ms** | 6500ms |
+
+A scan of every `it()` in the suite for a `setTimeout` of ≥2500ms found no other test that
+waits that long, and none waiting on the poll under jest's 5000ms default. So
+`INFERENCE_POLL_MS = 3000` is not producing a one-second margin anywhere that can be found.
+
+**The likely origin of the original claim is a comparison against the default timeout without
+checking per-test overrides** — round four measured durations, not durations-minus-their-own-
+ceiling. That is worth naming because it is the same shape as several instrument errors in
+this document: a measurement that is correct about what it measured and wrong about what it
+meant.
+
+**A scan of mine was wrong first, and in the same way.** Its regex matched each test's own
+closing `}, 10000);` as if that were a sleep, so every row read `sleep=10000 timeout=10000
+margin=0` — eleven "findings", all artefacts of the instrument. It was rewritten to brace-match
+each `it()` call and take sleeps only from `setTimeout(...)`, then validated against the two
+tests read by hand.
+
+## What changed, and what it is worth
+
+`INFERENCE_POLL_MS` is now read from the environment (default 3000, production unchanged),
+`jest.setup.js` sets it to 50 for tests, and the two tests derive their wait from it rather
+than hardcoding 4000/3500.
+
+**This is a speed change, not a flake fix, and it is not offered as one.** The file drops from
+**11.0s to 3.1s**; the two executions that sat at 4005ms and 3518ms now sit at 555ms and 556ms.
+Roughly seven seconds of deliberate sleeping leaves each full-suite run.
+
+**No effect on the failure rate was detected, and none is claimed.** Ten runs of the file with
+the change and ten without both produced zero failures — which at this sample size cannot
+distinguish small differences and is reported as "no difference detected", not "no difference".
+The file passes alone in both arms, consistent with everything else in this document about
+needing company.
+
+**One failure was observed during this work and is not attributed to the change**: it occurred
+in a run with `LOOP_AUDIT=1` enabled, an instrument this document already records as altering
+timing. Twenty subsequent runs without the audit, ten per arm, were clean.
