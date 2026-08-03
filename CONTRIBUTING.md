@@ -110,3 +110,36 @@ evaluate true for undefined values was not — the step demonstrably skips on th
 `setup` is unset. Both were stated with equal confidence. A review comment is a lead, and this
 repository's standing rule applies to it exactly as to any other instrument: check it before
 believing it.
+
+## An instrument can be wrong in BOTH directions at once
+
+The worst instrument failure is not over-reporting or under-reporting. It is doing both in the
+same run, because the two hide each other.
+
+Measured on 2026-08-03, auditing `services/api` for fire-and-forget promise chains. A grep for
+un-awaited calls to async functions reported **three** sites:
+
+- two were **false positives** — calls sitting on their own line inside an awaited
+  `Promise.all`, which look identical to a floating call when you match line shapes;
+- and it never opened `notifications.ts`, `webhook-dispatch.ts` or `workflow-scheduler.ts` at
+  all, which between them hold **four** of the six real sites.
+
+Wrong in both directions, simultaneously. **That combination is more dangerous than either
+alone**: a reader who spot-checks one of the false positives concludes the tool over-reports,
+discounts the output, and by doing so trusts the misses. The noise buys credibility for the
+silence.
+
+Re-run with `@typescript-eslint/no-floating-promises` against the real `tsconfig.json` — an
+instrument that knows what returns a promise rather than what a line looks like — the answer was
+six sites, correctly. Same question, same repository, ten minutes apart.
+
+**The rule this adds to the three above:** when an instrument is shown to be wrong once, do not
+patch that one result and carry on. Ask which direction the error was in, then check the other
+direction explicitly, because an instrument that can invent a finding can equally well omit one,
+and you will only notice the invention.
+
+A corollary worth stating, from the same audit: **choosing the right rule matters as much as
+choosing the right tool.** `no-misused-promises` reported 191 sites in the same run — every
+`router.get('/x', async …)` in the service — all of them already safe because of the vendored
+middleware in `src/boot/async-errors.ts`. Reporting 197 would have counted a solved problem as
+an open one.
