@@ -82,19 +82,33 @@ function startProxy(exp: number) {
   });
 }
 
-/** Open a client socket and report how it ended. */
-function openAndAwaitClose(timeoutMs: number): Promise<{ code: number; reason: string } | 'STILL OPEN'> {
+type Ending = { code: number; reason: string; everOpened: boolean } | 'STILL OPEN';
+
+/**
+ * Open a client socket and report how it ended, INCLUDING whether it ever
+ * opened.
+ *
+ * That last part is not decoration. The expiry is an absolute moment, so if the
+ * handshake is slower than the margin — which happens under full-suite load, and
+ * did — the socket is refused rather than opened, and the client sees 1006 with
+ * no close frame. Asserting only on the code turns that into
+ * "expected 4002, received 1006", which reads like the fix failing rather than
+ * the test racing. Reporting `everOpened` lets the assertion say which happened.
+ */
+function openAndAwaitClose(timeoutMs: number): Promise<Ending> {
   return new Promise((resolve) => {
     const ws = new RealWebSocket(`ws://127.0.0.1:${port}${PATH}`, PROTOCOLS.split(', '), {
       headers: { origin: ORIGIN },
     });
+    let everOpened = false;
     const timer = setTimeout(() => {
       ws.close();
       resolve('STILL OPEN');
     }, timeoutMs);
+    ws.on('open', () => { everOpened = true; });
     ws.on('close', (code: number, reason: Buffer) => {
       clearTimeout(timer);
-      resolve({ code, reason: reason.toString() });
+      resolve({ code, reason: reason.toString(), everOpened });
     });
     ws.on('error', () => { /* close still fires */ });
   });
@@ -115,15 +129,23 @@ describe('a terminal session ends when its token does', () => {
   });
 
   it('closes a session whose token expires while it is open', async () => {
-    await startProxy(inSeconds(700)); // expires in 0.7s, mid-session
+    // 3s, not 0.7s. The margin has to cover the handshake under load: at 0.7s
+    // this test failed in a full-suite run because the credential expired before
+    // the socket opened, so the proxy refused it and the client saw 1006.
+    await startProxy(inSeconds(3000));
 
-    const ended = await openAndAwaitClose(4000);
+    const ended = await openAndAwaitClose(9000);
 
     expect(ended).not.toBe('STILL OPEN');
-    const { code, reason } = ended as { code: number; reason: string };
+    const { code, reason, everOpened } = ended as { code: number; reason: string; everOpened: boolean };
+    // If this trips, the margin above is too tight for the machine — the session
+    // was refused at the handshake, which is a different behaviour from the one
+    // under test.
+    expect(everOpened).toBe(true);
     // Not merely "it closed" — closed FOR THIS REASON. An upstream failure or a
-    // client hang-up would show a different code.
-    expect(code).toBe(4001);
+    // client hang-up would show a different code, and 4001 would mean the
+    // credential was refused rather than spent.
+    expect(code).toBe(4002);
     expect(reason.toLowerCase()).toMatch(/expired|credential/);
   }, 10000);
 

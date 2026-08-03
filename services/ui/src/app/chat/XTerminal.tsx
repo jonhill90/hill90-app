@@ -3,6 +3,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { MousePointer } from 'lucide-react'
+import { terminalCloseNotice, shouldReconnect } from './terminalClose'
 
 /** Fetch a fresh access token by hitting the session endpoint server-side. */
 async function getFreshToken(): Promise<string | null> {
@@ -170,8 +171,13 @@ export default function XTerminal({ threadId }: Props) {
       setConnected(false)
       setControlling(false)
 
-      // Don't reconnect on auth rejection or intentional close
-      if (event.code === 4001 || event.code === 1000) return
+      // A close the user should see, rather than a pane that just stops. See
+      // terminalClose.ts for why 4001 and 4002 are distinct codes.
+      const notice = terminalCloseNotice(event.code, event.reason)
+      if (notice) {
+        for (const line of notice) term.write(line)
+      }
+      if (!shouldReconnect(event.code)) return
 
       // Auto-reconnect with server-refreshed token
       if (reconnectRef.current < maxReconnects) {

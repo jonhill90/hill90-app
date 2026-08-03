@@ -169,8 +169,15 @@ async function isParticipant(threadId: string, userSub: string): Promise<boolean
  * is how a closed hole gets reopened by someone reading the comment instead of
  * the code.
  */
-/** Close code for a session cut short because its credential expired. */
-const CLOSE_CREDENTIAL_EXPIRED = 4001;
+/**
+ * Close code for a session cut short because its credential expired.
+ *
+ * NOT 4001: agentbox already closes with 4001 for "unauthorized"
+ * (services/agentbox/app/ws_terminal.py), and a client cannot act differently on
+ * two conditions that arrive as the same number. 4001 means the credential was
+ * refused; 4002 means it was good and has run out.
+ */
+const CLOSE_CREDENTIAL_EXPIRED = 4002;
 
 /**
  * setTimeout stores its delay in a signed 32-bit int. A larger value overflows
