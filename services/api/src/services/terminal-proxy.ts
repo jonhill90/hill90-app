@@ -169,9 +169,27 @@ async function isParticipant(threadId: string, userSub: string): Promise<boolean
  * is how a closed hole gets reopened by someone reading the comment instead of
  * the code.
  */
+/**
+ * Close code for a session cut short because its credential expired.
+ *
+ * NOT 4001: agentbox already closes with 4001 for "unauthorized"
+ * (services/agentbox/app/ws_terminal.py), and a client cannot act differently on
+ * two conditions that arrive as the same number. 4001 means the credential was
+ * refused; 4002 means it was good and has run out.
+ */
+const CLOSE_CREDENTIAL_EXPIRED = 4002;
+
+/**
+ * setTimeout stores its delay in a signed 32-bit int. A larger value overflows
+ * and the timer fires IMMEDIATELY — which would turn a long-lived session into
+ * one that dies at once. Anything beyond this is capped; the socket then simply
+ * outlives the cap, which is the pre-existing behaviour, not a regression.
+ */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 export function attachTerminalProxy(
   server: ReturnType<typeof import('http').createServer>,
-  verifyToken: (token: string) => Promise<{ sub: string; roles?: string[] } | null>,
+  verifyToken: (token: string) => Promise<{ sub: string; roles?: string[]; exp: number } | null>,
 ): void {
   // Only ever select the plain version subprotocol. Returning the bearer entry would
   // echo the token back in the response's Sec-WebSocket-Protocol header.
@@ -232,6 +250,22 @@ export function attachTerminalProxy(
         return;
       }
 
+      // The session may not outlive the credential that authorised it. Verified
+      // once at the handshake and then never again, a terminal is a shell that
+      // survives the token expiring, the user signing out, and their roles being
+      // revoked — held open indefinitely by the keep-alive ping below.
+      //
+      // Fails closed on a missing or spent expiry. jwt.verify already rejects an
+      // expired token upstream, so reaching here with one means the verifier does
+      // not check it; refusing is the safe reading of that, not a duplicate.
+      const expiresAtMs = typeof user.exp === 'number' ? user.exp * 1000 : NaN;
+      if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+        console.warn('[terminal-proxy] REFUSED upgrade: credential absent or already expired');
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
       // Check thread participation (admin bypass)
       const isAdmin = user.roles?.includes('admin');
       if (!isAdmin && !(await isParticipant(threadId, user.sub))) {
@@ -274,7 +308,19 @@ export function attachTerminalProxy(
           }
         }, PING_INTERVAL_MS);
 
+        // Ends the session when the credential does. Cleared in cleanupAll like
+        // the ping — an armed timer holding a reference to a closed socket is
+        // the leak class this repository has already paid for once.
+        const expiryTimer = setTimeout(() => {
+          console.log(`[terminal-proxy] Closing thread=${threadId}: credential expired`);
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.close(CLOSE_CREDENTIAL_EXPIRED, 'credential expired');
+          }
+          cleanupAll();
+        }, Math.min(expiresAtMs - Date.now(), MAX_TIMEOUT_MS));
+
         function cleanupAll() {
+          clearTimeout(expiryTimer);
           clearInterval(pingInterval);
           if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
           if (agentWs.readyState === WebSocket.OPEN) agentWs.close();

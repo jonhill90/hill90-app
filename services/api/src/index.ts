@@ -100,7 +100,9 @@ async function start() {
       // a platform admin's realm role `admin` here — and the WebSocket terminal
       // proxy is the most privileged surface in the app.
       const roles: string[] = rolesFrom(payload);
-      return { sub: payload.sub || '', roles };
+      // exp is passed through, not just checked. The proxy ends the session when
+      // the credential does; without this it had no way to know when that was.
+      return { sub: payload.sub || '', roles, exp: payload.exp };
     } catch {
       return null;
     }

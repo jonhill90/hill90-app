@@ -3,7 +3,11 @@
 .DS_Store?
 
 # Node
-node_modules/
+# No trailing slash, deliberately. `node_modules/` matches a DIRECTORY only, so
+# it does not match a SYMLINK of the same name — git records that as mode 120000,
+# a file. That gap let services/api/node_modules be committed as an absolute
+# symlink into a contributor's home directory. The bare pattern matches both.
+node_modules
 coverage/
 dist/
 *.tsbuildinfo
