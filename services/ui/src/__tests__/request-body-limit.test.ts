@@ -249,3 +249,85 @@ describe('the ceilings sit at or above the API’s own', () => {
     expect(BODY_LIMIT_JSON).toBeGreaterThan(100 * 1024)
   })
 })
+
+// ---------------------------------------------------------------------------
+// The other direction. #146 bounded what a caller can SEND; this is what the
+// API sends BACK, which every JSON proxy path buffered whole.
+// ---------------------------------------------------------------------------
+
+import {
+  readUpstreamTextLimited,
+  upstreamTooLargeResponse,
+  UpstreamTooLargeError,
+  UPSTREAM_LIMIT_JSON,
+} from '@/utils/request-body'
+
+function makeUpstream(opts: { totalBytes: number; chunkSize?: number; declared?: number | null }) {
+  const { req, state } = makeRequest(opts)
+  return { res: { headers: req.headers, body: req.body }, state }
+}
+
+describe('readUpstreamTextLimited', () => {
+  it('returns the response when it is under the limit', async () => {
+    const bytes = new TextEncoder().encode('{"ok":true}')
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(bytes); c.close() },
+    })
+    await expect(
+      readUpstreamTextLimited({ headers: { get: () => null }, body }, 1024),
+    ).resolves.toBe('{"ok":true}')
+  })
+
+  it('refuses an oversized response, counting during the read', async () => {
+    const { res } = makeUpstream({ totalBytes: 8 * 1024 * 1024, declared: null })
+    await expect(readUpstreamTextLimited(res, 1024 * 1024)).rejects.toBeInstanceOf(
+      Error,
+    )
+  })
+
+  it('stops pulling once the ceiling is crossed', async () => {
+    // Same property as the request half: refusing after buffering everything
+    // would be a report, not a limit.
+    const { res, state } = makeUpstream({
+      totalBytes: 32 * 1024 * 1024,
+      chunkSize: 64 * 1024,
+      declared: null,
+    })
+    await expect(readUpstreamTextLimited(res, 1024 * 1024)).rejects.toBeInstanceOf(Error)
+    expect(state.pulled).toBeLessThan(32 * 1024 * 1024)
+    expect(state.cancelled).toBe(true)
+  })
+
+  it('a bodiless response falls back to text() and is stated, not hidden', async () => {
+    // The unbounded branch. It exists only where there is no stream to count,
+    // and the test pins that it is reachable ONLY then.
+    const res = {
+      headers: { get: () => null },
+      body: null,
+      text: async () => 'from-text',
+    }
+    await expect(readUpstreamTextLimited(res, 1024)).resolves.toBe('from-text')
+  })
+
+  it('a bodiless response with an oversized declared length is still refused', async () => {
+    const res = {
+      headers: { get: (n: string) => (n === 'content-length' ? '99999999' : null) },
+      body: null,
+      text: async () => 'never reached',
+    }
+    await expect(readUpstreamTextLimited(res, 1024)).rejects.toBeInstanceOf(
+      UpstreamTooLargeError,
+    )
+  })
+
+  it('answers 502, not 413 and not an empty 200', async () => {
+    // 502 because an oversized response is not the caller's fault and no smaller
+    // request exists. An empty 200 would tell a user their data is gone.
+    const r = upstreamTooLargeResponse(new UpstreamTooLargeError(UPSTREAM_LIMIT_JSON))
+    expect(r.status).toBe(502)
+    const b = await r.json()
+    expect(b.error).toMatch(/upstream/i)
+    expect(b.detail).toMatch(/not been truncated/i)
+    expect(r.headers.get('Cache-Control')).toBe('private, no-store')
+  })
+})
