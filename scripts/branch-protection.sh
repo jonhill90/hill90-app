@@ -21,6 +21,29 @@
 
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# AN INSTRUMENT TRAP, recorded here because the next person will hit it.
+#
+# This does NOT work, and does not error either:
+#
+#     gh api -X PATCH repos/OWNER/REPO/branches/main/protection/required_status_checks \
+#       -f strict=false -f 'contexts[]=some-check'
+#
+# `-f` form-encodes, and that endpoint wants a JSON body. The call reports
+# success and changes NOTHING. It cost a positive control: verifying that the
+# `verify` subcommand catches a bogus required context appeared to PASS, when in
+# fact the bogus context had never been applied and verify was inspecting an
+# unchanged configuration. The zeros proved nothing.
+#
+# Use a JSON body instead:
+#
+#     echo '{"strict":false,"contexts":["some-check"]}' \
+#       | gh api -X PATCH repos/OWNER/REPO/branches/main/protection/required_status_checks --input -
+#
+# Same shape as the other instrument failures collected in CONTRIBUTING.md: a
+# check that cannot see the thing, reporting the thing's absence.
+# ---------------------------------------------------------------------------
+
 REPO="jonhill90/hill90-app"
 BRANCH="main"
 
@@ -49,12 +72,21 @@ BRANCH="main"
 #   GitHub does not let an author approve their own pull request, so requiring one
 #   approval would deadlock the repository permanently.
 #
-# enforce_admins = false — the admin can still override. This is the honest
-#   choice for a single-maintainer repository: the alternative to a bypass is
-#   disabling the whole rule in an emergency, which leaves no trace, whereas an
-#   admin override is deliberate and recorded. Matches Hill90. NOTE the real
-#   consequence: `gh pr merge --admin` WILL merge a failing pull request. The
-#   protection is a gate for the normal path, not a wall.
+# enforce_admins = false — SETTLED, do not relitigate. The admin can still
+#   override. On a single-maintainer repository an absolute wall has no escape
+#   hatch except disabling the rule entirely, and that leaves NO TRACE — which is
+#   strictly worse than a bypass that does. An admin override is deliberate,
+#   attributable and visible in the pull request timeline; a rule someone switched
+#   off at 2am is none of those things. Matches Hill90.
+#
+#   NOTE the real consequence, so nobody is surprised by it: `gh pr merge --admin`
+#   WILL merge a failing pull request. This is a gate for the normal path, not a
+#   wall, and it is meant to be.
+#
+#   If circumstances change — a second maintainer, or a merge that should never
+#   have been forced — flipping it is ONE call and needs no code change:
+#       gh api -X POST   repos/jonhill90/hill90-app/branches/main/protection/enforce_admins
+#       gh api -X DELETE repos/jonhill90/hill90-app/branches/main/protection/enforce_admins
 #
 # force pushes / deletions = false — this one carries more weight than usual.
 #   The repository is public and the decision in #105 was NOT to rewrite history;
