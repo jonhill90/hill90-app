@@ -1,8 +1,8 @@
 # hill90-app
 
-An AI agent platform that runs locally in Docker and, since 2026-07-29, in
-production as a tenant of the [Hill90](https://github.com/jonhill90/Hill90)
-platform. [hill90.com](https://hill90.com) serves the UI on a Let's Encrypt
+An AI agent platform that runs locally in Docker and in production as a tenant of
+the [Hill90](https://github.com/jonhill90/Hill90) platform, consuming its
+identity, database and object storage. [hill90.com](https://hill90.com) serves the UI on a Let's Encrypt
 certificate. **All eight stacks are deployed and healthy.** See
 [Production](#production).
 

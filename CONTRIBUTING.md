@@ -4,8 +4,7 @@ This repository deploys to production. There is no CI that runs on its own, and
 no workflow fires on merge — deploys are dispatched by hand. Read [`CONTRIBUTING.md`](CONTRIBUTING.md#deploying) below for how the deploy path works,
 and the README's status table for what is currently live.
 
-What follows is the working convention inherited from Hill90, kept because it is
-what the 542 commits of history already follow. Hill90's own deploy rules,
+What follows is the working convention this repository uses. Hill90's own deploy rules,
 secrets workflow and VPS operations are still **not** reproduced here; this repo
 grew its own, deliberately narrower, as a tenant rather than a platform owner.
 
