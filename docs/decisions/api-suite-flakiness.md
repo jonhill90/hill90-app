@@ -3266,3 +3266,61 @@ document's own arithmetic puts ~120 runs per arm behind separating 15% from 30%.
 statement is *no effect detected under a valid design*, not *no effect*. A reviewer who would
 rather hold any timing change to this suite until the flake class is understood has a
 defensible position, and the change is small to revert.
+
+---
+
+## PREDICTION, recorded before the retrospective pass
+
+Written and committed **before** looking at the evidence, so this is a prediction and not a
+description of what was found. The commit order in git is the proof; if the next section
+agrees with this one, that ordering is the only thing separating a finding from a story.
+
+**The hypothesis: 400, 401 and timeout are not three classes. They are one mechanism — a
+response arriving from a socket that is not ours — of which the foreign daemon
+(`LogiPluginService`, `websocket-sharp`, answering 501 on the ephemeral range) was the first
+instance identified.**
+
+The reasoning is the shape of every recorded symptom:
+
+```
+403 → 404      201 → 400      501 → 404
+200 → 400      200 → 404      timeout
+```
+
+Each is *expected X, received Y* where Y is a **well-formed answer to a different question**.
+This record already insists they are "not a crash, not a timeout, not a connection error" — so
+they are real HTTP responses that belong to somebody else's request. The timeout is the same
+event with the response never arriving rather than arriving wrong; it needs no separate theory.
+
+**Why it looked like three classes: the assertion captured the status code and nothing else.**
+Not the responder, not the socket, not whether the process was ours. Given only a number, a
+single mechanism with a varying responder *must* present as a family of unrelated classes. The
+taxonomy is an artefact of the instrument, in the same way the first `#117` recorder gave one
+verdict for two states — there one hook collapsed two states into one answer, here one field
+expands one state into many.
+
+### How this is falsified
+
+**A captured occurrence bearing a CORRECT identity stamp with a wrong body.** That would mean
+the response was ours, from our process, and simply wrong — a genuine logic race, and this
+hypothesis is dead. Nothing else falsifies it; in particular a run of green tests does not.
+
+### What the retrospective can and cannot do, said in advance
+
+The six original 401s **predate the identity stamp**, and this record already states they cannot
+be classified retrospectively. So the likely outcome is *unclassifiable*, and that is where the
+trap is:
+
+> **"Cannot classify retrospectively" must not become "no evidence of a problem."** They are
+> different sentences. The first is a statement about the instrument; the second is a claim
+> about the world, and nothing here would support it.
+
+I am the party most likely to make that slide, because the flattering reading — *nothing found,
+therefore probably fixed by the port work* — is the one that suits the hypothesis above. It is
+recorded here so the next reader can hold me to it, and so I can. **42 clean runs is not
+evidence of absence** when this document's own arithmetic puts ~300 runs behind a ~1% event.
+
+If the retrospective cannot classify, the correct action is not another 42 runs. It is the `#117`
+move: make sure the next occurrence carries the identity field, prove the recorder works in
+**both** arms, and wait. Waiting with a proven recorder is a result.
+
