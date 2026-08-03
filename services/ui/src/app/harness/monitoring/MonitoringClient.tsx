@@ -5,8 +5,37 @@ import { Activity, Server, Bot, Clock, RefreshCw, ShieldCheck, HardDrive } from 
 
 interface HealthStatus {
   service: string
-  status: 'healthy' | 'unhealthy'
+  /**
+   * `unknown` is a third answer, and it is the point of this type.
+   *
+   * These probes are ordinary authenticated fetches, so a 401 or 403 arrives in
+   * the same shape as a real outage. Collapsing them into `unhealthy` meant this
+   * page told every non-admin that the vault was DOWN — /harness/monitoring is
+   * offered to all signed-in users, while /api/admin/secrets/status is
+   * requireRole('admin'). It reported the observer's permissions as the
+   * system's health.
+   *
+   * A monitoring page that cannot see a component must say so. A red dot meaning
+   * "you are not allowed to look" is worse than no dot: it sends someone to
+   * investigate an outage that is not happening, and it teaches people to
+   * ignore red on this page.
+   */
+  status: 'healthy' | 'unhealthy' | 'unknown'
   error?: string
+}
+
+/**
+ * Turn a failed probe response into a status.
+ *
+ * 401 and 403 are the ONLY codes treated as "cannot see". Everything else —
+ * 500, 502, 404 — stays `unhealthy`, because a service answering 500 is
+ * unhealthy no matter who is asking.
+ */
+function statusFromFailedProbe(service: string, code: number): HealthStatus {
+  if (code === 401 || code === 403) {
+    return { service, status: 'unknown', error: 'Not visible to your account' }
+  }
+  return { service, status: 'unhealthy', error: `HTTP ${code}` }
 }
 
 interface Agent {
@@ -75,17 +104,28 @@ function HealthCard({
   }
 
   const healthy = status.status === 'healthy'
+  const unknown = status.status === 'unknown'
 
   return (
     <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 flex items-start gap-3">
-      <StatusDot healthy={healthy} />
+      {/* Neither green nor red. An unknown is not a pass and must not look
+          like one; it is not a fault and must not raise one. */}
+      {unknown ? (
+        <span
+          aria-hidden="true"
+          data-testid="status-unknown"
+          className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-navy-500"
+        />
+      ) : (
+        <StatusDot healthy={healthy} />
+      )}
       <div className="flex-1">
         <div className="flex items-center gap-1.5">
           <Icon className="h-4 w-4 text-navy-400" />
           <p className="text-sm font-medium text-white">{label}</p>
         </div>
-        <p className={`text-xs mt-0.5 ${healthy ? 'text-brand-400' : 'text-red-400'}`}>
-          {healthy ? 'Healthy' : status.error || 'Unhealthy'}
+        <p className={`text-xs mt-0.5 ${unknown ? 'text-navy-400' : healthy ? 'text-brand-400' : 'text-red-400'}`}>
+          {healthy ? 'Healthy' : status.error || (unknown ? 'Not visible' : 'Unhealthy')}
         </p>
       </div>
     </div>
@@ -112,7 +152,7 @@ export default function MonitoringClient() {
         const data = await res.json()
         setHealth({ service: data.service || 'api', status: 'healthy' })
       } else {
-        setHealth({ service: 'api', status: 'unhealthy', error: `HTTP ${res.status}` })
+        setHealth(statusFromFailedProbe('api', res.status))
       }
       // Also fetch detailed stats
       const detRes = await fetch('/api/health/detailed')
@@ -130,7 +170,7 @@ export default function MonitoringClient() {
       if (res.ok) {
         setVaultHealth({ service: 'vault', status: 'healthy' })
       } else {
-        setVaultHealth({ service: 'vault', status: 'unhealthy', error: `HTTP ${res.status}` })
+        setVaultHealth(statusFromFailedProbe('vault', res.status))
       }
     } catch {
       setVaultHealth({ service: 'vault', status: 'unhealthy', error: 'Connection failed' })
@@ -145,7 +185,7 @@ export default function MonitoringClient() {
       if (res.ok) {
         setStorageHealth({ service: 'storage', status: 'healthy' })
       } else {
-        setStorageHealth({ service: 'storage', status: 'unhealthy', error: `HTTP ${res.status}` })
+        setStorageHealth(statusFromFailedProbe('storage', res.status))
       }
     } catch {
       setStorageHealth({ service: 'storage', status: 'unhealthy', error: 'Connection failed' })
