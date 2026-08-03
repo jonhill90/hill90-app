@@ -10,7 +10,7 @@ The app is a **tenant** of Hill90, not a peer. `deploy/compose/prod/*.yml`
 declare `hill90_edge` and `hill90_internal` as `external: true`; Hill90's
 `docker-compose.infra.yml` creates them. Nothing in this repo starts until
 Hill90's infra is up. See [infra-app-separation](infra-app-separation.md) and
-the extraction record's deploy-path section (`RESURRECTION.md` §2, removed 2026-07-31 —
+the extraction record's deploy-path section (since removed —
 its durable content is in [PROVENANCE.md](../extraction/PROVENANCE.md) and
 [secret-layout.md](../reference/secret-layout.md)).
 
