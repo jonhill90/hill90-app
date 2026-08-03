@@ -2076,3 +2076,90 @@ HTTP server**.
 
 **Nothing was disabled, retried or quarantined; production and test files remain
 byte-identical to `main`.**
+
+---
+
+# Round fifteen, 2026-08-03: the 501 comes from a third-party process on the machine
+
+**The body names its author. Fourteen rounds of elimination were looking inside an
+application that never wrote the response.**
+
+## Part one: supertest is eliminated too
+
+`supertest@6.3.4` and `superagent@8.1.2`: **zero occurrences of `501`** anywhere in their
+`lib/`. The same grep finds the codes they do reference — `response-base.js:113 badRequest ===
+400`, `:117 notFound === 404` — so the scan works. The last named candidate is gone.
+
+At that point the honest position was that the source is **something not yet named**. It was.
+
+## Part two: the full body
+
+Every capture until now read only the status line — a limitation of the instrument, not a
+property of the failure. The recorder was extended to keep the whole response, controlled
+first (a 501 carrying `CTL-AUTHOR-TAG` captured entire, a 200 ignored), then run.
+
+Captured at run 33 of 67, on a test expecting 400:
+
+```
+HTTP/1.1 501 Not Implemented
+Server: websocket-sharp/1.0
+Connection: close
+```
+
+**`Server: websocket-sharp/1.0`.** That is a C#/.NET WebSocket library. It is not Node, not
+express, not supertest, and not anything in this repository.
+
+In the same run: 110 `res.status` calls recorded, **zero of them 501**, and no express
+response on that connection — consistent with every previous round, and now explained.
+
+## The mechanism
+
+```
+$ lsof -nP -iTCP:50441
+LogiPlugi 2654 jon 355u IPv4 TCP 127.0.0.1:50441 (LISTEN)
+```
+
+**A third-party service on the development machine — Logitech's plugin daemon — listens on
+127.0.0.1:50441 and serves websocket-sharp, which answers a non-WebSocket HTTP request with
+`501 Not Implemented`.** Port 50441 is inside the ephemeral range supertest draws from. When a
+supertest client's connection lands there, it gets that daemon's 501 instead of the
+application's response.
+
+This is why:
+
+- the wire carried a real 501 — it did, written by another process
+- no express route emitted one — none did
+- no express response existed on that connection — the connection never reached the app
+- port *reuse* within the run was refuted — the collision is with a **foreign** listener, which
+  the lifetime recorder could not see because it only instruments this process
+- the closing-server race did not reproduce it — it was never the mechanism
+- Node could not emit it — correct, and irrelevant
+- **the rate is environmental.** Round three recorded 7.5% locally against 25% in CI and said
+  "whatever modulates it is environmental, so a rate measured on one machine should not be
+  quoted as the rate". That was right, and this is the reason.
+
+## Scope — stated narrowly on purpose
+
+**This explains the 501 class.** It is not extended to the 400/401/404 or timeout classes
+without evidence; a foreign listener answering with something else would produce a different
+status, which is a testable prediction and not a claim. The same capture, kept for every
+status rather than only 501, would settle it.
+
+**It is a defect in the test environment, not in the application**, and the fix is not a code
+change: it is to bind supertest servers away from a range a foreign daemon occupies, or to
+detect the collision and fail loudly rather than assert on a stranger's response.
+
+## What this cost, and what it was worth
+
+Fourteen rounds eliminated: `process.env` and `globalThis`; "symptoms are purely logical";
+order-dependence; the runInBand asymmetry; CPU starvation; "drained queue → promise never
+resolves"; the drained queue as the cause; the SSE timing margin; every route-level origin of
+the 501; the client layer; express-to-express cross-talk; port reuse; the closing-server race;
+Node's HTTP server; and supertest.
+
+Every one of them searched **inside the application**. The answer was outside it, and the
+single instrument that found it was the one that stopped reading three digits and read what
+the response actually said.
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
