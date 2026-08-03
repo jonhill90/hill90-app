@@ -16,7 +16,8 @@ shared VPS, and locally against the same compose files.
 - [`README.md`](README.md) — what it is, how to run it locally, and the
   **dated** production status table. That table is the single home for facts
   with a shelf life; this file deliberately does not repeat them.
-- [`docs/extraction/PROVENANCE.md`](docs/extraction/PROVENANCE.md) — what came across
+- [`docs/extraction/PROVENANCE.md`](docs/extraction/PROVENANCE.md) — where each secret and
+  service path came from
   from Hill90 and what deliberately did not, including the two services that have never
   been in an automated deploy.
 - [`docs/reference/secret-layout.md`](docs/reference/secret-layout.md) — what each secret
