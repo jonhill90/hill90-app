@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from app.middleware.agent_auth import AgentClaims
@@ -39,11 +39,27 @@ def _get_data_dir(request: Request) -> str:
 
 
 @router.get("")
-async def list_entries(request: Request, type: str | None = None) -> list[dict[str, Any]]:
+async def list_entries(
+    request: Request,
+    response: Response,
+    type: str | None = None,
+    limit: int = Query(500, ge=1, le=2000, description="Max entries to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip before the page"),
+) -> list[dict[str, Any]]:
+    """List one page of the authenticated agent's entries.
+
+    The body stays a bare JSON array. ``cli/client/akm.go:198`` unmarshals it
+    into ``[]map[string]interface{}``, so a body object here is a hard decode
+    error for the Go CLI, not merely an empty render — the total therefore
+    travels in ``X-Total-Count`` (#183, matching #182).
+    """
     claims = _get_claims(request)
     pool = _get_pool(request)
 
-    entries = await knowledge_store.list_entries(pool, claims, entry_type=type)
+    entries, total = await knowledge_store.list_entries(
+        pool, claims, entry_type=type, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
     return [_serialize_entry(e) for e in entries]
 
 
