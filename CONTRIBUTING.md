@@ -88,3 +88,26 @@ and have different SHAs than their Hill90 originals.
 new. Commits from before `refactor: restructure to ops-first monorepo layout
 (#124)` reference paths under `src/services/`, which is where this code lived
 until then.
+
+## Read the Copilot review before merging — and verify it
+
+Every PR here gets a GitHub Copilot code review (`dynamic/agents/copilot-pull-request-reviewer`).
+It is not a repo workflow, so it does not appear in `.github/workflows`, and its check is
+green whether or not anyone reads what it said.
+
+**An unread review is indistinguishable from no review.** On 2026-08-03 it reviewed 8 PRs in
+one session, left inline comments on 5, and was read on none of them. One of those comments
+identified a CI service block wired to the wrong job — the same defect the author rediscovered
+later by hand, after it had already been written down.
+
+```
+gh pr view <n> --json reviews
+gh api repos/<owner>/<repo>/pulls/<n>/comments --jq '.[]|"\(.path):\(.line) \(.body)"'
+```
+
+**Verify what it says rather than acting on it.** In the same session its two comments split
+one-for-one: the wrong-job finding was correct; a claim that `if: matrix.setup != ''` would
+evaluate true for undefined values was not — the step demonstrably skips on the arms where
+`setup` is unset. Both were stated with equal confidence. A review comment is a lead, and this
+repository's standing rule applies to it exactly as to any other instrument: check it before
+believing it.
