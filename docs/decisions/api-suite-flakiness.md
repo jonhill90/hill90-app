@@ -951,3 +951,1293 @@ Still open, narrowed:
 
 **Nothing was disabled, retried or quarantined.** The rate is unchanged because
 nothing was done to change it.
+
+---
+
+# Round four, 2026-08-03: contention-as-starvation is eliminated, and one stated mechanism is false
+
+**20 runs of half A, default workers. 2 failed — 10%.** The flake reproduced normally;
+nothing was skipped, retried, reordered or quarantined, and the rate is unchanged because
+nothing was done to change it.
+
+Round three's closing instruction was to instrument `routes-agents-events`'s asynchronous
+work, because its 8.8s-to-83.2s variance was the largest unexplained quantity here. That was
+done, and it answers a question the record could not previously ask.
+
+## The instrument, and the control that caught it lying
+
+"Contention" has two mechanisms that look identical from outside — a slow test, then a
+timeout or a wrong status — and have opposite fixes:
+
+- **STARVED** — the process has work and cannot get CPU. The loop is blocked, timers fire
+  late, a 5s jest timeout expires while the callback that would satisfy it waits in the queue.
+- **WAITING** — the process is idle on I/O or a timer that never comes. The loop is free.
+
+`services/api/jest.loopdelay.js` (`LOOP_AUDIT=1`, off by default) records per test:
+duration, and `monitorEventLoopDelay`'s max/mean/p99. High delay means starved; low delay
+across a long test means waiting.
+
+**Its first version was wrong and its own positive control caught it.** A deliberate 400ms
+block was reported as **0.0ms**, because the histogram is fed by a libuv timer that cannot
+fire while the loop is blocked — the sample only lands on the next turn, and the audit read
+it synchronously. After yielding 20ms before the read:
+
+```
+CONTROL=block   tests: 11 | loopMax median 401.6ms, worst 404.5ms | starvedPct>50%: 11/11
+CONTROL=wait    tests: 11 | loopMax median  12.1ms, worst  26.2ms | starvedPct>50%:  0/11
+```
+
+Blocking is detected; an identical duration spent *waiting* is not flagged. Only then was
+it believed.
+
+## Result: the failure was not starved
+
+6,020 test executions captured. The two failures were
+`routes-agents › POST /agents with valid container_profile_id persists it` (timeout) and
+`docs.test.ts › G1: POST /user-models without connection_id` (**expected 400, received 501**).
+
+```
+     ms  loopMax  starved%  test
+   5003     36.5       0.7  routes-agents :: POST /agents with valid container_profile_id
+```
+
+**The one execution that hit the 5000ms ceiling ran with a free event loop** — 36.5ms of
+delay across 5 seconds, 0.7%. It was not competing for CPU. It was waiting for a response
+that never came.
+
+The same holds for every slow execution:
+
+```
+  durations vs jest's 5000ms ceiling:   <1s: 5978 | 1-3s: 1 | 3-4s: 20 | 4-4.5s: 20 | >=5s: 1
+  executions within 1.5s of the timeout: 40
+    their loop delay: median 34.5ms, worst 129.9ms
+```
+
+Blocking does happen — 12 of the 66 executions slower than 500ms were >50% blocked, the
+worst being 835.7ms in an 842ms `routes-agents-skill` test — **but never on the path that
+failed.**
+
+**So contention-in-the-sense-of-CPU-starvation is eliminated as the mechanism of the
+timeout.** The shape round three read as "contention" is real, and it is *waiting*.
+
+## A structural fragility, measured
+
+Forty executions sit between 3s and 4.5s against a **5000ms** ceiling. They are the SSE poll
+tests, and the cause is in production code, not the test:
+
+```
+services/api/src/routes/agents.ts:1729:  const INFERENCE_POLL_MS = 3000;
+```
+
+A test that must observe one poll cannot finish in under 3s, and lands near 4s. **The margin
+to jest's default timeout is about one second.** That is why `routes-agents-events` is the
+most frequent victim and why TIMEOUT is in the symptom set — no carrier required, only a
+delay of more than a second from any source.
+
+## A mechanism this document asserts, which is false
+
+Round two states:
+
+> if the queue empties, the handler awaits a promise that never resolves and the test times
+> out at 5s
+
+**A drained `mockResolvedValueOnce` queue does not return a pending promise. It returns
+`undefined`:**
+
+```
+  1st call: object
+  2nd call (queue drained) returns: undefined
+```
+
+`await undefined` resolves immediately, so that sentence's mechanism cannot produce a hang.
+
+**But the conclusion survives on a different mechanism, and it was tested rather than
+reasoned.** The handler then reads `.rows` off `undefined` and throws — and **Express 4.22.1
+does not catch a rejection from an async handler**, so no response is ever sent:
+
+```
+  /awaited     -> HUNG (no response after 2004ms)
+  /unawaited   -> HUNG (no response after 2002ms)
+```
+
+A drained queue therefore *does* hang the request, by throwing into a void rather than by
+awaiting forever. That matches the observed failure exactly: `await request(app)` in a test
+queueing four `Once` values, 5003ms, event loop free.
+
+## Where this leaves the search space
+
+Eliminated by measurement, cumulative:
+
+- `process.env` and `globalThis` as carriers (round two, positive-controlled)
+- "symptoms are purely logical" — timeout, 401 and 400 are in the set
+- order-dependence, n=80
+- the runInBand-worse-than-workers asymmetry, n=80
+- **CPU starvation as the timeout mechanism** — free loop during the only ≥5s execution
+- **"drained queue → promise never resolves"** — a drained queue returns `undefined`
+
+Still open, and now stated mechanically rather than as a mood:
+
+1. **What drains the queue.** The hang is now explained end to end *given* a drained queue.
+   What is not explained is why the queue is out of step. Round one's "extra caller" lead is
+   the live one, and it now has a confirmed downstream mechanism instead of a guessed one.
+   Note the constraint that killed it before still stands: a file with **zero** `Once(` calls
+   flakes too, so this cannot be the whole defect — it is the explanation of the TIMEOUT
+   class, not of the 501/401/400 class.
+2. **The one-second margin.** Independent of any carrier, `INFERENCE_POLL_MS = 3000` against
+   a 5000ms timeout means any delay over ~1s becomes a failure. This is worth fixing on its
+   own merits, and it is a **fragility, not the cause** — the 501/400/401 failures have
+   nothing to do with it.
+
+**The next instrument** follows round two's own suggestion, now better targeted: wrap
+`mockQuery` in the affected files to record, per test, calls made against `Once` values
+queued, and flag any test where the counts disagree. The mechanism above says a mismatch
+must precede every timeout; if a run times out with the counts in agreement, that kills this
+lead outright.
+
+**Nothing was disabled, retried or quarantined.**
+
+---
+
+# Round five, 2026-08-03: the queue lead is refuted
+
+**15 runs of half A, 1 failure. 615 test executions with per-test queue accounting.**
+Nothing skipped, retried, reordered or quarantined.
+
+Round four closed by naming the next instrument and, importantly, the condition that would
+kill the lead: *count calls made against `Once` values queued, per test; a timeout with the
+counts in agreement refutes this outright.* The instrument was built. **The lead is dead —
+on stronger evidence than the condition asked for.**
+
+## The result
+
+| | executions | with a DRAINED queue |
+|---|---|---|
+| the 14 green runs | 574 | **280 (49%)** |
+| the 1 failing run | 41 | **20 (49%)** |
+| total | 615 | 300 (49%) |
+
+**A drained queue is the normal, everyday state of this suite.** Half of all test executions
+make more calls than they queued `Once` values for, on runs that pass. Examples from a fully
+green run, cross-checked by hand against the source:
+
+```
+DRAINED: 2 calls vs 1 queued — POST /agents creates agent with user role
+DRAINED: 2 calls vs 1 queued — DELETE /agents/:id works for admin
+DRAINED: 9 calls vs 1 queued — POST /agents/:id/start starts agent
+```
+
+The rate is **identical to the percentage point** on passing and failing runs. It has no
+discriminating power whatsoever.
+
+## What that does to round four's mechanism
+
+Round four proved, and this document still records, that a drained queue *can* hang a
+request: the mock returns `undefined`, the handler reads `.rows` off it and throws, and
+Express 4.22.1 does not catch an async handler's rejection. That chain is real and was
+measured.
+
+**It is not what happens here.** If it were, 49% of test executions would hang. They do not.
+So on the paths where the queue drains, one of two things must be true — the extra calls
+happen *after* the response is sent, or the handler never dereferences the result. The
+record's very first section already described post-response work outliving the request; that
+is the reading consistent with this measurement, and "drain causes the failure" is not.
+
+**Do not resurrect this lead on the strength of the round-four mechanism.** The mechanism is
+sound and the premise is false: the drain is ubiquitous and benign.
+
+## Honesty about the stated condition
+
+The condition named in round four was a **timeout** with the counts in agreement. That exact
+observation was not obtained: the one failure in these 15 runs was
+`routes-agents-events › SSE follow forwards a late-arriving event without reconnect`, an
+assertion failure in a file the shim did not cover, not a timeout in the instrumented file.
+
+The lead is nonetheless refuted, by a disconfirmation the condition did not anticipate and
+which is stronger than it: the proposed cause occurs at an identical rate on runs that pass.
+A cause that is present in half of all green executions explains nothing.
+
+## The instrument, and a hook that does not exist
+
+Two things are worth recording so the next person does not spend the time again.
+
+**A global `jest.fn` hook is not available in this setup.** Patching `jest.fn` from
+`setupFilesAfterEnv` intercepts **0** of the suite's mock creations; so does patching from
+`setupFiles`; so does patching `ModuleMocker.prototype.fn` resolved from the project's own
+`node_modules`. Measured, all three:
+
+```
+QA-DBG  jest.fn() calls intercepted: 0      (setupFilesAfterEnv)
+QA-DBG3 mocks created via ModuleMocker: 0   (prototype patch)
+QA-DBG4 intercepted via setupFiles: 0
+```
+
+The test module receives a `jest` object distinct from the setup file's, and the mocker's
+`fn` is bound before setup runs. **No global auto-instrumentation of mocks is possible this
+way.** The broken instrument is deliberately not committed; a diagnostic that silently
+reports `mocks: 0` is worse than none, and it read exactly that against a file using
+`Once(` fourteen times.
+
+What worked was a **counting Proxy around the file's own `mockQuery`**, applied to the
+working tree for the measurement and reverted afterwards, so the committed suite is
+unchanged. It preserves behaviour exactly — it returns whatever the underlying mock returns,
+including `undefined` on a drained queue — and counts calls, `Once` values and defaults.
+
+**Its positive control caught a real bug in it.** jest implements
+`mockResolvedValueOnce(v)` as `mockImplementationOnce(() => Promise.resolve(v))`, so wrapping
+both members of that pair counts one queued value **twice** — which makes an over-called mock
+read as balanced, the precise failure the instrument exists to detect. A synthetic control
+(2 calls against 1 queued value must read drained; 2 against 2 must not; a non-`Once` default
+must not) failed, the re-entrancy guard was added, and it passed. Without that control the
+49% above would have been reported as 0%.
+
+## Where the search space stands
+
+Eliminated by measurement, cumulative:
+
+- `process.env` and `globalThis` as carriers
+- "symptoms are purely logical" — timeout, 401 and 400 are in the set
+- order-dependence, n=80; the runInBand-worse-than-workers asymmetry, n=80
+- CPU starvation as the timeout mechanism (round four, free loop during the only ≥5s execution)
+- "drained queue → promise never resolves" (round four — it returns `undefined`)
+- **a drained queue as the cause of the flake** — 49% on green runs, 49% on the failing one
+
+**Still unexplained, and deliberately not folded together:**
+
+- **The 501/401/400 class.** Untouched by this round and by round four. Nothing measured so
+  far bears on it. It should not be attached to the queue mechanism, which is now known to be
+  benign, nor to starvation, which is eliminated.
+- **The SSE class.** The failure caught here — a late-arriving event not forwarded — and
+  round four's finding that `INFERENCE_POLL_MS = 3000` sits ~1s under jest's 5000ms ceiling
+  both point at `routes-agents-events`, which remains the most frequent victim across every
+  round. That file's timing, not its state, is the last thing pointed at by evidence.
+
+**Nothing was disabled, retried or quarantined.**
+
+---
+
+# Round six, 2026-08-03: the timing-margin lead is refuted
+
+**20 runs of half A, 2 failures, 6,020 test executions with per-test durations.**
+Nothing skipped, retried, reordered or quarantined, and **neither the poll interval nor the
+jest timeout was changed** — widening either would have hidden the failure rather than
+explained it.
+
+## The instrument, controlled first
+
+The lead needs a classifier that separates *failed because it ran out of the 5000ms budget*
+from *failed for some other reason*. Two synthetic failures with known causes:
+
+```
+CTL-NEAR-CEILING  ran  5002ms  -> OUT OF HEADROOM        [FAILED]
+CTL-FAST-FAIL     ran     1ms  -> 4999ms headroom        [FAILED]
+CTL-PASSES        ran     1ms  -> 4999ms headroom
+```
+
+It flags the budget-limited failure, does not flag the instant one, and does not flag the
+passing test. Only then was it used.
+
+## The margin is real, and it is never consumed
+
+`INFERENCE_POLL_MS = 3000` against a 5000ms ceiling is a genuine ~1s margin. The question is
+whether anything ever spends it. Across 20 runs:
+
+```
+routes-agents-events test executions:            580
+  of those, poll-waiting (>=3000ms):              40
+    durations: min 3515ms, median 4006ms, MAX 4082ms
+    worst headroom observed:                     918ms
+    executions within 500ms of the ceiling:        0
+    loop delay during them: median 65.4ms, worst 212.7ms
+
+ALL 6,020 executions:
+    within 500ms of the 5000ms ceiling:            0
+    exceeded it:                                   0
+```
+
+**The worst excursion in 40 poll waits used 82ms of roughly 1,000ms of slack.** The poll
+tests are strikingly stable — a 567ms spread across 20 runs — and the loop is free
+throughout, so nothing is even competing for the time.
+
+For the margin to cause a failure something must consume ~1s of slack. Across 6,020
+executions nothing consumed a tenth of it.
+
+## And the failures that did happen were nowhere near it
+
+```
+run 11  routes-agents-skill      ran  321ms, loopMax  84.9ms -> 4679ms headroom   200 -> 400
+run 14  platform-connections     ran  180ms, loopMax 157.8ms -> 4820ms headroom   403 -> 501
+run 14  root-route non-regression ran 148ms, loopMax 100.1ms -> 4852ms headroom   404 -> ?
+```
+
+Every failing test finished in under a third of a second with **more than 4.6 seconds of
+budget unused**. `routes-agents-events` did not fail at all in these 20 runs.
+
+**The timing-margin lead is dead.** It was the obvious suspect, it is arithmetically real,
+and it explains none of the observed failures.
+
+## One reconciliation, and one thing not reproduced
+
+Round three recorded `routes-agents-events` at **83.2s** and read that as the largest
+unexplained quantity here. Per test, nothing in that file exceeds **4.1s**. So a
+file-level 83s is not any single test overrunning its budget — it is many tests, or
+file-level setup, and the per-test framing that suspicion was built on does not hold.
+
+**This round did not reproduce an 83s file.** Twenty runs, all normal. That is recorded as a
+non-reproduction, not as a refutation of the original observation.
+
+## The 501 class — kept separate, and now with a concrete target
+
+This is **not** folded into the timing lead. It is named because this round produced a code
+fact worth the next session's time.
+
+`platform-connections › P2` calls **`POST /provider-connections`** and expects 403. It
+received **501**. So:
+
+```
+$ grep -rn "status(501)" src --include='*.ts' | grep -v __tests__ | wc -l
+1
+src/routes/profile.ts:287   // POST /profile/password — "NOT_IMPLEMENTED"
+```
+
+**There is exactly one site in the entire application that can produce a 501**, it is on
+`POST /profile/password`, and it is on a different router from the route under test. Express
+and finalhandler contain no 501 of their own — checked, no matches.
+
+`501` has now appeared in round three (200→501, twice), round four (`docs.test.ts`, 400→501)
+and here (403→501). Every one of them must have come from that single handler, on a path
+none of those tests called.
+
+**This is a lead, not a finding.** It does point somewhere specific: a response produced by
+one route arriving at a request made to another. The record eliminated a "wrong server"
+hypothesis in round one, but on 404 evidence — *"455 of 470 captured 404s were handler
+JSON"* — which says nothing about this. A unique-origin status code is a much sharper probe
+than a 404, because 404 has many sources and this has exactly one.
+
+**The next thing to attack:** instrument that single handler to record, when it fires, which
+request it believes it is answering — method, path, and the supertest socket — and compare
+against the request the failing test made. If they agree, cross-talk is dead and the 501 came
+from somewhere unmodelled. If they disagree, the carrier is the connection, not the state.
+
+## Where the search space stands
+
+Eliminated by measurement, cumulative:
+
+- `process.env` and `globalThis` as carriers
+- "symptoms are purely logical" — timeout, 401 and 400 are in the set
+- order-dependence, n=80; the runInBand-worse-than-workers asymmetry, n=80
+- CPU starvation as the timeout mechanism
+- "drained queue → promise never resolves" — it returns `undefined`
+- a drained queue as the cause — 49% on green runs, 49% on the failing one
+- **the SSE timing margin** — 0 of 6,020 executions came within 500ms of the ceiling, and
+  every observed failure had >4.6s of headroom
+
+**Nothing was disabled, retried or quarantined, and no timeout or interval was widened.**
+
+---
+
+# Round seven, 2026-08-03: the 501 instrument works, and the experiment did not decide
+
+**25 runs of half A, 0 failures, 0 audit rows.** The question round six posed is **not
+answered**. This section records why, what was learned anyway, and the one change that makes
+the next attempt sharp.
+
+## The instrument, and its control
+
+The 501 handler at `src/routes/profile.ts` was instrumented (working tree only, behaviour
+unchanged, env-gated) to record which request it believes it is answering: method,
+`originalUrl`, `baseUrl`, `path`, and the socket's local/remote ports.
+
+**The way this instrument could lie is by reporting the route pattern rather than the real
+request** — it would then always "agree" and prove nothing. So the control mounted the *same
+router* at a second path and required two distinct readings:
+
+```
+POST originalUrl=/profile/password     baseUrl=/profile     socket local=53509 remote=53510
+POST originalUrl=/zz-control/password  baseUrl=/zz-control  socket local=53511 remote=53512
+distinct originalUrls: 2 -> PASS: reports the actual request
+```
+
+## And then it measured nothing, exactly as feared
+
+Across the 25 half-A runs the audit produced **zero rows**. That is the third time in this
+investigation an instrument has silently reported nothing — after the mock counter that
+double-counted and the global `jest.fn` hook that intercepted 0 mocks. It was caught the same
+way: by running it against a case that must produce output.
+
+```
+rows from routes-profile.test.ts (which really calls the endpoint): 1
+```
+
+The instrument is fine. **The reason is a fact about the corpus, and it is the useful part of
+this round:**
+
+- `docs.test.ts` contains the string `/profile/password` only as an entry in a spec-contract
+  array (line 188). It never issues the request.
+- `routes-profile.test.ts` is the **only** file in the suite that calls it, and
+  `grep -c routes-profile /tmp/halfA.txt` = **0** — it is not in half A.
+
+**So no test in half A can legitimately make that handler fire.** Yet round six recorded
+`platform-connections › P2` (which *is* in half A) receiving a 501.
+
+## Why that makes the next attempt much sharper
+
+The round-six plan was to compare the handler's `originalUrl` against what the failing test
+sent. That comparison is now unnecessary: in a half-A run **any audit row at all is
+anomalous**, because nothing there should reach the handler. Presence or absence is the
+signal, and it does not depend on catching the failing assertion at the same moment.
+
+The premise was re-checked rather than assumed. `status(501)` appears once in the
+application; `src/routes/secrets.ts:122` mentions 501 only in a comment, and that route
+deliberately requests `?sealedcode=200&uninitcode=200&standbycode=200` and always replies
+with its own `res.json(...)`, so it never forwards an upstream 501. **One origin, confirmed.**
+
+## The honest verdict: undecided
+
+The condition set in round six was that agreement kills cross-talk and disagreement makes the
+connection the carrier. **Neither was observed, because no 501 event occurred.** 0 failures in
+25 runs — at the ~10% rate measured in rounds four to six that has a probability of about
+7%, so it is unremarkable but it is also not evidence the flake is gone, and it is not
+recorded as such.
+
+**The cross-talk lead is neither confirmed nor refuted.** It is not rescued either: nothing
+here argues for it.
+
+## What the next attempt should do, in one command
+
+Reapply the audit (it is not committed — a diagnostic belongs with the other diagnostics, and
+this one lives in a production route file, so it stays out of `main`):
+
+```
+# in services/api/src/routes/profile.ts, inside the POST /password handler,
+# before res.status(501):
+if (process.env.API_501_AUDIT) { try { const s:any=(_req as any).socket||{};
+  require('fs').appendFileSync(process.env.API_501_OUT||'/tmp/audit501.jsonl',
+  JSON.stringify({ts:Date.now(),method:_req.method,originalUrl:(_req as any).originalUrl,
+  baseUrl:(_req as any).baseUrl,path:(_req as any).path,
+  localPort:s.localPort,remotePort:s.remotePort,pid:process.pid})+'\n'); } catch(e){} }
+```
+
+Then run half A until a failure occurs and check for **any** row. Because half A has no
+legitimate caller, a single row is the finding; an unexpected 501 with **no** row means the
+status did not come from this handler at all, which would refute the unique-origin reasoning
+this lead rests on and is equally worth having.
+
+**Nothing was disabled, retried or quarantined, and no handler behaviour was changed.**
+
+---
+
+# Round eight, 2026-08-03: the unique-origin argument does not hold, so the experiment is not sharp
+
+## How many runs a meaningful null would take, stated first
+
+Measured rates: ~10% of half-A runs fail (rounds four to seven), and roughly a third of
+failures are 501-class (round three ×2, round four ×1, round six ×2 of the classified set).
+So P(501 event per run) ≈ **0.03**, and a null result means something only at
+
+```
+N >= ln(0.05) / ln(0.97)  ≈  98 runs
+```
+
+**About 100 runs**, roughly an hour. Round seven's 25 runs were nowhere near that, which is
+why they were reported as undecided rather than as evidence.
+
+Those runs were not spent, because the premise they would test does not survive inspection —
+which is cheaper and settles more.
+
+## The claim that fails
+
+Round six said:
+
+> There is exactly one site in the entire application that can produce a 501.
+
+**That was a grep for the literal `status(501)`, and the literal is not the only way a 501
+reaches a client.** Twelve sites forward whatever status an upstream returned:
+
+```
+src/routes/knowledge.ts:51,85,104,126,151,160        res.status(result.status).json(result.data)
+src/routes/shared-knowledge.ts:89,105,116,147,159,175  res.status(result.status).json(result.data)
+```
+
+`result.status` is `resp.status` from a proxied call (`src/services/shared-knowledge-proxy.ts:58`,
+`src/services/task-proxy.ts:52`). Any upstream status passes straight through, 501 included.
+**So uniqueness cannot be established by grepping for the literal, and round six's reasoning
+rests on exactly that.**
+
+## Being precise: unproven, not disproven
+
+No alternative origin has been *demonstrated*. The proxies return their own **503** when the
+service is unconfigured and **502** when it is unreachable — not 501 — and they only pass
+through an upstream status when a real response arrived. In tests the upstream is mocked, and
+`grep -rln 501 src/__tests__/` returns **one** file, `routes-profile.test.ts`, which is not in
+half A.
+
+So the honest state is: **the uniqueness claim is unproven, not refuted.** What is refuted is
+the *argument* — "only one site emits 501, therefore a 501 anywhere else is cross-talk" — and
+the experiment built on it, which treated presence or absence of one handler's audit row as
+decisive. It is not decisive if other origins are possible, and they are.
+
+## What was checked on the two actual victims
+
+Both round-six 501s came from routes that cannot emit one:
+
+- `platform-connections › P2` calls `POST /provider-connections`. That route emits
+  **503, 400, 403, 201** — checked line by line. No 501.
+- `docs.test.ts › GET /nonexistent returns 404` got **501** for a path with no route at all,
+  and `app.ts` has no catch-all or error handler that could produce one.
+
+A request to a route with no 501 path, and a request to no route at all, both receiving 501,
+remains the strangest observation in this document. It is *consistent* with a response
+generated elsewhere arriving on the wrong socket — but "elsewhere" is now a dozen candidate
+sites rather than one, so the observation no longer points anywhere specific.
+
+## The audit
+
+Reapplied and re-controlled as before; the control still passes (the same router on two
+mounts is recorded with two distinct `originalUrl`s). It is **not committed** — production
+route files are byte-identical to `main`, and the exact patch remains in round seven.
+
+Running it ~100 times was not done, deliberately: it would spend an hour testing whether one
+particular handler fired, when the inference from that answer has just been shown not to hold.
+
+## The next question, which is a different shape
+
+Stop instrumenting one handler and instrument the **response**: wrap `res.status` for the
+duration of a run and record, for every response with status 501, the route that produced it
+and the socket it went out on. That does not assume where 501s come from — it observes it —
+and it answers the question round six was really asking:
+
+- if a 501 is emitted by a route the failing test never called, on the socket that test is
+  waiting on, the carrier is the connection;
+- if no 501 is emitted anywhere while a test receives one, the status is not coming from this
+  application at all, which would be a much larger finding;
+- if a 501 is emitted by a route the failing test *did* call, then some upstream mock is
+  returning it and this whole class is local, not cross-talk.
+
+All three are worth having, and unlike the round-six design, none of them depends on an
+assumption about how many places can emit the status.
+
+**Nothing was disabled, retried or quarantined, and no handler behaviour was changed.**
+
+---
+
+# Round nine, 2026-08-03: no route emits the 501, and a test receives it anyway
+
+**This is the third of the three outcomes named in round eight, and the largest of them:
+the 501 does not come from this application's route layer.**
+
+## How long a null would have needed, and why it was not needed
+
+At the observed rate — 1 run in 38 where a test receives a 501 — a null result carries weight
+at `N >= ln(0.05)/ln(1 - 1/38)` ≈ **112 runs**. That budget was not spent, because the run
+produced a **positive observation** rather than a null: the event occurred at run 6.
+
+## The instrument
+
+`express.response.status` was wrapped for the whole worker, so it observes **every** 501
+regardless of which route emits it. This is the correction round eight called for: it assumes
+nothing about how many sites can produce the status.
+
+Controlled before use — two routes emitting 501 on different paths, one emitting 403:
+
+```
+GET /alpha  socket local=64670 remote=64671
+GET /beta   socket local=64672 remote=64673
+rows=2 distinct urls=2 -> PASS: records each 501 with its real url, and no 403
+```
+
+**Then the first batch was thrown away.** 38 runs produced `rows=0` everywhere — which is
+ambiguous between *no 501 was emitted* and *the wrapper never loaded*, the exact trap that
+has caught this investigation twice. A liveness marker was added (one row per test file at
+install), verified to appear and to coexist with real captures:
+
+```
+installed markers: 1 | 501s captured: 2 -> PASS
+```
+
+Every subsequent half-A run then reports **29 rows** — one marker per file — so any emission
+shows as a row beyond 29, and an empty result can no longer be confused with a dead
+instrument.
+
+## The observation
+
+```
+run 6:  FAIL   rows=29   received501=2
+  run6b rows=29  liveness markers=29  actual 501 emissions=0
+  ● ... Expected: 404 / Received: 501
+```
+
+**Twenty-nine liveness markers, zero 501 emissions, and a test that expected 404 received
+501.** The wrapper was demonstrably installed in every worker and no route in the application
+called `res.status(501)` — or `res.status(...)` with any 501-valued variable, since the
+wrapper sees the resolved code, not the literal.
+
+Nothing bypasses it inside the app either: `grep -rn "writeHead(" src` excluding tests returns
+**0**, so there is no path that writes a status header without going through `res.status`.
+
+## What this kills, and what it does not
+
+**Killed:** every explanation in which some route of this application produces the 501 —
+including round six's `POST /profile/password` reasoning, and round eight's status-forwarding
+sites (`res.status(result.status)`). Neither fired. The forwarding sites were a valid reason
+to doubt uniqueness; they are now excluded as the actual source by measurement rather than by
+counting.
+
+**Not established: where the 501 does come from.** Two candidate mechanisms were probed
+directly and **neither reproduces it**:
+
+```
+unknown method -> HTTP/1.1 400 Bad Request | app handler ran: false
+bad TE         -> HTTP/1.1 200 OK          | app handler ran: true
+```
+
+Node's HTTP server answers a malformed request with **400**, not 501, on this version. So
+"Node emitted it below express" is not supported by evidence, and is not claimed.
+
+The remaining candidates, none of them tested: superagent/supertest synthesising a status when
+a response is malformed or truncated; a response belonging to another request arriving on this
+socket, where the status line is read from bytes this application never wrote; or something in
+the test harness. **These are candidates, not findings.**
+
+## The next instrument, and what would settle it
+
+Capture the **raw bytes** of the response the failing assertion read. If the socket carries a
+literal `HTTP/1.1 501 Not Implemented` status line, something wrote those bytes and the
+question becomes who — and since no express route did, the writer is outside the app, which
+would make connection-level cross-talk the leading explanation for the first time on direct
+evidence. If instead the bytes show a different status and supertest reports 501, the defect
+is in the client layer and has nothing to do with the server at all.
+
+That is a smaller and sharper question than any asked so far, and it does not depend on any
+assumption about the application.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause (49% on
+green runs); the SSE timing margin; and now **every route-level origin of the 501**.
+
+**Nothing was disabled, retried or quarantined; no handler behaviour was changed; production
+route files remain byte-identical to `main`.**
+
+---
+
+# Round ten, 2026-08-03: the wire carries a literal 501, so the client did not invent it
+
+**71 runs of half A, 5 failures, one carrying the event. The status line on the socket is
+real.**
+
+## The instrument
+
+A recorder taps every client socket and captures the first status line actually delivered,
+with the socket's ports and the running test. It carries a liveness marker for the same
+reason as round nine — a byte recorder that silently records nothing looks exactly like a
+clean run, and that has already happened once in this investigation.
+
+Controlled before use, against three known statuses:
+
+```
+wire: HTTP/1.1 403 Forbidden       | ports 52393 -> 52392
+wire: HTTP/1.1 501 Not Implemented | ports 52395 -> 52394
+wire: HTTP/1.1 200 OK              | ports 52397 -> 52396
+installed=1 captures=3 statuses=['403','501','200'] -> PASS
+```
+
+## The observation
+
+```
+run 35   FAIL   received501=4   wire501=2   caps=253   install markers=29
+
+● Agent create/update scope RBAC › update with vps_system skill as non-admin returns 403
+    Expected: 403   Received: 501
+● Agent CRUD routes › POST /agents returns 409 on duplicate agent_id
+    Expected: 409   Received: 501
+
+{"statusLine":"HTTP/1.1 501 Not Implemented","localPort":50442,"remotePort":50441,
+ "pid":33670,"test":"...vps_system skill as non-admin returns 403","testFile":"routes-agents-skill.test.ts"}
+{"statusLine":"HTTP/1.1 501 Not Implemented","localPort":50443,"remotePort":50437,
+ "pid":33669,"test":"...POST /agents returns 409 on duplicate agent_id","testFile":"routes-agents.test.ts"}
+```
+
+**A literal `HTTP/1.1 501 Not Implemented` was delivered on the socket**, in two different
+worker processes, to two tests that asked for entirely different things (a 403 RBAC check and
+a 409 duplicate check).
+
+## What this rules out
+
+**The client layer.** supertest/superagent did not synthesise the status: the bytes say 501.
+Everything downstream of the wire — assertion helpers, response parsing, the harness — is
+exonerated. The status is real, and something wrote it.
+
+That was one of the two outcomes named in round nine, and it is the one that occurred.
+
+## What it makes leading, and the caveat that keeps it a lead
+
+Round nine measured, with liveness proven, that **no express route emitted a 501** while a
+test received one. This round measures that **the 501 is genuinely on the wire**. Together
+those say: bytes that no route in this application wrote were delivered to a socket a test was
+reading — which is connection-level cross-talk, and it is the first time in ten rounds that
+anything points there on direct evidence rather than by elimination.
+
+**The caveat is real and is not buried: those are two different runs.** The
+`res.status` wrapper and the byte recorder have never been active in the same run, so "no
+route emitted it" and "the wire says 501" have not been observed of the *same* event. Both are
+`setupFilesAfterEnv` files; running them together is one command, and it is the next thing to
+do. Until then the conjunction is an inference across runs, not a measurement of one.
+
+One further observation, recorded without interpretation: in the control every capture paired
+consecutive ports (`52393 -> 52392`), and in run 35 the first 501 did too (`50442 -> 50441`)
+while the second did **not** (`50443 -> 50437`). Ephemeral ports carry no guarantee of
+adjacency, so this is not evidence of anything on its own — it is written down because if
+cross-talk is real, socket pairing is where it would show, and the next run should record it
+deliberately rather than notice it by accident.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; and now **the client layer as the inventor
+of the 501**.
+
+Leading, on direct evidence for the first time: **connection-level cross-talk.**
+
+**Nothing was disabled, retried or quarantined; production route files remain byte-identical
+to `main`.**
+
+---
+
+# Round eleven, 2026-08-03: the conjunction holds on one event — and it is not express cross-talk
+
+**Both instruments in one run, 35 runs, the event captured at run 34.** The conjunction that
+round ten could only infer across two runs is now a measurement of a single event.
+
+## Socket identity, established rather than inferred
+
+Round ten noticed port adjacency by accident and refused to read anything into it. This run
+establishes pairing by the **swap rule**: a server row `(local=S, remote=C)` and a client row
+`(local=C, remote=S)` are the same connection. Controlled first — every delivered response
+paired with its emitter, by code and url:
+
+```
+client HTTP/1.1 501 Not Impleme ports 53051->53050 | server match: code 501 url /x -> PAIRED
+client HTTP/1.1 403 Forbidden   ports 53053->53052 | server match: code 403 url /y -> PAIRED
+-> PASS: the swap rule pairs every response with its emitter
+```
+
+## The event
+
+```
+● Platform Connections › P1: POST /provider-connections ... created_by = NULL
+    Expected: 201    Received: 501
+
+install markers=29   server rows=110   client rows=256
+server rows with code 501:  0
+client rows with a 501 status line:  1
+
+CLIENT  HTTP/1.1 501 Not Implemented   ports 50444->50441  pid=50433
+        test: Platform Connections (P1-P5) P1: POST /provider-connections ...
+PAIRED SERVER ROW -> NONE. No express response was emitted on this connection.
+```
+
+**Both instruments were live in the same run and both spoke about the same event.** The wire
+carried a literal 501; no express route emitted a 501 anywhere in the run; and — the part
+that could only be seen with pairing — **no express response was emitted on that connection
+at all.**
+
+Following the server port further:
+
+```
+express responses emitted from server port 50441: 0
+client sockets that talked to port 50441:         1   (the 501)
+```
+
+## What is demonstrated, plainly
+
+**The 501 was produced by something that is not an express response in this application.**
+The conjunction holds: it is on the wire, and this app did not put it there.
+
+## And what is NOT demonstrated — including by me
+
+**This is not express-to-express cross-talk, and that was my leading hypothesis going in.**
+Classic cross-talk has a signature: the client row would pair with a *server row belonging to
+a different request* — someone else's response arriving here. That signature **did not
+appear.** There is no paired server row at all, and the server port in question emitted
+nothing, ever, for anybody.
+
+So round ten's reading — "bytes no route wrote were delivered to a socket a test was reading,
+therefore connection-level cross-talk" — was too strong. The first half is confirmed. The
+conclusion is not: a response can fail to come from this app without coming from another of
+its responses.
+
+## Where that leaves the mechanism
+
+Something answered on an ephemeral port with `HTTP/1.1 501 Not Implemented` while express
+served nothing on it. Candidates, none tested:
+
+- **Node's HTTP server answering below express.** Probed twice in round nine and it did not
+  reproduce — an unknown method gave 400 and a bad `Transfer-Encoding` gave 200 — so this is
+  not supported by what has been tried, but the probes were not exhaustive.
+- **A server that had already closed, or a port reused between listeners**, so the connection
+  reached a listener that never handed the request to express.
+- **supertest's own ephemeral listener** in a state where it answers before the app.
+
+The next measurement is narrow: record, per supertest server, its port and its open/closed
+lifetime, and check whether port 50441 was live and owned by the app at the moment of the
+connection. If the port was closed or owned by a previous server, this is a port-reuse defect
+in the harness and has nothing to do with application state at all — which after eleven rounds
+would be the plainest explanation yet offered for a class of failures that has resisted every
+state-based theory.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; the client layer as its inventor; and now
+**express-to-express cross-talk**, which was the leading hypothesis one round ago.
+
+Established: **the 501 is real on the wire and this application did not emit it.**
+
+**Nothing was disabled, retried or quarantined; production route and test files remain
+byte-identical to `main`.**
+
+---
+
+# Round twelve, 2026-08-03: not port reuse — the port was live and app-owned
+
+**77 runs of half A, 4 failures, the event captured at run 76 with all three recorders live.**
+The appealing explanation is **refuted by its own measurement.**
+
+## The lifetime recorder, controlled on a real reuse
+
+Wrapping `net.Server.prototype.listen`/`close`, each listener gets an id so a port used twice
+is two rows. The control forces an actual reuse — bind, close, rebind the same port:
+
+```
+listen rows=3 close rows=3 install=1
+port 51792 used by serverIds [1, 2] -> REUSE DETECTED
+swap-rule pairing still works: True
+-> PASS: detects reuse AND pairs responses
+```
+
+## The event
+
+```
+● Platform Connections › P5: DELETE /provider-connections/:id as admin ...
+    Expected: 200    Received: 501
+
+install=29  server=111  client=241  listen=241  close=241
+server rows with code 501: 0        client 501 rows: 1
+
+CLIENT 501  ports 50442->50441  at ts=...992667
+  paired express response: NONE
+  listeners that ever owned port 50441: 1  (serverIds [5])
+    serverId=5 listen@...992631 close@...992671
+    -> connection at ...992667 was INSIDE (live)
+```
+
+## What that settles
+
+**Port reuse is refuted.** Port 50441 had **exactly one listener in the entire run** — no
+second `serverId`, so nothing rebound it — and the connection landed **inside** that
+listener's live window. The harness did not hand the client a stale or foreign port.
+
+This was the explanation that would have been plainest after eleven rounds, and it is the one
+the measurement rules out. Recording that rather than reaching for it.
+
+## What is now established, cumulatively, about a single event
+
+1. The wire carried a literal `HTTP/1.1 501 Not Implemented` (round ten, controlled).
+2. No express route emitted a 501 anywhere in the run — 111 `res.status` calls recorded, zero
+   of them 501 (rounds nine and eleven, liveness-proven).
+3. No express response was emitted on that connection at all (round eleven, swap-rule pairing).
+4. **The server on that port was live, app-owned, and singly-bound** (this round).
+
+So a live supertest server, owned by this application, accepted a connection and the client
+received a 501 that express never produced.
+
+## The sharpest untested candidate, and it is new
+
+The lifetime numbers hand over something the earlier rounds could not see:
+
+```
+listen@...631   connection@...667   close@...671
+```
+
+**The whole server lived 40ms, and the connection arrived 4ms before it closed.** That is a
+closing-server race: a connection accepted while `close()` is in flight, on a listener whose
+entire existence is shorter than one event-loop tick under load.
+
+That is now the leading candidate and it is **not** yet tested. It is testable directly:
+force a connection into the window between `close()` being called and the listener finishing,
+and observe what status the client receives. If it is 501, the mechanism is found and it lives
+in supertest's per-request server lifecycle, not in application state — which would end an
+investigation that has eliminated every state-based theory for eleven rounds.
+
+The other candidates named in round eleven — Node answering below express, supertest's
+listener answering before the app — remain untested and are not displaced by this, only
+ranked below it.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; the client layer as its inventor;
+express-to-express cross-talk; and **port reuse in the harness.**
+
+One caution on rates: these batches ran at **4 failures in 77** against the ~10% of rounds
+four to six. Three wrappers per response is not free, and an instrument that changes the rate
+may be changing the thing it measures. That is a reason to treat the *rate* here as
+uninformative — it is not a reason to doubt the event, which was captured whole.
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
+
+---
+
+# Round thirteen, 2026-08-03: the closing-server race does not reproduce it
+
+**280 forced attempts, two shapes, zero 501s. The leading candidate is weakened, not
+confirmed.**
+
+Round twelve ranked a closing-server race first on the strength of one timing:
+`listen@631, connection@667, close@671` — a 40ms listener taking a connection 4ms before it
+closed. Forcing that window deliberately is worth more than waiting for it, so it was forced.
+
+## Shape one — connect after `close()` is called
+
+```
+CONTROL (server left open)      -> HTTP/1.1 200 OK
+ARM (connect while closing, 120 attempts):
+  120x  ERR ECONNREFUSED
+-> NOT reproduced
+```
+
+A connection attempted after `close()` is **refused**, not answered. Note this is also the
+wrong model of the event: in run 76 the connection landed *before* the close, not after.
+
+## Shape two — the shape actually observed: request in flight, then `close()`
+
+```
+CONTROL (no close during request) -> HTTP/1.1 200 OK
+close 0ms after send, fast handler   -> 38x HTTP/1.1 200 OK | 2x ERR ECONNRESET
+close 0ms after send, 20ms handler   -> 38x HTTP/1.1 200 OK | 2x ERR ECONNRESET
+close 5ms after send, 20ms handler   -> 40x HTTP/1.1 200 OK
+```
+
+A server closing under an in-flight request either **completes the response normally** or
+**resets the connection**. It never answers 501.
+
+## Saying it plainly
+
+**This weakens the closing-server explanation.** The window was forced at three offsets
+against both a fast and a slow handler, 280 attempts, and the control confirms the harness
+delivers normally throughout — so the arms were live and the failure to reproduce is not an
+artefact of a dead experiment.
+
+It is *not* being written off as "the window was too narrow". That excuse is available and it
+is refused: the two behaviours a closing server actually exhibits here — a clean 200 and an
+ECONNRESET — are both observable and neither is a 501, so the mechanism does not merely need
+finer timing, it produces the wrong output entirely.
+
+**A reproduction on demand would have identified the mechanism. Its absence does not identify
+anything, and that is the honest result of this round.**
+
+## What survives
+
+The four established facts about run 76 are untouched, since none of them depended on the
+race being the cause:
+
+1. the wire carried a literal `HTTP/1.1 501 Not Implemented`
+2. no express route emitted a 501 anywhere in that run
+3. no express response was emitted on that connection
+4. the server on that port was live, app-owned and singly-bound
+
+**Something answered 501 on a live application-owned socket, and neither express, nor the
+client layer, nor port reuse, nor a closing-server race accounts for it.**
+
+## What is left, ranked
+
+- **Node's HTTP server answering below express.** Probed in round nine with an unknown method
+  (400) and a bad `Transfer-Encoding` (200), so two paths are excluded and the space is not.
+  Node's own 501 paths should be enumerated from its source rather than guessed at — that is
+  a reading task, not a running task, and it is the cheapest thing left.
+- **supertest's per-request listener answering before the app.** Untested.
+- A source outside both, reached because the connection went somewhere unexpected. Round
+  twelve rules out port *reuse*, not every form of misdirection.
+
+## Standing state
+
+Eliminated by measurement, cumulative: `process.env` and `globalThis` as carriers; "symptoms
+are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as the timeout
+mechanism; "drained queue → promise never resolves"; the drained queue as the cause; the SSE
+timing margin; every route-level origin of the 501; the client layer as its inventor;
+express-to-express cross-talk; port reuse; and now **the closing-server race**.
+
+Thirteen rounds, thirteen dead ends, and one fact that has survived all of them: **the 501 is
+real on the wire and this application did not write it.**
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
+
+---
+
+# Round fourteen, 2026-08-03: Node cannot emit 501 — the enumeration is complete
+
+**Source read, not remembered: Node `v26.5.0`, the exact binary running this suite**, via
+`process.binding('natives')`, which returns the embedded source of the internal modules.
+Modules examined: `_http_server`, `_http_common`, `_http_incoming`, `_http_outgoing`,
+`internal/http`.
+
+## Being exact about what the earlier probes achieved
+
+Round nine probed two inputs — an unknown method (got **400**) and a bad `Transfer-Encoding`
+(got **200**). Those excluded **two paths, not the category**, and the round-thirteen ranking
+said so. This enumerates the category.
+
+## Every occurrence of 501 in Node's HTTP server
+
+```
+_http_server:176:   501: 'Not Implemented',            // RFC 7231 6.6.2
+```
+
+**One occurrence, in the `STATUS_CODES` lookup table** — a label used to render a status line
+if some caller asks for 501. It is not an emission.
+
+## The reading, positive-controlled
+
+A grep that finds nothing proves nothing unless it can find something. The same scan over the
+same module locates every canned response Node actually sends:
+
+```
+_http_server:972-973:  const badRequestResponse     = ... `HTTP/1.1 400 ${STATUS_CODES[400]}`
+_http_server:976-977:  const requestTimeoutResponse = ... `HTTP/1.1 408 ${STATUS_CODES[408]}`
+_http_server:981:                                     ... `HTTP/1.1 431 ${STATUS_CODES[431]}`
+_http_server:986:                                     ... `HTTP/1.1 413 ${STATUS_CODES[413]}`
+_http_server:1014:     response = requestTimeoutResponse;
+_http_server:1017:     response = badRequestResponse;
+_http_server:269:      ServerResponse.prototype.statusCode = 200;
+_http_server:727:      res.statusCode = 500;
+```
+
+So the scan does find emissions where they exist. **Node's HTTP server has exactly four
+hard-coded error responses — 400, 408, 431, 413 — plus a 200 default and a 500 for a throwing
+request listener. 501 is not among them.**
+
+## The complete list, each marked
+
+| Candidate Node 501 path | Status |
+|---|---|
+| `STATUS_CODES[501]` table entry, `_http_server:176` | **not an emission** — a label only |
+| unknown/unsupported HTTP method | **excluded by evidence** — probe returned 400 |
+| unsupported `Transfer-Encoding` | **excluded by evidence** — probe returned 200 |
+| malformed request / parser error (`badRequestResponse`) | **excluded by source** — emits 400 |
+| request timeout (`requestTimeoutResponse`) | **excluded by source** — emits 408 |
+| headers too large | **excluded by source** — emits 431 |
+| payload too large | **excluded by source** — emits 413 |
+| throwing request listener | **excluded by source** — sets 500 |
+| any other | **none exist** — 501 appears nowhere else in the HTTP modules |
+
+## Plainly: Node is eliminated
+
+**Node's HTTP server cannot emit a 501 of its own.** The enumeration is complete for the
+version in use, it was read from the running binary rather than recalled, and the reading was
+controlled against codes Node does emit.
+
+That was the top-ranked remaining candidate and it is gone. Thirteen rounds of elimination do
+not pay off here — this closes a door rather than opening one, and that is the honest result.
+
+## What is left
+
+**One named candidate: supertest's per-request listener answering before the app.** It is
+untested, and it is now the only surviving named explanation for the fact that has outlived
+everything else:
+
+> a literal `HTTP/1.1 501 Not Implemented` was delivered on a live, application-owned socket,
+> and neither express, nor the client layer, nor port reuse, nor a closing-server race, nor
+> Node itself wrote it.
+
+If supertest is also excluded, the honest position becomes that the 501 comes from something
+not yet named at all, and the next step would be to widen rather than narrow — capture the
+full response body alongside the status line, since a body identifies its author far more
+specifically than three digits do, and every capture so far has deliberately read only the
+first line.
+
+## Standing state
+
+Eliminated by measurement or source, cumulative: `process.env` and `globalThis` as carriers;
+"symptoms are purely logical"; order-dependence; the runInBand asymmetry; CPU starvation as
+the timeout mechanism; "drained queue → promise never resolves"; the drained queue as the
+cause; the SSE timing margin; every route-level origin of the 501; the client layer as its
+inventor; express-to-express cross-talk; port reuse; the closing-server race; and **Node's
+HTTP server**.
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
+
+---
+
+# Round fifteen, 2026-08-03: the 501 comes from a third-party process on the machine
+
+**The body names its author. Fourteen rounds of elimination were looking inside an
+application that never wrote the response.**
+
+## Part one: supertest is eliminated too
+
+`supertest@6.3.4` and `superagent@8.1.2`: **zero occurrences of `501`** anywhere in their
+`lib/`. The same grep finds the codes they do reference — `response-base.js:113 badRequest ===
+400`, `:117 notFound === 404` — so the scan works. The last named candidate is gone.
+
+At that point the honest position was that the source is **something not yet named**. It was.
+
+## Part two: the full body
+
+Every capture until now read only the status line — a limitation of the instrument, not a
+property of the failure. The recorder was extended to keep the whole response, controlled
+first (a 501 carrying `CTL-AUTHOR-TAG` captured entire, a 200 ignored), then run.
+
+Captured at run 33 of 67, on a test expecting 400:
+
+```
+HTTP/1.1 501 Not Implemented
+Server: websocket-sharp/1.0
+Connection: close
+```
+
+**`Server: websocket-sharp/1.0`.** That is a C#/.NET WebSocket library. It is not Node, not
+express, not supertest, and not anything in this repository.
+
+In the same run: 110 `res.status` calls recorded, **zero of them 501**, and no express
+response on that connection — consistent with every previous round, and now explained.
+
+## The mechanism
+
+```
+$ lsof -nP -iTCP:50441
+LogiPlugi 2654 jon 355u IPv4 TCP 127.0.0.1:50441 (LISTEN)
+```
+
+**A third-party service on the development machine — Logitech's plugin daemon — listens on
+127.0.0.1:50441 and serves websocket-sharp, which answers a non-WebSocket HTTP request with
+`501 Not Implemented`.** Port 50441 is inside the ephemeral range supertest draws from. When a
+supertest client's connection lands there, it gets that daemon's 501 instead of the
+application's response.
+
+This is why:
+
+- the wire carried a real 501 — it did, written by another process
+- no express route emitted one — none did
+- no express response existed on that connection — the connection never reached the app
+- port *reuse* within the run was refuted — the collision is with a **foreign** listener, which
+  the lifetime recorder could not see because it only instruments this process
+- the closing-server race did not reproduce it — it was never the mechanism
+- Node could not emit it — correct, and irrelevant
+- **the rate is environmental.** Round three recorded 7.5% locally against 25% in CI and said
+  "whatever modulates it is environmental, so a rate measured on one machine should not be
+  quoted as the rate". That was right, and this is the reason.
+
+## Scope — stated narrowly on purpose
+
+**This explains the 501 class.** It is not extended to the 400/401/404 or timeout classes
+without evidence; a foreign listener answering with something else would produce a different
+status, which is a testable prediction and not a claim. The same capture, kept for every
+status rather than only 501, would settle it.
+
+**It is a defect in the test environment, not in the application**, and the fix is not a code
+change: it is to bind supertest servers away from a range a foreign daemon occupies, or to
+detect the collision and fail loudly rather than assert on a stranger's response.
+
+## What this cost, and what it was worth
+
+Fourteen rounds eliminated: `process.env` and `globalThis`; "symptoms are purely logical";
+order-dependence; the runInBand asymmetry; CPU starvation; "drained queue → promise never
+resolves"; the drained queue as the cause; the SSE timing margin; every route-level origin of
+the 501; the client layer; express-to-express cross-talk; port reuse; the closing-server race;
+Node's HTTP server; and supertest.
+
+Every one of them searched **inside the application**. The answer was outside it, and the
+single instrument that found it was the one that stopped reading three digits and read what
+the response actually said.
+
+**Nothing was disabled, retried or quarantined; production and test files remain
+byte-identical to `main`.**
+
+---
+
+# Round sixteen, 2026-08-03: the guard ships, and the cross-class question stays open
+
+## Part one: full capture for every status — no foreign response recurred
+
+The recorder was widened from "capture 501s" to "flag any response carrying a `Server:`
+header", since neither express nor Node's http server sets one and anything that does is not
+us. That covers **every status**, not just 501, which is what the 400/401 question needs.
+
+**30 runs of half A, 1 failure, and zero foreign responses of any status.**
+
+So the collision did not recur in this batch, and **the question of whether the 400/401 class
+shares this cause is still open.** It is not being answered by inference from the 501 case: a
+foreign daemon answering a different request with a different status is a *prediction*, and no
+instance of it was observed. Saying it is the same cause would be exactly the forcing this
+document has spent fifteen rounds avoiding.
+
+What has changed is that the question is now **answerable without another investigation**. The
+guard names the status and the `Server:` header of any foreign response the moment one occurs,
+so the next occurrence classifies itself.
+
+## Part two: the fix, and why it fails loudly
+
+`services/api/jest.portguard.js`, **on by default** — a guard, not a diagnostic.
+
+It does not retry, skip, rebind or work around the collision. It throws, naming what answered:
+
+```
+FOREIGN HTTP RESPONSE — this test received a response that this application did not write.
+  HTTP/1.1 501 Not Implemented  (Server: websocket-sharp/1.0)  from 127.0.0.1:51706
+
+A process outside this repository is listening inside the ephemeral port range
+supertest binds from, and answered instead of the app. Known offender on macOS:
+Logitech Options (LogiPluginService), which serves websocket-sharp and replies
+501 Not Implemented to any non-WebSocket request.
+
+Find it with:   lsof -nP -iTCP -sTCP:LISTEN | grep <port>
+```
+
+Positive-controlled both ways before shipping:
+
+```
+✓ does NOT fire on a normal app response
+✕ CONTROL-FOREIGN: a stranger answering must fail this test
+```
+
+**Rebinding away from the range was the alternative and was rejected.** A test that quietly
+avoids the collision still cannot tell a real response from a stranger's, and that is the
+family of defect this entire investigation was closing — an instrument that cannot distinguish
+an observation from an artefact. Failing loudly converts a silent wrong assertion into a named
+one.
+
+## For the next person meeting a weird status
+
+- **Daemon:** Logitech Options / `LogiPluginService` (macOS), serving `websocket-sharp/1.0`.
+- **Observed port:** `127.0.0.1:50441`, confirmed with
+  `lsof -nP -iTCP:50441` → `LogiPlugi 2654 jon ... (LISTEN)`.
+- **Range:** the ephemeral range supertest draws from — on this machine the collisions landed
+  in the **50400–50500** area, but the range is OS-assigned and the specific port is not the
+  point; any listener inside it will do this.
+- **Signature:** a status your application cannot emit, on a request that never appears in
+  your handler logs, with a `Server:` header your stack does not set.
+
+## Standing state
+
+The 501 class is explained and guarded. The 400/401/404 and timeout classes remain
+**unexplained and unattached** — deliberately.
+
+Eliminated across sixteen rounds: `process.env` and `globalThis`; "symptoms are purely
+logical"; order-dependence; the runInBand asymmetry; CPU starvation; "drained queue → promise
+never resolves"; the drained queue as the cause; the SSE timing margin; every route-level
+origin of the 501; the client layer; express-to-express cross-talk; port reuse within the
+process; the closing-server race; Node's HTTP server; supertest.
+
+**Nothing was disabled, retried or quarantined; production files remain byte-identical to
+`main`.**
