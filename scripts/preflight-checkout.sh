@@ -115,11 +115,16 @@ report_drift() {
     fi
     echo "  ################################################################"
     if [ "$behind" -gt 0 ]; then
-        git --no-pager log --oneline HEAD..origin/main 2>/dev/null | sed 's/^/    /' | head -20
+        # -n 20, not `| head -20`. head closes the pipe after twenty lines, the
+        # writer takes SIGPIPE, and `set -o pipefail` turns that into exit 141 —
+        # which aborts the preflight, and with it the deploy, BEFORE
+        # `git reset --hard`. Latent until the checkout is more than twenty
+        # commits behind; it stopped every deploy on 2026-08-03 at 55 behind.
+        git --no-pager log --oneline -n 20 HEAD..origin/main 2>/dev/null | sed 's/^/    /'
     fi
     if [ "$ahead" -gt 0 ]; then
         echo "    commits only on this host:"
-        git --no-pager log --oneline origin/main..HEAD 2>/dev/null | sed 's/^/      /' | head -20
+        git --no-pager log --oneline -n 20 origin/main..HEAD 2>/dev/null | sed 's/^/      /'
     fi
     echo ""
 }
