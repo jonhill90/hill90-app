@@ -63,6 +63,14 @@
 #   0  no actionable drift  (in sync, docs-only, or inside the grace window)
 #   1  ACTIONABLE DRIFT     (deployable code merged and not running, or host ahead)
 #   2  CANNOT DETERMINE     (no usable deployed SHA — never silent, never green)
+#   3  RUNNING CODE UNKNOWN (a container carries no usable stamp: this check
+#                            cannot say whether it is current OR behind)
+#
+# 1 AND 3 ARE DELIBERATELY DIFFERENT, and a caller that collapses them to
+# "non-zero" loses the distinction this script exists to make. 1 is a finding
+# about the code. 3 is the ABSENCE of a finding — the check has no information.
+# Reporting 3 as 1 is what this script used to do, and it meant the alarm's
+# headline asserted drift on evidence it did not have.
 
 set -uo pipefail
 

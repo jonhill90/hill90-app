@@ -343,14 +343,37 @@ setup() {
     [[ "$output" == *"app-ui: ${sha:0:12} — current with"* ]]
 }
 
+# ---------------------------------------------------------------------------
+# THE THREE ASSERTIONS BELOW CHANGED FROM `exit 1` TO `exit 3`, AND WHY THAT IS
+# NOT EDITING A TEST TO MAKE IT PASS.
+#
+# This repository's rule is that a red test is never edited into a green one.
+# From outside, that and this look identical: an assertion changed, a red run
+# went green. The difference is which direction the truth moved.
+#
+# These three describe an UNSTAMPED or unreadable container — a state where the
+# check has NO INFORMATION about the running code. They asserted `exit 1`, the
+# same code as "this container is running old code", because the script used one
+# flag and one message for both. That shared code IS the conflation this change
+# removes: the assertions were a faithful record of a defect, so correcting the
+# defect necessarily falsifies them.
+#
+# What is preserved is the property each was written to protect — that absence
+# must never read as agreement. Each still asserts a NON-ZERO exit, and each now
+# additionally asserts the output does NOT claim BEHIND, which is the thing the
+# old code could not distinguish and the reason these had to move.
+# ---------------------------------------------------------------------------
+
 @test "RUNNING: an UNSTAMPED container is not a pass" {
     # A container created before the stamp existed, or by hand. Absence must not
     # read as agreement — the same rule the exit-2 path enforces for the checkout.
     sha=$(git rev-parse HEAD)
     run env DEPLOYED_SHA="$sha" CONTAINER_REVISIONS="app-api=unstamped" bash "$CHECK"
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 3 ]          # 3 = cannot tell; still non-zero, still not a pass
+    [ "$status" -ne 0 ]
     [[ "$output" == *"UNSTAMPED"* ]]
     [[ "$output" == *"Not a pass"* ]]
+    [[ "$output" != *"RUNNING CODE IS BEHIND"* ]]
 }
 
 @test "RUNNING: docker's empty-label output is treated as unstamped, not as a SHA" {
@@ -359,16 +382,20 @@ setup() {
     # as a mismatch for the wrong reason.
     sha=$(git rev-parse HEAD)
     run env DEPLOYED_SHA="$sha" CONTAINER_REVISIONS="app-api=<no value>" bash "$CHECK"
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 3 ]
+    [ "$status" -ne 0 ]
     [[ "$output" == *"UNSTAMPED"* ]]
+    [[ "$output" != *"RUNNING CODE IS BEHIND"* ]]
 }
 
 @test "RUNNING: a revision this repo has never seen is reported, not silently skipped" {
     sha=$(git rev-parse HEAD)
     run env DEPLOYED_SHA="$sha" \
         CONTAINER_REVISIONS="app-api=0000000000000000000000000000000000000000" bash "$CHECK"
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 3 ]
+    [ "$status" -ne 0 ]
     [[ "$output" == *"is not a commit in this repository"* ]]
+    [[ "$output" != *"RUNNING CODE IS BEHIND"* ]]
 }
 
 @test "RUNNING: with no revisions supplied it says so rather than implying agreement" {
