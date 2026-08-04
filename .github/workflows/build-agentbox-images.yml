@@ -16,6 +16,32 @@ name: Build Agentbox Images (Prod)
 # error and no signal.
 #
 # Manual-only, matching deploy.yml. A merge must not build.
+#
+# DELIBERATELY NO `paths:` FILTER, AND DELIBERATELY NO PUSH TRIGGER.
+#
+# Building an image on the production host is host mutation, so it follows
+# deploy.yml rather than ci.yml: CLAUDE.md invariant 7 — a merge must not
+# deploy. What says a rebuild is DUE is deploy-drift.yml, which runs four-hourly
+# and, since #242, reads the com.hill90.revision label off these images.
+#
+# If you are here to add `on: push` with a `paths:` filter, read this first.
+# There is currently exactly ONE definition of "stale for this image": `dep_re`
+# in scripts/checks/check_deploy_drift.sh:231. For the agentbox images it is
+#
+#     ^(services/agentbox/|services/knowledge/)
+#
+# and the services/knowledge half is NOT decoration — Dockerfile copies the akm
+# CLI out of hill90/knowledge, so a knowledge commit makes an agentbox image
+# stale while services/agentbox is untouched.
+#
+# The obvious filter — `paths: services/agentbox/**` — omits that half. It would
+# create a SECOND definition of stale that disagrees with the first in a case
+# nobody would notice: the alarm reports BEHIND, the trigger never fires, and
+# the two contradict each other silently. Two mechanisms with different
+# definitions of stale are worse than one, because the disagreement is
+# invisible until it matters. If a trigger is ever added, derive its path set
+# from dep_re rather than re-typing it — re-typing a value from another file is
+# what produced tag:ci in #233.
 
 on:
   workflow_dispatch:
