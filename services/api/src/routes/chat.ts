@@ -1439,11 +1439,22 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     }
 
     // Get message IDs in this thread for correlation filtering
+    // The correlation filter needs every message id in the thread, and it
+    // needs them EXACTLY: a missing id silently drops a real event, which is
+    // the failure family this codebase has spent the day removing. So this
+    // initial load stays complete, and #216 keeps the remaining memory term.
+    // What changes is the refresh below, which used to redo this every five
+    // seconds for the life of the connection.
     const { rows: messageRows } = await pool.query(
-      `SELECT id FROM chat_messages WHERE thread_id = $1`,
+      `SELECT id, seq FROM chat_messages WHERE thread_id = $1`,
       [threadId]
     );
-    const threadMessageIds = new Set(messageRows.map((r: any) => r.id));
+    const threadMessageIds = new Set<string>(messageRows.map((r: any) => r.id));
+    // High-water mark for the incremental refresh below. seq is monotonic
+    // (nextval), so "everything above this" is exactly the new work.
+    let lastSeenSeq: number = messageRows.reduce(
+      (max: number, r: any) => (Number(r.seq) > max ? Number(r.seq) : max), 0,
+    );
 
     const follow = req.query.follow === 'true';
     const parsedTail = parseInt(req.query.tail as string);
@@ -1618,16 +1629,34 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
 
     if (closed || res.writableEnded || res.destroyed) return;
 
-    // Periodically refresh thread message IDs (new messages during conversation)
+    // Pick up messages that arrive mid-conversation — INCREMENTALLY (#216).
+    //
+    // This used to re-read every id in the thread every five seconds, per
+    // connected client, for the life of the connection: a repeated scan whose
+    // cost grew with the thread while the interval stayed fixed. Nothing was
+    // truncated and no answer was wrong, so there is no "showing N of M" to
+    // add here — the defect was cost, not correctness, which is why this is a
+    // different family from the truncation work and got its own issue.
+    //
+    // `seq > lastSeenSeq` makes each refresh proportional to what actually
+    // arrived. Never `clear()`: the set is only ever added to, and clearing
+    // before a failed query would drop ids the filter still needs.
+    //
+    // A stale-message reconcile reassigns seq via nextval, so a bumped message
+    // can reappear above the watermark. Re-adding it is a no-op on a Set, and
+    // nothing is ever missed because nextval only moves forward.
     messageRefreshInterval = setInterval(async () => {
       if (res.writableEnded || res.destroyed) return;
       try {
         const { rows } = await pool.query(
-          `SELECT id FROM chat_messages WHERE thread_id = $1`,
-          [threadId]
+          `SELECT id, seq FROM chat_messages WHERE thread_id = $1 AND seq > $2`,
+          [threadId, lastSeenSeq]
         );
-        threadMessageIds.clear();
-        for (const r of rows) threadMessageIds.add(r.id);
+        for (const r of rows) {
+          threadMessageIds.add(r.id);
+          const seq = Number(r.seq);
+          if (seq > lastSeenSeq) lastSeenSeq = seq;
+        }
       } catch { /* ignore */ }
     }, 5000);
 
