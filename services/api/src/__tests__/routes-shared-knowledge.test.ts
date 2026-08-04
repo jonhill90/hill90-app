@@ -99,6 +99,133 @@ describe('Shared Knowledge routes', () => {
     mockSearchShared.mockReset();
   });
 
+  // ── #215: the graph is bounded, and its stats are MEASURED ──────────
+  //
+  // Both halves are one change. `stats.collections = collections.length` was
+  // correct only because the query returned everything: a length that is
+  // correct only because nothing is bounded is a defect waiting for someone to
+  // bound it. Adding the LIMIT alone would have silently capped a figure
+  // rendered at SharedKnowledgeClient.tsx:155 — the #188 regression, again.
+  //
+  // Every fixture therefore makes the page and the total DISAGREE: 2 rows,
+  // 40,000 in the corpus. A fixture where they match is passed by the
+  // length-derived implementation, which is the defect.
+
+  function graphRows(collections: unknown[], sources: unknown[], agents: unknown[], totals: Record<string, string>) {
+    // Promise.all order: collections, sources, agentEntries, counts.
+    mockQuery
+      .mockResolvedValueOnce({ rows: collections })
+      .mockResolvedValueOnce({ rows: sources })
+      .mockResolvedValueOnce({ rows: agents })
+      .mockResolvedValueOnce({ rows: [totals] });
+  }
+
+  it('reports totals from COUNT(*), not from the length of the page', async () => {
+    graphRows(
+      [{ id: 'c1', name: 'A', visibility: 'shared' }, { id: 'c2', name: 'B', visibility: 'shared' }],
+      [{ id: 's1', title: 'S1', source_type: 'text', collection_id: 'c1', chunk_count: '3' }],
+      [{ agent_id: 'bot-1', entry_count: '5', last_updated: new Date() }],
+      { collections: '40000', sources: '900', agents_with_knowledge: '7' },
+    );
+
+    const res = await request(app)
+      .get('/shared-knowledge/graph?limit=2')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    // The corpus, not the page.
+    expect(res.body.stats).toEqual({ collections: 40000, sources: 900, agents_with_knowledge: 7 });
+    // The page, named separately.
+    expect(res.body.shown).toEqual({ collections: 2, sources: 1, agents_with_knowledge: 1 });
+    expect(res.body.stats.collections).not.toBe(res.body.shown.collections);
+    expect(res.body.truncated).toBe(true);
+  });
+
+  it('bounds every list it returns', async () => {
+    graphRows([], [], [], { collections: '0', sources: '0', agents_with_knowledge: '0' });
+
+    await request(app)
+      .get('/shared-knowledge/graph?limit=25')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    for (const i of [0, 1, 2]) {
+      expect(String(mockQuery.mock.calls[i][0])).toContain('LIMIT');
+      expect(mockQuery.mock.calls[i][1]).toEqual([25]);
+    }
+  });
+
+  it('counts agents with COUNT(DISTINCT), because that list is grouped', async () => {
+    graphRows([], [], [], { collections: '0', sources: '0', agents_with_knowledge: '0' });
+
+    await request(app)
+      .get('/shared-knowledge/graph')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    const countSql = String(mockQuery.mock.calls[3][0]);
+    // A plain COUNT(*) over knowledge_entries would count ENTRIES and report
+    // them as agents — a number wrong upward, which is no better than one
+    // wrong downward.
+    expect(countSql).toContain('count(DISTINCT agent_id)');
+    expect(countSql).toContain("status = 'active'");
+  });
+
+  it('says truncated is false when the page IS the corpus', async () => {
+    graphRows(
+      [{ id: 'c1', name: 'A', visibility: 'shared' }],
+      [{ id: 's1', title: 'S1', source_type: 'text', collection_id: 'c1', chunk_count: '1' }],
+      [{ agent_id: 'bot-1', entry_count: '1', last_updated: new Date() }],
+      { collections: '1', sources: '1', agents_with_knowledge: '1' },
+    );
+
+    const res = await request(app)
+      .get('/shared-knowledge/graph')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.body.truncated).toBe(false);
+    expect(res.body.shown).toEqual(res.body.stats);
+  });
+
+  it('omits edges whose collection node was truncated away', async () => {
+    // Sources survive the cut, their collection does not. An edge pointing at
+    // a node that is not in the response is worse than a smaller graph: the
+    // renderer either drops it silently or lays out around a phantom.
+    graphRows(
+      [{ id: 'c1', name: 'A', visibility: 'shared' }],
+      [
+        { id: 's1', title: 'S1', source_type: 'text', collection_id: 'c1', chunk_count: '1' },
+        { id: 's2', title: 'S2', source_type: 'text', collection_id: 'c-absent', chunk_count: '1' },
+      ],
+      [],
+      { collections: '2', sources: '2', agents_with_knowledge: '0' },
+    );
+
+    const res = await request(app)
+      .get('/shared-knowledge/graph?limit=1')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    const nodeIds = new Set(res.body.nodes.map((n: any) => n.id));
+    for (const e of res.body.edges) {
+      expect(nodeIds.has(e.source)).toBe(true);
+      expect(nodeIds.has(e.target)).toBe(true);
+    }
+    expect(res.body.edges).toHaveLength(1);
+    // Reported rather than dropped silently.
+    expect(res.body.dangling_edges_omitted).toBe(1);
+  });
+
+  it.each([
+    ['limit=0', 'limit must be between'],
+    ['limit=5000', 'limit must be between'],
+    ['limit=abc', 'limit must be an integer'],
+  ])('rejects %s rather than silently clamping', async (qs, message) => {
+    const res = await request(app)
+      .get(`/shared-knowledge/graph?${qs}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(message);
+  });
+
   // ── Stats ──
 
   it('GET /shared-knowledge/stats returns stats', async () => {
