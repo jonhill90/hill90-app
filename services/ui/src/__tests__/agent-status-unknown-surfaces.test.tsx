@@ -147,6 +147,29 @@ describe('#251 ChatView: an unverified agent is not labelled Stopped', () => {
     expect(screen.getByTestId('mention-input')).not.toHaveAttribute('placeholder', 'No agents running')
   })
 
+  it('says unverified in the placeholder rather than implying a working agent', () => {
+    // The distinction the whole of #251 is about, arriving in a string a user
+    // reads. "Type a message..." is not false, but it implies a working agent
+    // and says nothing about what the API could not check.
+    render(<ChatView {...props(UNKNOWN)} />)
+    expect(screen.getByTestId('mention-input'))
+      .toHaveAttribute('placeholder', 'Agent status unverified — you can still send')
+  })
+
+  it('does not claim unverified once something IS verified running', () => {
+    // Without this, a placeholder hard-coded to the unverified string would
+    // pass the case above and be wrong everywhere else.
+    render(<ChatView {...props('running')} />)
+    expect(screen.getByTestId('mention-input')).toHaveAttribute('placeholder', 'Type a message...')
+  })
+
+  it('still says no agents running when every agent is VERIFIED stopped', () => {
+    // Reachable only when nothing is unknown. Since #252 a `stopped` status
+    // means the reconciler checked it, so this sentence is backed.
+    render(<ChatView {...props('stopped')} />)
+    expect(screen.getByTestId('mention-input')).toHaveAttribute('placeholder', 'No agents running')
+  })
+
   // Twins: the third rendering did not cost us the first two.
   it('still renders Running for a verified running agent', () => {
     render(<ChatView {...props('running')} />)

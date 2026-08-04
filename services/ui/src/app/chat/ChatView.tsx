@@ -245,13 +245,27 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
   // dispatch gate still rejects a genuinely stopped agent, visibly.
   const anyAgentAvailable = agents.some(a => mayBeAvailable(a.status))
   const anyAgentUnverified = agents.some(a => isUnknownStatus(a.status))
+  const anyAgentVerifiedRunning = agents.some(a => statusTone(a.status) === 'running')
   const allAgentsStopped = agents.length > 0 && !anyAgentAvailable
   const agentName = thread?.agent?.name || 'Agent'
 
   // Build placeholder text for input
   const getPlaceholder = () => {
+    // Reached only when EVERY agent is verified inactive. Since #252 a
+    // `stopped` status means the reconciler checked and found it stopped — an
+    // unchecked one arrives as `unknown` and takes the branch below — so this
+    // sentence is a claim the API actually backs.
     if (!anyAgentAvailable) return 'No agents running'
     if (hasPending) return 'Waiting for response...'
+    // Nothing here is known to be running, and something is unverified. The
+    // composer stays enabled on purpose (an agent we could not check may well
+    // be running, and refusing to send would be a confident wrong claim in the
+    // other direction) but the placeholder must not imply a working agent
+    // either. Unverified is not absent, and this is the one place that
+    // distinction reaches a string a user actually reads.
+    if (anyAgentUnverified && !anyAgentVerifiedRunning) {
+      return 'Agent status unverified — you can still send'
+    }
     if (isGroup) return 'Message all agents, or @name to target one...'
     return 'Type a message...'
   }
