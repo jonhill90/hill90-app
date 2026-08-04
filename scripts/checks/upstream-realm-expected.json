@@ -15,8 +15,8 @@
     "repo": "jonhill90/Hill90",
     "path": "platform/auth/keycloak/platform-realm.json",
     "url": "https://raw.githubusercontent.com/jonhill90/Hill90/main/platform/auth/keycloak/platform-realm.json",
-    "commit": "6e76e32d3541ece3777a2742fd08b3af043d8c1d",
-    "committed_at": "2026-08-01T02:36:41Z"
+    "commit": "f2c84a3bbeb1589094e3c3bf36993b4b61ef64d2",
+    "committed_at": "2026-08-04T18:37:05Z"
   },
   "guarded_fields": [
     "bearerOnly",
@@ -41,6 +41,7 @@
         "web-origins",
         "acr",
         "roles",
+        "basic",
         "profile",
         "email"
       ],
