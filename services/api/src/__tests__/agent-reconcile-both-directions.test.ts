@@ -107,6 +107,21 @@ afterEach(() => {
 });
 
 describe('the direction that did not exist', () => {
+  it('the pass looks at every row, not only the ones marked running', async () => {
+    // The fixture feeds rows regardless of the SQL, so nothing else in this
+    // file can see the WHERE clause — and the WHERE clause IS the defect. A
+    // reconciler that still selects `status = 'running'` cannot promote
+    // anything no matter how the branch below is written.
+    selectAgents([agentRow({ status: 'stopped' })]);
+    mockContainerInspect.mockResolvedValue(container('running'));
+
+    await runReconcilePass();
+
+    const select = String(mockQuery.mock.calls[0][0]);
+    expect(select).toContain('FROM agents');
+    expect(select).not.toContain("status = 'running'");
+  });
+
   it('POSITIVE CONTROL: a stopped row whose container IS running is promoted', async () => {
     selectAgents([agentRow({ status: 'stopped' })]);
     mockContainerInspect.mockResolvedValue(container('running'));
