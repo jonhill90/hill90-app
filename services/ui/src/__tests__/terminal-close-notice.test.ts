@@ -16,6 +16,7 @@ import {
   shouldReconnect,
   CLOSE_UNAUTHORIZED,
   CLOSE_CREDENTIAL_EXPIRED,
+  CLOSE_ACCESS_REVOKED,
 } from '@/app/chat/terminalClose'
 
 describe('terminalCloseNotice', () => {
@@ -59,5 +60,37 @@ describe('shouldReconnect', () => {
 
   it('retries a dropped connection, which is what heals a blip', () => {
     expect(shouldReconnect(1006)).toBe(true)
+  })
+})
+
+/**
+ * app#196: the api now closes a terminal with 4004 when the viewer is REMOVED
+ * from the thread.
+ *
+ * The reconnect assertion is the load-bearing one. This module auto-reconnects on
+ * every code it does not recognise, so a 4004 the ui did not know about would make
+ * a removed user's terminal retry in a loop against an upgrade that now refuses
+ * them — and say nothing while doing it. Adding a code to the api without adding
+ * it here is a silent regression, which is why both halves are asserted.
+ */
+describe('a terminal closed because access was revoked', () => {
+  it('does NOT reconnect — retrying cannot restore access that was taken away', () => {
+    expect(shouldReconnect(CLOSE_ACCESS_REVOKED)).toBe(false)
+  })
+
+  it('tells the user why, rather than leaving a pane that reads as a blip', () => {
+    const lines = terminalCloseNotice(CLOSE_ACCESS_REVOKED)
+    expect(lines).not.toBeNull()
+    expect(lines!.join('')).toMatch(/access revoked/i)
+  })
+
+  it('prefers the server\'s reason when it sends one', () => {
+    const lines = terminalCloseNotice(CLOSE_ACCESS_REVOKED, 'access revoked')
+    expect(lines!.join('')).toMatch(/access revoked/i)
+  })
+
+  it('is a distinct code from unauthorized and expired', () => {
+    expect(CLOSE_ACCESS_REVOKED).not.toBe(4001)
+    expect(CLOSE_ACCESS_REVOKED).not.toBe(4002)
   })
 })
