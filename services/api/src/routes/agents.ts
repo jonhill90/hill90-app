@@ -1381,6 +1381,39 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
       metadata: profileMetadata,
     });
 
+    // #285's second half. Read Docker's own State.StartedAt for started_at,
+    // HERE — immediately after createAndStartContainer returns, before any
+    // of Phase 6B or what follows — and NOWHERE ELSE. THE POSITION IS
+    // LOAD-BEARING, not incidental:
+    //
+    // Containers here run RestartPolicy: unless-stopped (docker.ts), so the
+    // daemon can restart one invisibly to this service at any LATER point.
+    // Read StartedAt during ongoing reconciliation, or at any moment after
+    // this one, and it describes the LATEST restart rather than this
+    // session's start — that is exactly the hazard that scoped #326 (this
+    // issue's first half) down to the stop side only, and it is why
+    // inspectContainer's own reconciliation call site never reads this
+    // field. AT THIS EXACT LINE, no time has passed for an internal restart
+    // to occur — the container was created microseconds ago, by this
+    // request, one statement up — so the value is unambiguously this
+    // session's start. Moving this call further down the function (e.g. to
+    // just before the session INSERT, after tool installation), or reusing
+    // it for a container this request did not just create, reopens the
+    // hazard #326 exists to avoid.
+    //
+    // Never fails the start: the agent already launched successfully, and a
+    // metadata read going wrong must not be reported as a launch failure.
+    // Falls back to NOW() at INSERT time — today's behaviour — and the row
+    // says so via started_at_estimated, the same honesty the stop side
+    // already has via stopped_at_estimated.
+    let containerStartedAt: Date | null = null;
+    try {
+      const inspected = await inspectContainer(agent.agent_id);
+      containerStartedAt = inspected?.startedAt ?? null;
+    } catch (err) {
+      console.error(`[agents] Could not read container start time for ${agent.agent_id}:`, err);
+    }
+
     // Phase 6B: ensure required tools are installed for assigned skills.
     // Installation writes persistent status to agent_tool_installs.
     try {
@@ -1437,11 +1470,16 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
       console.error(`[agents] Status history insert failed for ${agent.agent_id}:`, err);
     }
 
-    // Track session for uptime progression
+    // Track session for uptime progression. COALESCE + IS NULL mirrors
+    // closeSessionsForStoppedAgents' own stop-side pattern exactly: the
+    // measured value when the read above got one, NOW() when it did not,
+    // and started_at_estimated records honestly which happened — the same
+    // shape stopped_at_estimated already gives the close side (#285).
     try {
       await getPool().query(
-        `INSERT INTO agent_sessions (agent_id, started_at) VALUES ($1, NOW())`,
-        [agent.id]
+        `INSERT INTO agent_sessions (agent_id, started_at, started_at_estimated)
+         VALUES ($1, COALESCE($2, NOW()), $2 IS NULL)`,
+        [agent.id, containerStartedAt]
       );
     } catch (err) {
       console.error(`[agents] Session tracking insert failed for ${agent.agent_id}:`, err);
@@ -2508,15 +2546,19 @@ router.get('/:id/stats', requireRole('user'), async (req: Request, res: Response
       getPool().query(
         // #213: the total, AND what it does not know. `total_uptime_seconds`
         // keeps its meaning; the two companions say how much of it rests on a
-        // close the reconciler guessed, and how many sessions are still
-        // accruing. Neither was expressible before, so a figure that was wrong
-        // — in either direction — looked exactly like a quiet agent.
+        // guess — either end, close OR open (#285's second half) — and how
+        // many sessions are still accruing. Neither was expressible before,
+        // so a figure that was wrong — in either direction — looked exactly
+        // like a quiet agent. OR, not just stopped_at_estimated: a session
+        // whose START was guessed is just as much a guess as one whose STOP
+        // was, and counting only one half would make started_at_estimated a
+        // column that is written and never read.
         `SELECT COALESCE(SUM(
            EXTRACT(EPOCH FROM (COALESCE(stopped_at, NOW()) - started_at))
          ), 0) AS total_uptime_seconds,
          COALESCE(SUM(
-           CASE WHEN stopped_at_estimated
-                THEN EXTRACT(EPOCH FROM (stopped_at - started_at)) ELSE 0 END
+           CASE WHEN stopped_at_estimated OR started_at_estimated
+                THEN EXTRACT(EPOCH FROM (COALESCE(stopped_at, NOW()) - started_at)) ELSE 0 END
          ), 0) AS estimated_uptime_seconds,
          COUNT(*) FILTER (WHERE stopped_at IS NULL) AS open_sessions
          FROM agent_sessions WHERE agent_id = $1`,
@@ -2679,10 +2721,11 @@ router.get('/:id/artifacts', requireRole('user'), async (req: Request, res: Resp
       getPool().query(
         // #213, the twin of the /stats sum. Same query, same defect, same fix —
         // a total corrected on one endpoint and not the other is the drift
-        // behind #141, #153 and #182.
+        // behind #141, #153 and #182. OR started_at_estimated per #285's
+        // second half — see the /stats query's fuller comment.
         `SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(stopped_at, NOW()) - started_at))), 0) AS total_uptime_seconds,
-         COALESCE(SUM(CASE WHEN stopped_at_estimated
-                           THEN EXTRACT(EPOCH FROM (stopped_at - started_at)) ELSE 0 END), 0) AS estimated_uptime_seconds,
+         COALESCE(SUM(CASE WHEN stopped_at_estimated OR started_at_estimated
+                           THEN EXTRACT(EPOCH FROM (COALESCE(stopped_at, NOW()) - started_at)) ELSE 0 END), 0) AS estimated_uptime_seconds,
          COUNT(*) FILTER (WHERE stopped_at IS NULL) AS open_sessions
          FROM agent_sessions WHERE agent_id = $1`,
         [agent.id],

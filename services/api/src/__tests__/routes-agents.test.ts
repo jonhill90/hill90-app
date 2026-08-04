@@ -2,6 +2,7 @@ import request from 'supertest';
 import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { createApp } from '../app';
+import { inspectContainer as mockedInspectContainer } from '../services/docker';
 
 // Generate a throwaway RSA keypair for test signing
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
@@ -31,7 +32,13 @@ jest.mock('../db/pool', () => ({
 jest.mock('../services/docker', () => ({
   createAndStartContainer: (...args: any[]) => mockCreateAndStartContainer(...args),
   stopAndRemoveContainer: (...args: any[]) => mockStopAndRemoveContainer(...args),
-  inspectContainer: jest.fn().mockResolvedValue({ status: 'running', containerId: 'abc', health: 'healthy' }),
+  // startedAt defaulted here so tests unrelated to #285's start-side fix
+  // exercise the MEASURED path by default; tests below override it per-case
+  // for the fallback path (inspect throws, or returns no startedAt).
+  inspectContainer: jest.fn().mockResolvedValue({
+    status: 'running', containerId: 'abc', health: 'healthy',
+    startedAt: new Date('2026-01-01T00:00:00.000Z'),
+  }),
   getContainerLogs: jest.fn(),
   removeAgentVolumes: jest.fn().mockResolvedValue(undefined),
   reconcileAgentStatuses: jest.fn().mockResolvedValue(undefined),
@@ -269,6 +276,91 @@ describe('Agent lifecycle routes', () => {
       /UPDATE agents SET status = 'running'/i.test(String(c[0])));
     expect(finalUpdate).toBeDefined();
     expect(String(finalUpdate![0])).toMatch(/container_finished_at\s*=\s*NULL/);
+  });
+
+  // #285's second half: started_at should be Docker's own State.StartedAt,
+  // read immediately after createAndStartContainer returns — not the API's
+  // clock at whatever moment the session INSERT happens to run, after tool
+  // installation and everything else in between.
+  const sessionInsert = () =>
+    mockQuery.mock.calls.find((c) => /INSERT INTO agent_sessions/i.test(String(c[0])));
+
+  function queueStartQueries() {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'uuid-1', agent_id: 'test-agent', name: 'Test',
+          tools_config: {}, cpus: '1.0', mem_limit: '1g', pids_limit: 200,
+          soul_md: '', rules_md: '', description: '',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] }) // SELECT agent_skills (skill instructions)
+      .mockResolvedValueOnce({ rows: [] }) // getAgentElevatedScope (AI-115 ceiling check)
+      .mockResolvedValueOnce({ rows: [] }) // SELECT DISTINCT s.scope (getAgentEffectiveScope)
+      .mockResolvedValueOnce({ rows: [] });
+  }
+
+  it('POST /agents/:id/start records the container\'s real StartedAt, not marked estimated (#285)', async () => {
+    queueStartQueries();
+    (mockedInspectContainer as jest.Mock).mockResolvedValueOnce({
+      status: 'running', containerId: 'container-id-123', health: 'healthy',
+      startedAt: new Date('2026-08-04T12:00:00.000Z'),
+    });
+
+    const res = await request(app)
+      .post('/agents/uuid-1/start')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    const insert = sessionInsert();
+    expect(insert).toBeDefined();
+    // COALESCE + IS NULL, the same shape closeSessionsForStoppedAgents
+    // already uses for the stop side — one row states honestly which value
+    // it got, the same way on both sides.
+    expect(String(insert![0])).toMatch(/COALESCE\(\$2,\s*NOW\(\)\)/);
+    expect(String(insert![0])).toMatch(/\$2 IS NULL/);
+    const params = insert![1] as unknown[];
+    expect(params[1]).toEqual(new Date('2026-08-04T12:00:00.000Z'));
+  });
+
+  it('POST /agents/:id/start still succeeds when the StartedAt read fails, and marks the row estimated (#285)', async () => {
+    // The agent LAUNCHED. A metadata read going wrong must never turn a
+    // successful start into a reported failure — this is the whole point of
+    // wrapping the inspect in its own try/catch rather than letting it
+    // propagate into the route's own error handling.
+    queueStartQueries();
+    (mockedInspectContainer as jest.Mock).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const res = await request(app)
+      .post('/agents/uuid-1/start')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('running');
+
+    const insert = sessionInsert();
+    expect(insert).toBeDefined();
+    const params = insert![1] as unknown[];
+    expect(params[1]).toBeNull();
+  });
+
+  it('POST /agents/:id/start falls back and marks estimated when Docker has no StartedAt to give (#285)', async () => {
+    // Distinct from the throw case — inspect SUCCEEDED, but the value it
+    // returned was not usable (Docker's zero-value sentinel, or a status
+    // that never carried a real timestamp). Same fallback, same honesty.
+    queueStartQueries();
+    (mockedInspectContainer as jest.Mock).mockResolvedValueOnce({
+      status: 'running', containerId: 'container-id-123', health: 'healthy',
+      startedAt: null,
+    });
+
+    const res = await request(app)
+      .post('/agents/uuid-1/start')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    const insert = sessionInsert();
+    const params = insert![1] as unknown[];
+    expect(params[1]).toBeNull();
   });
 
   it('POST /agents/:id/start injects WORK_TOKEN env var', async () => {
