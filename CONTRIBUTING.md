@@ -148,21 +148,32 @@ right — so each production compose file was rendered with the real store inter
 **value** was searched for in the rendered text, and a render that produced nothing was made to
 refuse to report a count at all. That guard was the whole point of the script.
 
-The count was then written as `n=$(render "$st" | grep -Fc -- "$v") || return 1`. **`grep -c`
-exits 1 on zero matches**, so a stack with no hits returned the same status as a render that had
-died — the exact conflation the render guard existed to prevent, one line below it. The first run
-reported both positive controls as failures, which is the only reason it was noticed. **Had it
-failed in the other direction it would have read as a pass**, and a zero would have been reported
-for a key that was still in use.
+The count was then written as `n=$(render "$st" | grep -Fc -- "$v") || return 1`, and a stack
+with no hits became indistinguishable from a render that had died — the exact conflation the
+render guard existed to prevent, one line below it.
+
+**The tool was not the problem, and this is the part to get right.** `grep` distinguishes the two
+perfectly well: **1 for no match, 2 for an error.** What threw the distinction away was the
+calling code. `render` signalled its own failure as `return 1` — the same value `grep` uses for a
+clean no-match — the pipeline collapsed both into one status, and `|| return 1` mapped every
+non-zero to a single meaning. Three ordinary decisions, none wrong alone.
+
+The first run reported both positive controls as failures, which is the only reason it was
+noticed. **Had it failed in the other direction it would have read as a pass**, and a zero would
+have been reported for a key that was still in use.
 
 Fix: render and count are separate steps, the render is checked on its own, and the count is
 `grep -Fc … || true`.
 
 **The rule:** when you build an instrument to rule out a specific failure mode, check whether
-that failure mode exists inside the instrument. Exit-status conflation in pipelines is the common
-one — `grep -c`, `grep -q` and `diff` all use exit status for *both* "found nothing" and "could
-not run" — but the shape generalises: a positive control that fails loudly is what caught this,
-and a script whose controls always pass has told you nothing about itself.
+that failure mode exists inside the instrument. The common instance is not a tool that cannot
+tell two outcomes apart — it is **calling code that discards a distinction the tool was making**:
+a bare `|| return 1`, a `set -e` that treats every non-zero alike, a pipeline whose status carries
+only one stage. The fix differs accordingly. If the tool genuinely cannot distinguish them,
+replace the tool; if the caller flattened it, keep the tool and stop flattening — check exit
+status against the value that means *error*, or separate the steps so each is checked on its own.
+Either way: a positive control that fails loudly is what caught this, and a script whose controls
+always pass has told you nothing about itself.
 
 ## Look for the twin before you look for the next defect
 
