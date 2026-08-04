@@ -194,12 +194,42 @@ async def search_entries(
             q,
         )
 
+    # HOW MANY MATCHED, not how many fit in the page.
+    #
+    # `count` used to be len(serialized) with `LIMIT 20` above it, so a search
+    # over 500 matching entries reported 20 — and the ui rendered that as
+    # "20 results". The figure agreed with itself (twenty rows, the word twenty),
+    # which is what makes this class invisible: there is nothing to notice.
+    #
+    # Same COUNT-over-the-real-predicate rule as app#180/#188/#197. The page stays
+    # bounded; what changes is that the total is measured rather than assumed.
+    if agent_id:
+        total_matches = await pool.fetchval(
+            """SELECT COUNT(*) FROM knowledge_entries
+               WHERE agent_id = $1
+                 AND status = 'active'
+                 AND search_vector @@ websearch_to_tsquery('english', $2)""",
+            agent_id,
+            q,
+        )
+    else:
+        total_matches = await pool.fetchval(
+            """SELECT COUNT(*) FROM knowledge_entries
+               WHERE status = 'active'
+                 AND search_vector @@ websearch_to_tsquery('english', $1)""",
+            q,
+        )
+
     serialized = [_serialize(dict(r)) for r in rows]
 
     return {
         "query": q,
         "results": serialized,
+        # Unchanged meaning: how many rows are in THIS response.
         "count": len(serialized),
+        # How many exist. Differs from `count` exactly when the page was cut.
+        "total_matches": int(total_matches or 0),
+        "truncated": int(total_matches or 0) > len(serialized),
         "search_type": "fts",
         "score_type": "ts_rank",
     }

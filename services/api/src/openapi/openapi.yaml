@@ -366,6 +366,16 @@ components:
     KnowledgeSearchResult:
       type: object
       properties:
+        total_matches:
+          type: integer
+          description: |
+            How many entries MATCHED. `results` is capped (20), so this differs
+            from `count` exactly when the page was cut. Reporting the page length
+            as the match count is the defect issues #180/#188/#197 were each about.
+          example: 137
+        truncated:
+          type: boolean
+          description: True when total_matches exceeds the number of results returned.
         query:
           type: string
         results:
@@ -4707,6 +4717,17 @@ paths:
               schema:
                 type: object
                 properties:
+                  total:
+                    type: integer
+                    description: |
+                      How many messages matched. `results` is capped at 50, so
+                      this differs from results.length when the page was cut.
+                      This field previously reported rows.length — a total
+                      derived from a page (#180/#188/#197).
+                    example: 312
+                  truncated:
+                    type: boolean
+                    description: True when total exceeds the number of results returned.
                   results:
                     type: array
                     items:
@@ -4732,8 +4753,6 @@ paths:
                           format: date-time
                   query:
                     type: string
-                  total:
-                    type: integer
         "400":
           description: Missing q parameter
         "404":
