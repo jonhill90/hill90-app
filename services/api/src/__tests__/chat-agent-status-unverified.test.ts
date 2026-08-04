@@ -66,8 +66,35 @@ const adminToken = jwt.sign(
   { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '5m' },
 );
 
-const AGENT_UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-const THREAD_ID = '11111111-2222-3333-4444-555555555555';
+/**
+ * A DISTINCT thread and agent per test, which is the point rather than tidiness.
+ *
+ * Three CI runs failed here with `Expected "stopped", Received "unknown"` while
+ * every local run passed. The instrumentation settled it: `expectServed`
+ * passed, so the route was handed `stopped` exactly once — and `reportedStatus`
+ * returns anything that is not `running` unchanged, so that run cannot have
+ * produced `unknown`. The body being read therefore belonged to a different
+ * request. The one immediately before it, `a pass that fails outright…`,
+ * returns exactly `{ id: THREAD_ID, agent: { status: 'unknown' } }`.
+ *
+ * The id guard could not see that, because every test used the SAME thread id,
+ * so a crossed response was indistinguishable from its own. Per-test ids close
+ * that: a stale or crossed body now fails on identity, which is what the guard
+ * was for. See `docs/decisions/api-suite-flakiness.md` — "is the response
+ * ours?" only answers anything if the fixtures can tell each other apart.
+ */
+let AGENT_UUID = '';
+let THREAD_ID = '';
+let AGENT_SLUG = '';
+let fixtureSeq = 0;
+
+function freshFixtureIds() {
+  fixtureSeq += 1;
+  const n = String(fixtureSeq).padStart(12, '0');
+  THREAD_ID = `11111111-2222-3333-4444-${n}`;
+  AGENT_UUID = `aaaaaaaa-bbbb-cccc-dddd-${n}`;
+  AGENT_SLUG = `test-agent-${fixtureSeq}`;
+}
 
 function runningContainer() {
   return {
@@ -134,7 +161,7 @@ function stubChatQueries(recordedStatus = 'running') {
           participant_type: 'agent',
           role: 'member',
           left_at: null,
-          agent_id: 'test-agent',
+          agent_id: AGENT_SLUG,
           agent_name: 'TestBot',
           agent_status: recordedStatus,
         }],
@@ -174,13 +201,14 @@ function threadFrom(res: request.Response) {
 
 /** Drive one reconcile pass over a single running agent. */
 async function reconcileWith(inspect: () => any, rejects: boolean) {
-  mockQuery.mockResolvedValueOnce({ rows: [{ id: AGENT_UUID, agent_id: 'test-agent' }] });
+  mockQuery.mockResolvedValueOnce({ rows: [{ id: AGENT_UUID, agent_id: AGENT_SLUG }] });
   if (rejects) mockContainerInspect.mockRejectedValue(inspect());
   else mockContainerInspect.mockResolvedValue(inspect());
   await runReconcilePass();
 }
 
 beforeEach(() => {
+  freshFixtureIds();
   mockQuery.mockReset();
   mockContainerInspect.mockReset();
   servedParticipantStatuses = [];
@@ -297,7 +325,7 @@ describe('the dispatch gate is deliberately NOT wired to verification', () => {
         return {
           rows: [{
             id: AGENT_UUID,
-            agent_id: 'test-agent',
+            agent_id: AGENT_SLUG,
             name: 'TestBot',
             status: 'running',
             work_token: 'tok-123',
