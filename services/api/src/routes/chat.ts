@@ -2106,9 +2106,15 @@ export async function chatCallbackHandler(req: Request, res: Response): Promise<
   if (finalStatus === 'complete' && content && process.env.AKM_INTERNAL_SERVICE_TOKEN) {
     try {
       const { rows: journalRows } = await pool.query(
+        // #292: a.id is uuid, m.author_id is varchar. Postgres refuses
+        // `uuid = character varying`, so this statement had never executed —
+        // and it sits in a fire-and-forget block, so the auto-journal silently
+        // never worked. The comment lives here rather than inside the SQL: a
+        // trailing `--` swallows the statement separator when the checker
+        // batches these into one file.
         `SELECT m.author_id, a.agent_id AS agent_slug
          FROM chat_messages m
-         JOIN agents a ON a.id = m.author_id
+         JOIN agents a ON a.id::text = m.author_id
          WHERE m.id = $1 AND m.author_type = 'agent'`,
         [message_id]
       );
