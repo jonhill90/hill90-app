@@ -1526,21 +1526,50 @@ router.post('/:id/stop', requireRole('admin'), async (req: Request, res: Respons
 
     const agent = rows[0];
 
-    // Revoke AKM token first (idempotent ordered sequence: revoke, then stop container)
+    // #245/#269. The ORDERING here — revoke, then stopAndRemoveContainer —
+    // is #269's to change, not this fix's: a failed revoke that blocked the
+    // stop would leave a running container behind, and whether that trade
+    // is worth making is a judgement about risk tolerance, Jon's to make,
+    // not derivable from the code. THIS FIX DOES NOT TOUCH THAT SEQUENCE.
+    //
+    // What it does fix does not depend on the ordering either way: revocation
+    // here is a JTI denylist, so a token can only be stopped by NAME, and the
+    // final UPDATE below used to null akm_jti/model_router_jti unconditionally
+    // — including when the try/catch just above had caught a failure. That
+    // does not just delay the fix; it destroys the only handle the row held
+    // on a still-live token, making it unrevocable FOREVER rather than merely
+    // revocable-late. Whichever order Jon eventually picks, that would still
+    // be true, which is why it does not wait on #269.
+    //
+    // So each revoke's success is tracked, and BOTH the final UPDATE and the
+    // audit trail below act on it: a failed revoke keeps its JTI/exp columns
+    // instead of nulling them, and reports token_revoke_failed — naming the
+    // jti, its expiry and the agent — instead of claiming token_revoked for
+    // a token that is still live. AKM and model-router are fixed together:
+    // they are the same shaped block twice in this file, and fixing one
+    // while leaving its parallel is the drift that survived four months in
+    // #114 and cost #308.
+    //
+    // DELIBERATELY NOT DECIDED HERE, and left to #269: whether an orphaned
+    // (revoke-failed) token should also be counted or swept. Nothing below
+    // retries a failed revoke or records it anywhere but the audit stream.
+    let akmRevokeFailed = false;
     if (agent.akm_jti && isAkmConfigured()) {
       try {
         await revokeAgentAkmToken(agent.agent_id, agent.akm_jti, agent.akm_exp ?? undefined);
       } catch (err) {
+        akmRevokeFailed = true;
         console.error(`[agents] AKM token revocation failed for ${agent.agent_id}:`, err);
         // Continue with stop — container removal is more important
       }
     }
 
-    // Revoke model-router token
+    let modelRouterRevokeFailed = false;
     if (agent.model_router_jti && isModelRouterConfigured()) {
       try {
         await revokeAgentModelRouterToken(agent.agent_id, agent.model_router_jti, agent.model_router_exp ?? undefined);
       } catch (err) {
+        modelRouterRevokeFailed = true;
         console.error(`[agents] Model-router token revocation failed for ${agent.agent_id}:`, err);
         // Continue with stop — container removal is more important
       }
@@ -1578,8 +1607,20 @@ router.post('/:id/stop', requireRole('admin'), async (req: Request, res: Respons
       console.error(`[agents] Session tracking update failed for ${agent.agent_id}:`, err);
     }
 
+    // #245: a revoke that failed above keeps its columns here — nulling them
+    // would erase the only name a retry or an operator could revoke by.
+    const stopUpdateSets = [
+      `status = 'stopped'`, `container_id = NULL`, `work_token = NULL`,
+      `error_message = NULL`, `container_state = 'absent'`, `updated_at = NOW()`,
+    ];
+    if (!akmRevokeFailed) {
+      stopUpdateSets.push(`akm_jti = NULL`, `akm_exp = NULL`);
+    }
+    if (!modelRouterRevokeFailed) {
+      stopUpdateSets.push(`model_router_jti = NULL`, `model_router_exp = NULL`, `model_router_refresh_hash = NULL`);
+    }
     await getPool().query(
-      `UPDATE agents SET status = 'stopped', container_id = NULL, work_token = NULL, akm_jti = NULL, akm_exp = NULL, model_router_jti = NULL, model_router_exp = NULL, model_router_refresh_hash = NULL, error_message = NULL, container_state = 'absent', updated_at = NOW() WHERE id = $1`,
+      `UPDATE agents SET ${stopUpdateSets.join(', ')} WHERE id = $1`,
       [req.params.id]
     );
 
@@ -1594,18 +1635,38 @@ router.post('/:id/stop', requireRole('admin'), async (req: Request, res: Respons
     }
 
     const stopCorrelationId = (req as any).correlationId;
-    // AI-115: token_revoked audit events
+    // AI-115: token_revoked audit events. #245: the event now agrees with
+    // what actually happened — token_revoke_failed, naming the jti and its
+    // expiry, when the revoke above threw; token_revoked, as before, only
+    // when it actually succeeded. The old code emitted token_revoked
+    // unconditionally, so the one record an operator would consult
+    // afterward said "revoked" for a token that was not — the same silence
+    // with a reassuring word attached.
     if (agent.akm_jti) {
-      auditLog('token_revoked', agent.agent_id, user.sub, 'human', {
-        principal_id: agent.id, jti: agent.akm_jti, reason: 'stop',
-        owner_sub: agent.created_by, correlation_id: stopCorrelationId,
-      });
+      if (akmRevokeFailed) {
+        auditLog('token_revoke_failed', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.akm_jti, exp: agent.akm_exp, reason: 'stop',
+          owner_sub: agent.created_by, correlation_id: stopCorrelationId,
+        });
+      } else {
+        auditLog('token_revoked', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.akm_jti, reason: 'stop',
+          owner_sub: agent.created_by, correlation_id: stopCorrelationId,
+        });
+      }
     }
     if (agent.model_router_jti) {
-      auditLog('token_revoked', agent.agent_id, user.sub, 'human', {
-        principal_id: agent.id, jti: agent.model_router_jti, reason: 'stop',
-        owner_sub: agent.created_by, correlation_id: stopCorrelationId,
-      });
+      if (modelRouterRevokeFailed) {
+        auditLog('token_revoke_failed', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.model_router_jti, exp: agent.model_router_exp, reason: 'stop',
+          owner_sub: agent.created_by, correlation_id: stopCorrelationId,
+        });
+      } else {
+        auditLog('token_revoked', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.model_router_jti, reason: 'stop',
+          owner_sub: agent.created_by, correlation_id: stopCorrelationId,
+        });
+      }
     }
     auditLog('stop', agent.agent_id, user.sub, 'human', {
       principal_id: agent.id, owner_sub: agent.created_by, correlation_id: stopCorrelationId,
