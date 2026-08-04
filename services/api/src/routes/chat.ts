@@ -35,6 +35,7 @@ import { auditLog } from '../helpers/audit';
 import { dispatchChatWork } from '../services/chat-dispatch';
 import { execInContainer } from '../services/docker';
 import { appendJournal } from '../services/akm-proxy';
+import { recordJournalFailure, recordJournalSuccess } from '../services/journal-gaps';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 
 const router = Router();
@@ -2112,7 +2113,7 @@ export async function chatCallbackHandler(req: Request, res: Response): Promise<
         // never worked. The comment lives here rather than inside the SQL: a
         // trailing `--` swallows the statement separator when the checker
         // batches these into one file.
-        `SELECT m.author_id, a.agent_id AS agent_slug
+        `SELECT m.author_id, a.agent_id AS agent_slug, a.created_by AS owner_sub
          FROM chat_messages m
          JOIN agents a ON a.id::text = m.author_id
          WHERE m.id = $1 AND m.author_type = 'agent'`,
@@ -2126,9 +2127,32 @@ export async function chatCallbackHandler(req: Request, res: Response): Promise<
           : content;
         const journalContent =
           `**Chat response** (${model || 'unknown'}, ${tokenCount} tokens, ${duration_ms || 0}ms)\n\n${preview}`;
-        appendJournal(agentSlug, journalContent).catch((err: unknown) => {
-          console.error('[chat-callback] Journal append failed (non-blocking):', err);
-        });
+        // #292: BOTH failure shapes, because only one of them was visible.
+        //
+        // A rejection was logged. A NON-2xx RESPONSE was not looked at at all —
+        // `appendJournal` resolves with `{status}` for an upstream 503 or 500,
+        // so "knowledge service not configured" landed in a promise nobody
+        // inspected. Silent, and the more likely of the two.
+        //
+        // Still fire-and-forget, still non-blocking: journalling must not fail
+        // a chat reply. What changes is that the failure is counted, so a blip
+        // and a broken feature stop looking the same.
+        appendJournal(agentSlug, journalContent)
+          .then((resp) => {
+            if (resp.status >= 200 && resp.status < 300) {
+              recordJournalSuccess(agentSlug);
+            } else {
+              const detail = (resp.data as { error?: string } | null)?.error ?? `HTTP ${resp.status}`;
+              recordJournalFailure(agentSlug, journalRows[0].owner_sub ?? null, detail);
+            }
+          })
+          .catch((err: unknown) => {
+            recordJournalFailure(
+              agentSlug,
+              journalRows[0].owner_sub ?? null,
+              err instanceof Error ? err.message : String(err),
+            );
+          });
       }
     } catch (journalErr) {
       console.error('[chat-callback] Journal lookup failed (non-blocking):', journalErr);
