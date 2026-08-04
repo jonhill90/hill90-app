@@ -212,11 +212,36 @@ else
             # change to this very script. Neither is inside the api image. That is
             # the too-broad-guard failure again — a guard that fires on things it
             # does not describe gets relaxed, and then guards nothing.
-            svc="${cname#app-}"
+            # WHICH PATHS BELONG TO THIS THING.
+            #
+            # Derived from the name, and the derivation must cover IMAGES as
+            # well as containers or the guard matches nothing and reports
+            # health. `${cname#app-}` on an image name like `hill90/agentbox`
+            # yields `hill90/agentbox`, so the pattern becomes
+            # `services/hill90/agentbox/` — which never matches, n_dep stays 0,
+            # and a stale image is reported as "none touch a deployable path".
+            # That is a guard that cannot fire looking exactly like a pass.
+            #
+            # The agentbox images additionally depend on services/knowledge:
+            # their Dockerfile copies the akm CLI out of hill90/knowledge, so a
+            # knowledge change makes an agentbox image stale even though
+            # services/agentbox is untouched.
+            case "$cname" in
+                hill90/agentbox|hill90/agentbox-monitor|hill90/agentbox-browser)
+                    dep_re="^(services/agentbox/|services/knowledge/)" ;;
+                hill90/knowledge)
+                    dep_re="^services/knowledge/" ;;
+                hill90/*)
+                    svc="${cname#hill90/}"
+                    dep_re="^services/${svc}/" ;;
+                *)
+                    svc="${cname#app-}"
+                    dep_re="^(services/${svc}/|deploy/compose/prod/docker-compose\.${svc}\.yml)" ;;
+            esac
             n_dep=0
             for sha in $(git rev-list "${crev}..${target_sha}"); do
                 if git show --name-only --format="" "$sha" \
-                     | grep -E "^(services/${svc}/|deploy/compose/prod/docker-compose\.${svc}\.yml)" \
+                     | grep -E "$dep_re" \
                      | grep -qvE '(/__tests__/|/tests/|\.test\.|\.spec\.|_test\.py$|/test_)'; then
                     n_dep=$((n_dep+1))
                 fi
