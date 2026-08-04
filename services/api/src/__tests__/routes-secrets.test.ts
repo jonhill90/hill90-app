@@ -108,16 +108,22 @@ describe('Secrets vault inventory', () => {
     expect(res.status).toBe(401);
   });
 
-  it('GET /admin/secrets/status returns vault status (T3)', async () => {
+  it('GET /admin/secrets/status reports an unreachable vault as 503, not 200 (T3)', async () => {
     const res = await request(app)
       .get('/admin/secrets/status')
       .set('Authorization', `Bearer ${adminToken}`);
 
-    expect(res.status).toBe(200);
-    // In test env, vault is not running so expect degraded response
-    expect(res.body).toHaveProperty('available');
+    // EXPECTATION CHANGED DELIBERATELY. This asserted 200 with the comment "in test
+    // env, vault is not running so expect degraded response" — it was written around
+    // the environment rather than against a contract, and it locked in the defect:
+    // the UI's probeService() judges this endpoint on `res.ok` alone, so a 200
+    // during a vault outage rendered vault as HEALTHY. There is no vault here, which
+    // is the unreachable case, and the honest answer to that is 503 with the cause.
+    expect(res.status).toBe(503);
+    expect(res.body.available).toBe(false);
     expect(res.body).toHaveProperty('sealed');
     expect(res.body).toHaveProperty('version');
+    expect(res.body.error).toBeTruthy();
   });
 
   it('GET /admin/secrets/status rejects non-admin', async () => {
