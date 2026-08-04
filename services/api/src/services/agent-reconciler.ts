@@ -9,6 +9,10 @@
  *  - it runs on a schedule, not once. A transient docker-proxy fault used to
  *    persist until the next restart, because there was exactly one call site
  *    and no timer.
+ *
+ * And one it owns since #239: the pass reads EVERY agent row rather than only
+ * the ones marked `running`, because the set it examines is the set it can
+ * correct.
  */
 
 import { getPool } from '../db/pool';
@@ -27,26 +31,57 @@ export async function runReconcilePass(): Promise<ReconcileResult | null> {
   try {
     const result = await reconcileAgentStatuses(
       async () => {
+        // EVERY agent, not only the rows marked `running` (#239). The set this
+        // examined used to be the set it could correct, which is why a `stopped`
+        // row with a live container had no code path that would ever look at it.
+        // Unbounded by design: it is the whole table or it is not reconciliation,
+        // and there is no caller-controlled multiplier here.
         const { rows } = await getPool().query(
-          "SELECT id, agent_id FROM agents WHERE status = 'running'"
+          'SELECT id, agent_id, status, container_id, container_state FROM agents'
         );
         return rows;
       },
-      async (id, status, containerId, error) => {
+      async (patch) => {
+        const sets = ['status = $1', 'container_state = $2'];
+        const params: unknown[] = [patch.status, patch.containerState];
+        if (patch.containerId !== undefined) {
+          params.push(patch.containerId);
+          sets.push(`container_id = $${params.length}`);
+        }
+        if (patch.errorMessage !== undefined) {
+          params.push(patch.errorMessage);
+          sets.push(`error_message = $${params.length}`);
+        }
+        params.push(patch.id);
         await getPool().query(
-          'UPDATE agents SET status = $1, container_id = $2, error_message = $3, updated_at = NOW() WHERE id = $4',
-          [status, containerId, error, id]
+          `UPDATE agents SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`,
+          params
         );
+
+        if (patch.status === patch.previousStatus) return;
+        // A promotion is the surprising event of the two, and until now no
+        // record of it could exist. Best effort, like every other writer of
+        // this table.
+        try {
+          await getPool().query(
+            'INSERT INTO agent_status_history (agent_id, old_status, new_status, changed_by) VALUES ($1, $2, $3, $4)',
+            [patch.id, patch.previousStatus, patch.status, 'reconciler']
+          );
+        } catch (err) {
+          console.error(`[reconcile] Status history insert failed for ${patch.agentId}:`, err);
+        }
       }
     );
     recordReconcilePass(result.unverified);
+    const counts =
+      `${result.checked} checked, ${result.promoted} promoted, ${result.demoted} demoted`;
     if (result.unverified.length > 0) {
       console.warn(
-        `[reconcile] Pass complete: ${result.checked} checked, ${result.reconciled} corrected, ` +
+        `[reconcile] Pass complete: ${counts}, ` +
         `${result.unverified.length} UNVERIFIED (reported as '${UNKNOWN_STATUS}'): ${result.unverified.join(', ')}`
       );
     } else {
-      console.log(`[reconcile] Pass complete: ${result.checked} checked, ${result.reconciled} corrected`);
+      console.log(`[reconcile] Pass complete: ${counts}`);
     }
     return result;
   } catch (err) {

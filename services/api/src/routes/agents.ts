@@ -275,7 +275,7 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
   try {
     const scope = scopeToOwner(req);
     const { rows } = await getPool().query(
-      `SELECT a.id, a.agent_id, a.name, a.description, a.status, a.tools_config,
+      `SELECT a.id, a.agent_id, a.name, a.description, a.status, a.container_state, a.tools_config,
               a.cpus, a.mem_limit, a.pids_limit, a.model_policy_id, a.autonomy_level,
               a.avatar_key, a.tags,
               COALESCE(mp.allowed_models, '[]'::jsonb) AS models,
@@ -305,10 +305,13 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
       row.hasAvatar = !!row.avatar_key;
       delete row.avatar_key;
 
-      // #238: a `running` row that reconciliation could not check is reported
-      // as `unknown`, not as the last value the database happens to hold.
+      // #238: a status reconciliation could not check is reported as `unknown`,
+      // not as the last value the database happens to hold. #239: and what the
+      // reconciler last SAW travels with it, so `stopped` because the container
+      // exited stays distinguishable from `stopped` because it is gone.
       row.status_verified = isStatusVerified(row.agent_id);
       row.status = reportedStatus(row.agent_id, row.status);
+      if (!row.status_verified) row.container_state = null;
 
       row.container_profile = row.container_profile_id
         ? { id: row.container_profile_id, name: row.cp_name, docker_image: row.cp_docker_image }
@@ -527,7 +530,7 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const scope = scopeToOwner(req);
     const paramOffset = scope.params.length + 1;
     const { rows } = await getPool().query(
-      `SELECT a.id, a.agent_id, a.name, a.description, a.status, a.tools_config,
+      `SELECT a.id, a.agent_id, a.name, a.description, a.status, a.container_state, a.tools_config,
               cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
               model_policy_id, a.autonomy_level, a.avatar_key, a.tags, a.env_vars, a.container_profile_id,
               a.schedule_cron, a.schedule_enabled,
@@ -550,9 +553,10 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     agent.hasAvatar = !!agent.avatar_key;
     delete agent.avatar_key;
 
-    // #238: see the list route.
+    // #238/#239: see the list route.
     agent.status_verified = isStatusVerified(agent.agent_id);
     agent.status = reportedStatus(agent.agent_id, agent.status);
+    if (!agent.status_verified) agent.container_state = null;
 
     // AI-115: Add principal identity fields
     agent.principal_id = agent.id;
@@ -1367,7 +1371,7 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
 
     // Update DB (store work_token for chat dispatch verification)
     await getPool().query(
-      `UPDATE agents SET status = 'running', container_id = $1, work_token = $2, error_message = NULL, updated_at = NOW() WHERE id = $3`,
+      `UPDATE agents SET status = 'running', container_id = $1, work_token = $2, error_message = NULL, container_state = 'running', updated_at = NOW() WHERE id = $3`,
       [containerId, workToken, req.params.id]
     );
 
@@ -1490,7 +1494,7 @@ router.post('/:id/stop', requireRole('admin'), async (req: Request, res: Respons
     }
 
     await getPool().query(
-      `UPDATE agents SET status = 'stopped', container_id = NULL, work_token = NULL, akm_jti = NULL, akm_exp = NULL, model_router_jti = NULL, model_router_exp = NULL, model_router_refresh_hash = NULL, error_message = NULL, updated_at = NOW() WHERE id = $1`,
+      `UPDATE agents SET status = 'stopped', container_id = NULL, work_token = NULL, akm_jti = NULL, akm_exp = NULL, model_router_jti = NULL, model_router_exp = NULL, model_router_refresh_hash = NULL, error_message = NULL, container_state = 'absent', updated_at = NOW() WHERE id = $1`,
       [req.params.id]
     );
 
