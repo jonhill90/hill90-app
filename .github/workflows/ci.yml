@@ -75,6 +75,43 @@ jobs:
       - run: node scripts/verify-native-deps.js
       - run: npm test
 
+      # #350: jest.auth401.js writes test-artifacts/auth401.jsonl whenever
+      # AUTH_401_PROBE is on (see the env block above) — every real 401 this
+      # suite's own assertions produce, plus anything jsonwebtoken.verify
+      # actually threw, which auth.ts's bare `catch {}` otherwise discards
+      # before it reaches any log.
+      #
+      # THE ARTIFACT ITSELF WILL NOT BE EMPTY OR ABSENT, MOST RUNS — measured
+      # directly, not assumed: a full green run writes ~180 rows (one
+      # authprobe-installed per worker, plus every INTENTIONAL 401 this suite
+      # already asserts on purpose, e.g. auth-requires-sub.test.ts,
+      # auth-error-cause.test.ts). `if-no-files-found: ignore` covers the
+      # rare case AUTH_401_PROBE itself failed to load, not the normal one.
+      #
+      # WHAT SHOULD BE ABSENT, AND FOR A LONG TIME, IS A ROW CORRELATED WITH A
+      # GENUINELY FAILING, UNEXPLAINED ASSERTION — that is the only thing
+      # this instrument exists to catch, and its own doc puts that class at
+      # roughly 1% per run. This repo's CI history, read directly rather than
+      # estimated: ZERO recurrences across 550 ci.yml runs. A long stretch of
+      # runs whose artifact contains only routine, expected 401s is exactly
+      # what that rate predicts — it is not evidence this step is broken, and
+      # is not a reason to remove it. Removing it on that reading is how the
+      # next real occurrence goes uncaptured the same way the original corpus
+      # did (also lost — to /tmp, and to log expiry — see #350).
+      #
+      # if: always(), not failure() — the probe's evidence-worthy runs are
+      # exactly the ones where the SUITE PASSED overall but one assertion hit
+      # a genuine 401, so gating on job failure would miss the case this
+      # exists for.
+      - name: Collect AUTH_401_PROBE evidence (#350)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-auth401-evidence
+          path: services/api/test-artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
   ui:
     name: services/ui (vitest)
     runs-on: ubuntu-latest
