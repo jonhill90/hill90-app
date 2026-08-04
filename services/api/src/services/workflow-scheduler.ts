@@ -105,7 +105,10 @@ async function tick(): Promise<void> {
   }
 }
 
-async function executeWorkflow(pool: any, wf: any): Promise<void> {
+// Exported so a test can call it. The reason this path shipped with a column
+// that does not exist is that nothing ever called it — the scheduler's unit of
+// work was reachable only through a timer, so no test could name it (#292).
+export async function executeWorkflow(pool: any, wf: any): Promise<void> {
   const workflowId = wf.id;
 
   // Skip if agent not running
@@ -150,7 +153,12 @@ async function executeWorkflow(pool: any, wf: any): Promise<void> {
 
     // Insert message
     const { rows: msgRows } = await pool.query(
-      `INSERT INTO chat_messages (thread_id, sender_id, sender_type, content, status)
+      // The twin of routes/workflows.ts:309 and :568, and it was missed when
+      // those were fixed (#292/#301): the columns are author_id/author_type.
+      // A scheduled run therefore failed on this statement every time, and the
+      // gate that would have caught it scanned routes/ only — the hole and the
+      // defect were the same oversight, one in the code and one in the check.
+      `INSERT INTO chat_messages (thread_id, author_id, author_type, content, status)
        VALUES ($1, $2, 'human', $3, 'delivered') RETURNING id`,
       [threadId, wf.created_by, wf.prompt]
     );
