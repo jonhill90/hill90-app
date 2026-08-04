@@ -1,0 +1,103 @@
+name: Platform Baseline Freshness
+
+# Does scripts/checks/hill90-platform-baseline.txt still match Hill90's OWN
+# compose files?
+#
+# WHY THIS EXISTS (#177). That file is a hand-copied snapshot of Hill90's
+# `container_name:` entries, taken once and never compared back to the
+# source. Hill90#699 asked for the mirror of this check on the platform side
+# and is blocked on a cross-repo PAT — Hill90 reading this (this repo is
+# actually public, so that premise may not even hold any more, but that is
+# Hill90#699's question to settle, not this workflow's). This runs from the
+# OTHER side, and needs NO credential at all: Hill90 is a public repository,
+# so this repo's own CI can read its compose files with a plain
+# unauthenticated fetch. Same gap, closed from the side that does not need a
+# secret — which is the whole reason this is worth doing before that PAT
+# question is settled.
+#
+# WHAT THIS DOES NOT REPLACE. hill90-platform-baseline.txt's own header
+# already explains why this tenant does not read Hill90's compose files
+# LIVE, AT DEPLOY TIME, to build its own expectations — that would couple
+# this tenant's deploy behaviour to the platform's internal file layout,
+# exactly the boundary "the platform provides, the tenant consumes" exists
+# to hold. This workflow's answer is never consulted by a deploy and does
+# not change what scripts/checks/check_platform_baseline.sh compares
+# against on the host. It only tells a human when the hand-copied snapshot
+# has gone stale and needs a human to update it.
+#
+# PINNED, NOT FLOATING. Hill90's `main` is resolved to one commit SHA, ONCE,
+# in the first step below — every later step (the tarball download, the
+# check's own banner) uses that same resolved SHA, and the SHA is printed in
+# the check's output. This is not a literal frozen historical commit (that
+# would make the check flag drift for every unrelated Hill90 change forever,
+# defeating its purpose — the point IS to compare against Hill90's current
+# truth) — "pinned" means this run's comparison target is a single named,
+# reproducible point in time rather than an implicit, silently-moving
+# branch pointer that could resolve differently between two steps of the
+# same run.
+#
+# NO SECRETS, NO environment: BLOCK. This talks to GitHub's public API and
+# downloads a public tarball — nothing here touches the VPS, Tailscale, or
+# any credential. That absence is itself informative: a workflow this simple
+# needed none of the machinery every deploy-adjacent workflow in this repo
+# carries, because it never leaves GitHub's own public surface.
+
+on:
+  schedule:
+    # Daily — matches Hill90's own tenant-baseline-agreement.yml cadence for
+    # the same underlying fact (its container topology). Container additions
+    # or removals are infrequent, deliberate changes, not the kind of
+    # binary always-or-never state the hill90-ui secret-agreement check
+    # watches — so there is a real grace window here, unlike that one.
+    - cron: '45 6 * * *'
+  pull_request:
+    paths:
+      - 'scripts/checks/hill90-platform-baseline.txt'
+      - 'scripts/checks/check_platform_baseline_freshness.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    name: baseline agrees with Hill90
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Resolved ONCE. Every later step reads this output, not `main` again.
+      - name: Resolve Hill90 main to one commit
+        id: resolve
+        run: |
+          sha=$(curl -fsSL https://api.github.com/repos/jonhill90/Hill90/commits/main \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
+          if [ -z "$sha" ]; then
+            echo "::error::could not resolve Hill90's main to a commit SHA — nothing was compared"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved Hill90 main -> $sha"
+
+      - name: Download Hill90's compose files at that commit
+        env:
+          HILL90_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          curl -fsSL "https://github.com/jonhill90/Hill90/archive/${HILL90_SHA}.tar.gz" -o /tmp/hill90.tar.gz
+          mkdir -p /tmp/hill90-src
+          # No --wildcards: that flag is GNU-tar-only and this only needs to
+          # run once a day, so extracting the whole (small) tarball and
+          # globbing the result afterward is worth the portability over the
+          # marginal speed of a filtered extract.
+          tar -xzf /tmp/hill90.tar.gz -C /tmp/hill90-src --strip-components=1
+          ls /tmp/hill90-src/deploy/compose/prod/*.yml
+
+      - name: Compare
+        env:
+          HILL90_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          python3 scripts/checks/check_platform_baseline_freshness.py \
+            scripts/checks/hill90-platform-baseline.txt \
+            /tmp/hill90-src/deploy/compose/prod/*.yml
