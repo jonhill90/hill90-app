@@ -2,15 +2,15 @@
 // module that is itself imported before the others. See bootstrap-redaction.ts.
 import './bootstrap-redaction';
 
-import * as jwt from 'jsonwebtoken';
 import { app } from './app';
 import { getPool, closePool } from './db/pool';
 import { runMigrations } from './db/migrate';
 import { createJwksKeyResolver } from './middleware/auth';
-import { getIssuer, getJwksUri, rolesFrom } from './middleware/keycloak-config';
+import { getIssuer, getJwksUri } from './middleware/keycloak-config';
 import { runReconcilePass, startAgentReconciler, stopAgentReconciler } from './services/agent-reconciler';
 import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
 import { attachTerminalProxy } from './services/terminal-proxy';
+import { verifyTerminalToken } from './services/terminal-token';
 import { startStaleSweeper, stopStaleSweeper } from './routes/chat';
 import { dieOnStartupFailure, shutdownSafely, installUnhandledRejectionBackstop } from './boot/fatal';
 
@@ -105,28 +105,10 @@ async function start() {
   const jwksUri = getJwksUri(issuer);
   const getSigningKey = createJwksKeyResolver(jwksUri);
 
-  attachTerminalProxy(server, async (token: string) => {
-    try {
-      const decoded = jwt.decode(token, { complete: true });
-      if (!decoded || typeof decoded === 'string') return null;
-      const signingKey = await getSigningKey(decoded.header);
-      const payload = jwt.verify(token, signingKey, {
-        algorithms: ['RS256'],
-        issuer,
-      }) as jwt.JwtPayload;
-      if (typeof payload.exp !== 'number') return null;
-      // rolesFrom() reads ONLY resource_access.<client>.roles. This used to read
-      // realm_access.roles FIRST, which in the shared platform realm would honour
-      // a platform admin's realm role `admin` here — and the WebSocket terminal
-      // proxy is the most privileged surface in the app.
-      const roles: string[] = rolesFrom(payload);
-      // exp is passed through, not just checked. The proxy ends the session when
-      // the credential does; without this it had no way to know when that was.
-      return { sub: payload.sub || '', roles, exp: payload.exp };
-    } catch {
-      return null;
-    }
-  });
+  // The verifier lives in services/terminal-token.ts so it can be tested: this is
+  // the most privileged surface in the service and its refusals were silent.
+  attachTerminalProxy(server, (token: string) => verifyTerminalToken(token, { issuer, getSigningKey }));
+
   console.log('[startup] WebSocket terminal proxy attached');
 
   // Graceful shutdown
