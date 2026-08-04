@@ -95,10 +95,28 @@ console.error(`checkable: ${checkable}   NOT CHECKABLE (interpolated): ${dynamic
 ' "$ROOT/services/api/src/routes" "$TMP" "$(IFS=,; echo "${EXCLUDES[*]%%:*}")"
 
 OUT=$(psql_run < "$TMP" 2>&1)
-ERRORS=$(printf '%s' "$OUT" | grep -c '^ERROR' || true)
+ERRORS=$(printf '%s' "$OUT" | grep -c 'ERROR:' || true)
+
+# THE CHECK CHECKS ITSELF, and this is not decoration.
+#
+# The first CI run of this job reported PASS with a known-broken statement in
+# the tree: the batch had not run the way it does locally, no line matched the
+# error pattern, and "no errors found" was indistinguishable from "nothing
+# executed". That is precisely the defect this script exists to catch, in the
+# script. So the count of statements Postgres CONFIRMS it prepared must equal
+# the count generated — silence is not evidence.
+PREPARED=$(printf '%s' "$OUT" | grep -c '^PREPARE' || true)
+EXPECTED=$(grep -c '^PREPARE' "$TMP" || true)
 if [ "$ERRORS" -gt 0 ]; then
   echo "IDENTIFIER OR TYPE ERRORS: $ERRORS"
-  printf '%s' "$OUT" | grep -A 1 '^ERROR' | head -40
+  printf '%s' "$OUT" | grep -B 1 -A 1 'ERROR:' | head -60
   exit 1
 fi
-echo "PASS — every checkable statement parsed against $WHERE"
+
+if [ "$PREPARED" -ne "$EXPECTED" ]; then
+  echo "CANNOT DETERMINE: $EXPECTED statements were sent, $PREPARED were confirmed prepared."
+  echo "The batch did not run as expected, so a clean result would mean nothing. Output:"
+  printf '%s\n' "$OUT" | head -20
+  exit 2
+fi
+echo "PASS — $PREPARED of $EXPECTED statements confirmed prepared against $WHERE"
