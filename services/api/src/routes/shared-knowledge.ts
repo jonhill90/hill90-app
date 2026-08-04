@@ -195,6 +195,12 @@ router.get('/sources', requireRole('user'), async (req: Request, res: Response) 
     }
 
     const result = await skProxy.listSources(collectionId);
+    // #180: forward the real total. Without it the UI counts what it was
+    // handed, and a page of 200 renders as "200 sources" over a collection of
+    // 300 — bounded, and silently so, which is the defect wearing a fix.
+    if (result.total !== null) {
+      res.setHeader('X-Total-Count', String(result.total));
+    }
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('[shared-knowledge] List sources error:', err);
