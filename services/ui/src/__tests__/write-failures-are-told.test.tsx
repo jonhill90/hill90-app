@@ -162,29 +162,69 @@ describe('the message carries what the API said', () => {
 })
 
 describe('ChatLayout bulk delete — a partial result stated as partial', () => {
-  it('POSITIVE CONTROL: two failures out of three are counted and named', async () => {
-    // The old loop swallowed network errors and never checked res.ok, so three
-    // deletions out of seven looked exactly like seven.
-    let call = 0
-    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, init?: RequestInit) => {
-      if (init?.method === 'DELETE') {
-        call++
-        return call === 1
-          ? Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
-          : Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'nope' }) })
-      }
-      return Promise.resolve({ ok: true, status: 200, json: async () => [] })
-    }))
+  // My first version of this test called the counting loop directly and I
+  // bounded it as "the component cannot be tested without standing up the chat
+  // page". That was wrong: it takes a `session` prop and fetches its own
+  // threads, exactly like TaskBoardClient. The caveat described my effort, not
+  // the component, so it is replaced rather than carried forward.
+  const THREADS = [
+    { id: 't1', title: 'One', last_message: 'Timed out', updated_at: '2026-08-01T00:00:00Z' },
+    { id: 't2', title: 'Two', last_message: 'Timed out', updated_at: '2026-08-01T00:00:00Z' },
+    { id: 't3', title: 'Three', last_message: 'Timed out', updated_at: '2026-08-01T00:00:00Z' },
+  ]
 
-    // The counting logic, exercised directly: the component's delete path is
-    // behind a confirm() and a thread list this test cannot assemble without
-    // standing up the whole chat page.
-    let failed = 0
-    for (let i = 0; i < 3; i++) {
-      const res = await (globalThis.fetch as never as (u: string, i: RequestInit) => Promise<{ ok: boolean }>)(
-        '/api/chat/t', { method: 'DELETE' })
-      if (!res.ok) failed++
-    }
-    expect(failed).toBe(2)
+  const listThenDeletes = (deleteResults: boolean[]) => {
+    let d = 0
+    return vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        const ok = deleteResults[d++] ?? true
+        return Promise.resolve({ ok, status: ok ? 200 : 500, json: async () => ({ error: 'nope' }) })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => THREADS })
+    })
+  }
+
+  it('POSITIVE CONTROL: two failures out of three are counted and named', async () => {
+    vi.stubGlobal('fetch', listThenDeletes([true, false, false]))
+    vi.stubGlobal('confirm', () => true)
+    const { default: ChatLayout } = await import('@/app/chat/ChatLayout')
+
+    render(<ChatLayout session={{ user: { roles: ['user'] } } as never} />)
+    fireEvent.click(await screen.findByRole('button', { name: /clear/i }))
+
+    const toast = await screen.findByTestId('toast-error')
+    expect(toast.textContent).toMatch(/2 of 3/)
+  })
+
+  it('TWIN: when every delete succeeds, nothing is said', async () => {
+    vi.stubGlobal('fetch', listThenDeletes([true, true, true]))
+    vi.stubGlobal('confirm', () => true)
+    const { default: ChatLayout } = await import('@/app/chat/ChatLayout')
+
+    render(<ChatLayout session={{ user: { roles: ['user'] } } as never} />)
+    fireEvent.click(await screen.findByRole('button', { name: /clear/i }))
+
+    await waitFor(() => expect(screen.queryByTestId('toast-error')).toBeNull())
+  })
+
+  it('a network error counts as a failure too, not as a success', async () => {
+    // The old loop's `catch { /* skip */ }` swallowed exactly this.
+    let d = 0
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_u: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        d++
+        return d === 1 ? Promise.reject(new Error('ECONNRESET'))
+                       : Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => THREADS })
+    }))
+    vi.stubGlobal('confirm', () => true)
+    const { default: ChatLayout } = await import('@/app/chat/ChatLayout')
+
+    render(<ChatLayout session={{ user: { roles: ['user'] } } as never} />)
+    fireEvent.click(await screen.findByRole('button', { name: /clear/i }))
+
+    const toast = await screen.findByTestId('toast-error')
+    expect(toast.textContent).toMatch(/1 of 3/)
   })
 })
