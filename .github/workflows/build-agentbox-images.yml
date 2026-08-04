@@ -47,6 +47,23 @@ jobs:
   build:
     name: Build agentbox images on the VPS
     runs-on: ubuntu-latest
+
+    # REQUIRED, and its absence is why the first live run failed.
+    #
+    # TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET, SOPS_AGE_KEY and VPS_SSH_PRIVATE_KEY
+    # are all `production` ENVIRONMENT secrets, not repository secrets — `gh
+    # secret list` shows none of them, `gh secret list --env production` shows
+    # all four. A job that does not declare the environment gets an empty
+    # string for each, silently: `secrets.X` does not error when X is out of
+    # scope, so the failure surfaces wherever the empty value is first used
+    # rather than where the mistake is. Here it surfaced as the Tailscale
+    # action's own "OAuth identity empty" guard, which is the only reason it
+    # named the cause at all.
+    #
+    # reusable-deploy-service.yml:89 declares this for the same reason. Any new
+    # workflow that reaches the VPS needs it.
+    environment: production
+
     env:
       VPS_APP_PATH: ${{ vars.VPS_APP_PATH || '/opt/hill90-app' }}
     steps:
