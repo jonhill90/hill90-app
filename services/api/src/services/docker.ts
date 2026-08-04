@@ -233,6 +233,21 @@ export async function inspectContainer(agentId: string): Promise<{
    * sentinel and comes back `null` here, same as one that never started.
    */
   finishedAt: Date | null;
+  /**
+   * The instant Docker recorded this container's CURRENT run starting
+   * (#285's second half). SAFE TO TRUST ONLY IMMEDIATELY AFTER
+   * `createAndStartContainer` RETURNS, in the same request that created the
+   * container — see the call site in routes/agents.ts, which explains why.
+   * Containers here run `RestartPolicy: unless-stopped` (#285's first half,
+   * #326), so the daemon can restart one invisibly to this service at any
+   * later point; read this during ongoing reconciliation, or any time after
+   * the moment of creation, and it describes the LATEST restart, not the
+   * session this row is trying to record. That is exactly the hazard that
+   * scoped #326 down to the stop side only, and it applies here just as much
+   * — this field does not remove the hazard, it is only safe at one specific
+   * moment where the hazard cannot yet exist.
+   */
+  startedAt: Date | null;
 } | null> {
   const containerName = `${CONTAINER_PREFIX}${agentId}`;
   assertAgentboxName(containerName);
@@ -247,6 +262,7 @@ export async function inspectContainer(agentId: string): Promise<{
       containerId: info.Id,
       health: info.State.Health?.Status,
       finishedAt: parseDockerTimestamp(info.State.FinishedAt),
+      startedAt: parseDockerTimestamp(info.State.StartedAt),
     };
   } catch (err: any) {
     if (err.statusCode === 404) return null;
