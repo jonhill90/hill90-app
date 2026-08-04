@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Shared helpers for hill90-app's scripts.
 #
-# This file did not exist. scripts/provision-akm-db.sh and
-# scripts/provision-litellm-db.sh both `source` it at line 7 under `set -e`, so
-# both died there — loudly, non-zero, before reaching any work they claimed to
-# do. It was never extracted from Hill90.
+# scripts/provision-akm-db.sh and scripts/provision-litellm-db.sh both `source`
+# this at line 7 under `set -e`, so if it is missing they die there — loudly,
+# non-zero, before reaching any work they claim to do.
 #
 # Deliberately modelled on Hill90's scripts/_common.sh rather than designed
 # fresh: the two repos should fail the same way, print the same shapes, and load

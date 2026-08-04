@@ -13,9 +13,8 @@
 #
 # Three bugs were fixed here, and the first hid the other two:
 #
-#   1. `source _common.sh` — that file did not exist and was never extracted from
-#      Hill90, so this script died at line 7 under `set -e`, loudly and non-zero,
-#      before reaching any of the work below.
+#   1. `source _common.sh` — that file was missing, so this script died at line 7
+#      under `set -e`, loudly and non-zero, before reaching any of the work below.
 #   2. `docker exec` without `-i` — with stdin not attached, psql reads EOF
 #      immediately and exits 0 having run nothing. Silent, and the loud failure
 #      above masked it.

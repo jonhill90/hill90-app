@@ -16,10 +16,6 @@ shared VPS, and locally against the same compose files.
 - [`README.md`](README.md) — what it is, how to run it locally, and the
   **dated** production status table. That table is the single home for facts
   with a shelf life; this file deliberately does not repeat them.
-- [`docs/extraction/PROVENANCE.md`](docs/extraction/PROVENANCE.md) — where each secret and
-  service path came from
-  from Hill90 and what deliberately did not, including the two services that have never
-  been in an automated deploy.
 - [`docs/reference/secret-layout.md`](docs/reference/secret-layout.md) — what each secret
   is for, and the two vault KV couplings that are not visible from the service code.
 - [`docs/decisions/running-the-app-on-hill90-infra.md`](docs/decisions/running-the-app-on-hill90-infra.md)
@@ -323,8 +319,8 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   the volume is still a deliberate, irreversible decision nobody has taken**, and
   this note is not an argument for taking it. *(This entry said the opposite for about an hour: written
   when `minio` was still in `DEPLOY_REST`, and left standing when #91 removed it.)*
-  Its resurrection was the quietest of the three — both backends are MinIO, so
-  `storage.hill90.com` would have answered 200 either way and looked fine.
+  Redeploying this stack is the hardest of the three to notice: both backends are
+  MinIO, so `storage.hill90.com` answers 200 either way and looks fine.
   Procedure, evidence checks and abort conditions:
   [`docs/runbooks/retiring-app-minio.md`](docs/runbooks/retiring-app-minio.md).
   **The local compose files stay regardless** — local runs `app-minio` deliberately.
