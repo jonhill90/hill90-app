@@ -230,17 +230,28 @@ correction.)*
 (`./scripts/local.sh up`) authenticates against **Hill90's** Keycloak, realm `platform`,
 and the token carries `resource_access.hill90-ui.roles`, `aud` including `hill90-api`, and
 no `admin` in `realm_access.roles`. `bash scripts/checks/tenant-login-platform-test.sh`
-re-proves **that**, and still passed on 2026-08-04. The `auth` stack is gone from
-`local.sh`'s `STACKS`.
+re-proves **that** — and since 2026-08-04 it runs the flow with the parameters the UI
+container actually holds, so it now also fails when a browser could not complete the
+login. The `auth` stack is gone from `local.sh`'s `STACKS`.
 
-**But do not read that as "you can log in": as of 2026-08-04 the local UI login FAILS**
-(#271). The browser is sent to `http://app.localtest.me:8080/api/auth/callback/keycloak`,
-which the `hill90-ui` client rejects — `Invalid parameter: redirect_uri`, HTTP 400 — because
-`NEXTAUTH_URL` is the Traefik host and the client allows `localhost:13000`. The check above
-passes through it: `tenant-login-platform-test.sh:32` hardcodes the `localhost:13000`
-redirect, so it proves the TOKEN and cannot see the URI a person's browser sends. **A green
-check there is not evidence that a human can sign in locally**, and this file said it was
-for three days.
+**A human can now sign in locally — `Verified 2026-08-04`** by a browser completing
+`dev`/`dev` against realm `platform` and landing on `/agents` with a session carrying
+`roles: ["admin"]`. It could not the same morning (#271), and **two independent defects
+had to be fixed, not one**: `AUTH_URL` was the Traefik host while the `hill90-ui` client
+allows `localhost:13000` (HTTP 400, `Invalid parameter: redirect_uri`), and behind it
+`KEYCLOAK_INTERNAL_ISSUER` was *also* the browser-facing host, which inside the container
+is `127.0.0.1` — so the token exchange died on `ECONNREFUSED` and NextAuth reported
+`error=Configuration`, naming nothing. Fixing the redirect alone moved the failure one
+step later. Both are in `deploy/compose/overrides/local.ui.yml`; Hill90's realm was not
+touched.
+
+**The instrument lesson outlives the bug.** `tenant-login-platform-test.sh:32` hardcoded
+the `localhost:13000` redirect and grepped the client secret out of `.env.local`, so it
+printed four green assertions on a stack where nobody could sign in: **a check that
+hardcodes a parameter can never fail on that parameter being wrong.** It now reads
+`redirect_uri`, `client_id`, secret and issuer from the running UI container and asserts
+the client accepts that redirect. `tests/scripts/login-check-sees-redirect.bats` holds
+that shape — 8 of its 9 tests fail against the pre-fix files.
 
 **What is still open is the rest of it:** local Postgres and MinIO are still the app's own,
 and `--standalone` still runs the fork's Keycloak against a *copy* of the platform realm
