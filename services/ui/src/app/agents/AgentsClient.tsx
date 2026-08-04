@@ -6,7 +6,6 @@ import { useRouter } from 'next/navigation'
 import type { Session } from 'next-auth'
 import { Trash2, Upload, LayoutTemplate, X, Play, Square, AlertTriangle } from 'lucide-react'
 import AgentAvatar from '@/components/AgentAvatar'
-import AgentLevelBadge from '@/components/AgentLevelBadge'
 
 interface Agent {
   id: string
@@ -497,7 +496,6 @@ export default function AgentsClient({ session }: { session: Session }) {
                     </Link>
                   </div>
                   <div className="flex items-center gap-2">
-                    <AgentLevelBadge agentId={agent.id} />
                     <StatusBadge status={agent.status} />
                   </div>
                 </div>
