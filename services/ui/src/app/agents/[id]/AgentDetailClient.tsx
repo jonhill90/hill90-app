@@ -8,7 +8,6 @@ import EventTimeline from './EventTimeline'
 import ActivityTimeline from './ActivityTimeline'
 import AgentMemory from './AgentMemory'
 import AgentNotebook from './AgentNotebook'
-import AgentProgression from './AgentProgression'
 import WorkspaceBrowser from './WorkspaceBrowser'
 import AgentMcpServers from './AgentMcpServers'
 import AgentWebhooks from './AgentWebhooks'
@@ -1070,9 +1069,6 @@ export default function AgentDetailClient({
           <div className="text-xs text-mountain-500">
             Created {new Date(agent.created_at).toLocaleString()} by {session.user?.sub === agent.created_by ? (session.user?.name || 'you') : agent.created_by?.slice(0, 8) + '…'}
           </div>
-
-          {/* Progression: Stats + Artifacts */}
-          <AgentProgression agentId={agent.id} />
         </div>
       )}
 
