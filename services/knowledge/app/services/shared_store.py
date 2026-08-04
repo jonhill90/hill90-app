@@ -62,11 +62,22 @@ async def list_collections(
     *,
     owner: str | None = None,
     include_shared: bool = True,
-) -> list[dict[str, Any]]:
-    """List collections visible to the given owner.
+    limit: int = 500,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """List one page of collections visible to the given owner, and the total.
 
-    If owner is None, return all collections (admin).
-    Otherwise return owner's private + all shared.
+    Returns ``(rows, total)`` where ``total`` is a ``COUNT(*)`` over the SAME
+    ``WHERE`` as the page — never ``len(rows)``. A total derived from the page
+    agrees with itself and reports truncation as completeness (#207).
+
+    If owner is None, all collections (admin). Otherwise the owner's own plus,
+    when ``include_shared``, everything marked shared.
+
+    This is read by an AGENT, via ``GET /api/v1/shared/collections``. An agent
+    has no scrollbar and no sense that a list ended early — it reasons over
+    what it received and reports success — so the bound and the total matter
+    more here than on a surface a human reads, not less.
     """
     base = """SELECT c.*,
                COUNT(DISTINCT s.id) AS source_count,
@@ -75,25 +86,34 @@ async def list_collections(
            LEFT JOIN shared_sources s ON s.collection_id = c.id
            LEFT JOIN shared_documents d ON d.source_id = s.id"""
 
+    # updated_at is not unique for collections created in the same instant, so
+    # the ORDER BY carries an id tiebreak. Paging over a non-unique sort key
+    # hands one row to two pages and no page to another.
+    order = "GROUP BY c.id ORDER BY c.updated_at DESC, c.id DESC"
+
     if owner is None:
-        rows = await pool.fetch(
-            f"{base} GROUP BY c.id ORDER BY c.updated_at DESC"
-        )
+        where, params = "", []
     elif include_shared:
-        rows = await pool.fetch(
-            f"""{base}
-               WHERE c.created_by = $1 OR c.visibility = 'shared'
-               GROUP BY c.id ORDER BY c.updated_at DESC""",
-            owner,
-        )
+        where, params = "WHERE c.created_by = $1 OR c.visibility = 'shared'", [owner]
     else:
-        rows = await pool.fetch(
-            f"""{base}
-               WHERE c.created_by = $1
-               GROUP BY c.id ORDER BY c.updated_at DESC""",
-            owner,
-        )
-    return [_serialize(dict(r)) for r in rows]
+        where, params = "WHERE c.created_by = $1", [owner]
+
+    page_params = [*params, limit, offset]
+    rows = await pool.fetch(
+        f"""{base}
+           {where}
+           {order}
+           LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+        *page_params,
+    )
+    # Counted over the same WHERE as the page. The DISTINCT joins above are
+    # only there for the per-row aggregates, so the count needs the base table
+    # alone — a JOIN here would multiply rows and inflate the total.
+    total = await pool.fetchval(
+        f"SELECT COUNT(*) FROM shared_collections c {where}",
+        *params,
+    )
+    return [_serialize(dict(r)) for r in rows], total
 
 
 async def get_collection(

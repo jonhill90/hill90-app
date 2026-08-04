@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from app.services import shared_store
@@ -83,11 +83,24 @@ async def create_collection(
 @router.get("/collections")
 async def list_collections(
     request: Request,
+    response: Response,
     owner: str | None = Query(None, description="Owner user sub for scoping"),
+    limit: int = Query(500, ge=1, le=2000, description="Max collections to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip before the page"),
 ) -> list[dict[str, Any]]:
+    """List one page of collections, optionally scoped to an owner.
+
+    ``owner`` is OPTIONAL, so omitting it spans every owner — the same shape as
+    the task admin route in #184, and the reason this twin is bounded in the
+    same change as the agent-facing one rather than after it.
+    """
     _verify_service_token(request)
     pool = request.app.state.pool
-    return await shared_store.list_collections(pool, owner=owner)
+    collections, total = await shared_store.list_collections(
+        pool, owner=owner, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return collections
 
 
 @router.get("/collections/{collection_id}")
