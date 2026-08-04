@@ -49,7 +49,18 @@ async def recall_memories(
     query_embedding: list[float],
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    """Recall memories for an agent using cosine similarity search."""
+    """Recall memories for an agent using cosine similarity search.
+
+    RAISES rather than returning [] when the query cannot run. It used to catch
+    everything and return an empty list, so a Postgres outage and "this agent has
+    no matching memories" produced byte-identical responses — and the caller,
+    which returns {"memories": [], "count": 0} either way, had nothing to tell
+    them apart with. The only trace was a log line nobody was reading.
+
+    The caller is responsible for turning this into a status the requester can
+    act on. That is the whole point: an empty list is an ANSWER, and this is the
+    absence of one.
+    """
     try:
         rows = await pool.fetch(
             """SELECT id, content, created_at,
@@ -63,4 +74,4 @@ async def recall_memories(
         return [dict(r) for r in rows]
     except Exception as e:
         logger.error(f"[memory_store] recall failed: {e}")
-        return []
+        raise

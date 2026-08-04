@@ -62,13 +62,42 @@ async def recall_memories(
     pool = request.app.state.pool
     agent_id = claims.sub
 
-    # Generate query embedding
-    try:
-        query_embedding = await generate_embedding(q)
-    except Exception:
-        return {"memories": [], "error": "Failed to generate query embedding"}
+    # NO try/except AROUND THIS CALL. There was one, and it could never fire:
+    # generate_embedding catches every exception internally and returns None. The
+    # handler read as protection, provided none, and would have returned exactly
+    # the error field that was missing from the response below.
+    query_embedding = await generate_embedding(q)
 
-    memories = await memory_store.recall_memories(pool, agent_id, query_embedding, limit=limit)
+    if query_embedding is None:
+        # THE SECOND HALF OF A DEFECT ALREADY CLOSED ON THE WRITE SIDE. When the
+        # embedder is unreachable this used to fall through with None, Postgres
+        # rejected "null"::vector, memory_store swallowed that and returned [],
+        # and the agent was told {"memories": [], "count": 0} with HTTP 200 —
+        # indistinguishable from having no memories.
+        #
+        # There is no degraded mode to fall back to: agent_memories is searched
+        # by vector only, so without an embedding the search cannot run at all.
+        # `shared.py` can answer with search_type "fts" because it has a keyword
+        # arm; this endpoint has none, so the honest answer is a failure, not an
+        # empty success.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cannot search memories: the embedding service is unavailable. "
+                "This is not the same as having no memories — retry, or check the "
+                "AI service."
+            ),
+        )
+
+    try:
+        memories = await memory_store.recall_memories(pool, agent_id, query_embedding, limit=limit)
+    except Exception:
+        # The other dependency. A Postgres failure produced the same empty
+        # success, through the same silence.
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot search memories: the knowledge database is unavailable.",
+        )
 
     return {
         "memories": [
@@ -76,4 +105,8 @@ async def recall_memories(
             for m in memories
         ],
         "count": len(memories),
+        # Names which arm answered, matching routes/shared.py's convention rather
+        # than inventing a second one. Only ever "vector" here — an empty result
+        # from a vector search that RAN is a real answer.
+        "search_type": "vector",
     }
