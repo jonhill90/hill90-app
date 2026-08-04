@@ -132,15 +132,25 @@ router.get('/status', async (_req: Request, res: Response) => {
     let body: Record<string, unknown>;
     try {
       body = JSON.parse(text);
-    } catch {
-      // Non-JSON response — vault is reachable but returned unexpected content
-      res.json({
-        available: true,
+    } catch (parseErr) {
+      // AN UNPARSEABLE REPLY IS NOT AVAILABILITY. This answered
+      // `200 { available: true }` with an error string alongside — and `available`
+      // is an assertion the code has no basis for: nobody could read what came
+      // back. The UI's probeService() has no body reader for this call and judges
+      // the service on `res.ok` alone, so that 200 rendered vault as HEALTHY while
+      // it was returning a gateway error page.
+      //
+      // 502 rather than 503, so "answered with something unreadable" stays
+      // distinguishable from "could not be reached" below. `available: null` is
+      // the honest third state: not true, not false, unknown.
+      console.warn(`[secrets] vault status unreadable — HTTP ${response.status}, body was not JSON:`, parseErr);
+      res.status(502).json({
+        available: null,
         sealed: null,
         initialized: null,
         version: null,
         cluster_name: null,
-        error: `Unexpected response (HTTP ${response.status})`,
+        error: `Unexpected response (HTTP ${response.status}) — the body was not JSON`,
       });
       return;
     }
@@ -152,13 +162,20 @@ router.get('/status', async (_req: Request, res: Response) => {
       version: body.version ?? null,
       cluster_name: body.cluster_name ?? null,
     });
-  } catch {
-    res.json({
+  } catch (err) {
+    // A 200 SAYING "unavailable" IS READ AS HEALTHY. probeService() judges this
+    // endpoint on `res.ok`, so the old body reported vault healthy in the UI
+    // during a vault outage — and recorded nothing about the cause, so DNS, TLS, a
+    // timeout and a refused connection were indistinguishable afterwards.
+    const detail = err instanceof Error ? err.message : 'unknown error';
+    console.warn(`[secrets] vault unreachable at ${getVaultAddr()}: ${detail}`);
+    res.status(503).json({
       available: false,
       sealed: null,
       initialized: null,
       version: null,
       cluster_name: null,
+      error: detail,
     });
   }
 });

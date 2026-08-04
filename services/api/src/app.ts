@@ -93,27 +93,53 @@ export function createApp(opts: AppOptions = {}): Application {
       dbStatus = 'connected';
     } catch { /* db unreachable */ }
 
-    // Fetch platform stats (best-effort)
-    let platformStats: Record<string, unknown> = {};
+    // PLATFORM STATS: a figure that could not be read is NULL, never zero.
+    //
+    // The workflows query used to carry `.catch(() => ({ rows: [{ total: 0,
+    // enabled: 0 }] }))`, so a failed query was served as a system with no
+    // workflows — and the surrounding catch left `platform_stats` empty for any
+    // other failure. Both are worse than an error: a reader who sees 0 stops
+    // looking. This endpoint is read during an incident, which is exactly when a
+    // plausible number costs the most.
+    //
+    // The status stays 200 and the shape stays the same, deliberately. The only
+    // programmatic consumer is MonitoringClient.tsx, which does
+    // `if (detRes.ok) setDetailed(...)` inside a try/catch that ignores failure —
+    // a non-2xx would make the outage LESS visible by dropping the body. So the
+    // honesty goes in the body: `null` for what could not be read, plus a list
+    // naming it, so the reader is told rather than left to notice a null.
+    const platformStats: Record<string, unknown> = {};
+    const statsUnavailable: string[] = [];
     if (dbStatus === 'connected') {
-      try {
-        const { getPool } = await import('./db/pool');
-        const pool = getPool();
-        const [agents, threads, workflows] = await Promise.all([
-          pool.query(`SELECT count(*) AS total, count(*) FILTER (WHERE status = 'running') AS running FROM agents`),
-          pool.query(`SELECT count(*) AS total FROM chat_threads`),
-          pool.query(`SELECT count(*) AS total, count(*) FILTER (WHERE enabled = true) AS enabled FROM workflows`).catch(() => ({ rows: [{ total: 0, enabled: 0 }] })),
-        ]);
-        platformStats = {
-          agents: { total: Number(agents.rows[0].total), running: Number(agents.rows[0].running) },
-          threads: Number(threads.rows[0].total),
-          workflows: { total: Number(workflows.rows[0].total), enabled: Number(workflows.rows[0].enabled) },
-        };
-      } catch { /* best-effort */ }
+      const { getPool } = await import('./db/pool');
+      const pool = getPool();
+      const settled = await Promise.allSettled([
+        pool.query(`SELECT count(*) AS total, count(*) FILTER (WHERE status = 'running') AS running FROM agents`),
+        pool.query(`SELECT count(*) AS total FROM chat_threads`),
+        pool.query(`SELECT count(*) AS total, count(*) FILTER (WHERE enabled = true) AS enabled FROM workflows`),
+      ]);
+      const [agents, threads, workflows] = settled;
+
+      platformStats.agents = agents.status === 'fulfilled'
+        ? { total: Number(agents.value.rows[0].total), running: Number(agents.value.rows[0].running) }
+        : null;
+      platformStats.threads = threads.status === 'fulfilled' ? Number(threads.value.rows[0].total) : null;
+      platformStats.workflows = workflows.status === 'fulfilled'
+        ? { total: Number(workflows.value.rows[0].total), enabled: Number(workflows.value.rows[0].enabled) }
+        : null;
+
+      for (const [name, r] of [['agents', agents], ['threads', threads], ['workflows', workflows]] as const) {
+        if (r.status === 'rejected') {
+          statsUnavailable.push(name);
+          console.warn(`[health] platform stat '${name}' could not be read; reporting it as unknown:`, r.reason);
+        }
+      }
     }
 
     res.json({
       status: dbStatus === 'connected' ? 'healthy' : 'degraded',
+      // Which figures below are NOT answers. Empty means every one was read.
+      stats_unavailable: statsUnavailable,
       service: 'api',
       // WHICH CODE IS RUNNING — the question #158 was filed about, and which
       // nothing outside the host could answer. Set by the deploy from the
