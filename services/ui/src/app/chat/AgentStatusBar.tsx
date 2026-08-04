@@ -1,6 +1,7 @@
 'use client'
 
 import { Crown } from 'lucide-react'
+import { statusDotClass, statusLabel, isUnknownStatus, UNVERIFIED_HINT } from '@/utils/agent-status'
 
 interface Agent {
   id: string
@@ -35,15 +36,16 @@ export default function AgentStatusBar({ agents, leadAgentId }: Props) {
               <Crown size={10} className="text-amber-400 flex-shrink-0" data-testid="lead-crown" />
             )}
             <span
-              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                agent.status === 'running' ? 'bg-brand-400' : 'bg-mountain-500'
-              }`}
+              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDotClass(agent.status)}`}
             />
             <span className={isLead ? 'text-amber-300' : 'text-mountain-300'}>
               {agent.name || agent.agent_id}
             </span>
-            <span className="text-mountain-500">
-              {agent.status === 'running' ? 'running' : 'stopped'}
+            <span
+              className={isUnknownStatus(agent.status) ? 'text-yellow-400' : 'text-mountain-500'}
+              title={isUnknownStatus(agent.status) ? UNVERIFIED_HINT : undefined}
+            >
+              {statusLabel(agent.status)}
             </span>
           </div>
         )

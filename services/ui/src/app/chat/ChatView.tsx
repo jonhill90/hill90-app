@@ -11,6 +11,7 @@ import CancelButton from './CancelButton'
 import SessionPane from './SessionPane'
 import MentionInput from './MentionInput'
 import ParticipantPanel from './ParticipantPanel'
+import { statusTone, mayBeAvailable, isUnknownStatus, UNVERIFIED_HINT } from '@/utils/agent-status'
 
 export interface Message {
   id: string
@@ -238,13 +239,33 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
   }
 
   const hasPending = messages.some(m => m.status === 'pending')
-  const anyAgentRunning = agents.some(a => a.status === 'running')
+  // Composer affordances open for `unknown` as well as `running` (#251). An
+  // agent the API could not verify may well be running, and disabling the
+  // input on that would turn a reporting gap into an outage; the API's own
+  // dispatch gate still rejects a genuinely stopped agent, visibly.
+  const anyAgentAvailable = agents.some(a => mayBeAvailable(a.status))
+  const anyAgentUnverified = agents.some(a => isUnknownStatus(a.status))
+  const anyAgentVerifiedRunning = agents.some(a => statusTone(a.status) === 'running')
+  const allAgentsStopped = agents.length > 0 && !anyAgentAvailable
   const agentName = thread?.agent?.name || 'Agent'
 
   // Build placeholder text for input
   const getPlaceholder = () => {
-    if (!anyAgentRunning) return 'No agents running'
+    // Reached only when EVERY agent is verified inactive. Since #252 a
+    // `stopped` status means the reconciler checked and found it stopped — an
+    // unchecked one arrives as `unknown` and takes the branch below — so this
+    // sentence is a claim the API actually backs.
+    if (!anyAgentAvailable) return 'No agents running'
     if (hasPending) return 'Waiting for response...'
+    // Nothing here is known to be running, and something is unverified. The
+    // composer stays enabled on purpose (an agent we could not check may well
+    // be running, and refusing to send would be a confident wrong claim in the
+    // other direction) but the placeholder must not imply a working agent
+    // either. Unverified is not absent, and this is the one place that
+    // distinction reaches a string a user actually reads.
+    if (anyAgentUnverified && !anyAgentVerifiedRunning) {
+      return 'Agent status unverified — you can still send'
+    }
     if (isGroup) return 'Message all agents, or @name to target one...'
     return 'Type a message...'
   }
@@ -286,15 +307,35 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <span
                     className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                      thread.agent.status === 'running' ? 'bg-green-400 animate-pulse' : 'bg-red-400'
+                      {
+                        running: 'bg-green-400 animate-pulse',
+                        unknown: 'bg-yellow-400 animate-pulse',
+                        inactive: 'bg-red-400',
+                      }[statusTone(thread.agent.status)]
                     }`}
                     data-testid="agent-status-dot"
                   />
                   <span className="text-xs text-mountain-500">{agentName}</span>
-                  <span className={`text-[10px] font-medium ${
-                    thread.agent.status === 'running' ? 'text-green-400' : 'text-red-400'
-                  }`}>
-                    {thread.agent.status === 'running' ? 'Running' : 'Stopped'}
+                  <span
+                    className={`text-[10px] font-medium ${
+                      {
+                        running: 'text-green-400',
+                        unknown: 'text-yellow-400',
+                        inactive: 'text-red-400',
+                      }[statusTone(thread.agent.status)]
+                    }`}
+                    title={isUnknownStatus(thread.agent.status) ? UNVERIFIED_HINT : undefined}
+                    data-testid="agent-status-label"
+                  >
+                    {
+                      {
+                        running: 'Running',
+                        // Not "Stopped": the API said it could not check, and a
+                        // definite claim either way would be inventing one.
+                        unknown: 'Unverified',
+                        inactive: 'Stopped',
+                      }[statusTone(thread.agent.status)]
+                    }
                   </span>
                 </div>
               )
@@ -423,12 +464,27 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
         )}
 
         {/* Agent stopped warning */}
-        {!anyAgentRunning && agents.length > 0 && (
+        {allAgentsStopped && (
           <div className="px-4 py-2 bg-yellow-900/20 border-b border-yellow-800/40 flex items-center gap-2" data-testid="agent-stopped-warning">
             <span className="w-2 h-2 rounded-full bg-red-400 flex-shrink-0" />
             <p className="text-xs text-yellow-300">
               {isGroup ? 'All agents are stopped.' : `${agentName} is stopped.`}
               {' '}Start the agent from the Agents page to resume chatting.
+            </p>
+          </div>
+        )}
+
+        {/* Unverified notice — a separate banner, not a softer wording of the
+            stopped one. "Stopped" and "we could not check" are different
+            claims and must not share a rendering (#251). */}
+        {!allAgentsStopped && anyAgentUnverified && (
+          <div className="px-4 py-2 bg-yellow-900/20 border-b border-yellow-800/40 flex items-center gap-2" data-testid="agent-unverified-warning">
+            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse flex-shrink-0" />
+            <p className="text-xs text-yellow-300">
+              {isGroup
+                ? 'Some agents could not be verified against their containers.'
+                : `${agentName} could not be verified against its container.`}
+              {' '}It may still be running — messages will still be sent.
             </p>
           </div>
         )}
@@ -540,12 +596,12 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
               value={input}
               onChange={setInput}
               onSubmit={handleSend}
-              disabled={sending || !anyAgentRunning}
+              disabled={sending || !anyAgentAvailable}
               placeholder={getPlaceholder()}
             />
             <button
               onClick={handleSend}
-              disabled={!input.trim() || sending || !anyAgentRunning}
+              disabled={!input.trim() || sending || !anyAgentAvailable}
               className="p-2 bg-brand-600 hover:bg-brand-500 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
             >
               <Send size={18} />
