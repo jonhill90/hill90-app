@@ -19,6 +19,10 @@ services:
       dockerfile: Dockerfile
     image: hill90/ui:${VERSION:-latest}
     container_name: ${CONTAINER_PREFIX:-}app-ui
+    # V8 ignores the cgroup limit (see docker-compose.api.yml). Via `command`
+    # for symmetry with api, so both node services carry the flag the same way
+    # and neither depends on an env var another layer might replace.
+    command: ["node", "--max-old-space-size=320", "server.js"]
     restart: unless-stopped
     networks:
       - edge
@@ -53,6 +57,13 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    # See docker-compose.api.yml for the reasoning; same host, same contract.
+    # Measured on the VPS 2026-08-03: app-ui 44.18 MiB, no ceiling. The
+    # transient term here is the storage proxy — src/utils/request-body.ts
+    # sets BODY_LIMIT_UPLOAD to 64 MiB and app/api/storage/[...path] buffers a
+    # whole upload before forwarding it, so two concurrent uploads is 128 MiB
+    # on top of the baseline.
+    mem_limit: 512m
     labels:
       # Which commit this container was created from. Nothing else on the
       # host can answer that — see #158. Set by scripts/deploy.sh.
