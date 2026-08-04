@@ -78,6 +78,13 @@ jobs:
         with:
           node-version: '20'
       - run: npm ci
+      # Same defect class as services/api (#331): npm ci can silently drop an
+      # optional native dependency to a registry hiccup and still exit 0. Of
+      # this lockfile's seven native binary families, exactly two are
+      # actually reachable from `npm test` — see verify-native-deps.js for
+      # how the other five were ruled out by removing their binaries and
+      # re-running the real suite, not by guessing from the lockfile.
+      - run: node scripts/verify-native-deps.js
       - run: npm test
 
       # issue #117 is CI-ONLY: it has never reproduced locally in ~40 runs, so a
