@@ -60,7 +60,10 @@ fi
 # run, and if an excluded file stops existing the check FAILS rather than
 # quietly passing — an exclusion that outlives its file is a lie about what is
 # covered, which is the shape this check exists to catch.
-EXCLUDES=( "shared-knowledge.ts:#300" )
+# Empty: routes/shared-knowledge.ts was excluded for #300 and no longer needs
+# to be — its /graph handler now proxies to the service that owns the tables
+# instead of querying its own database for them.
+EXCLUDES=( )
 for e in "${EXCLUDES[@]}"; do
   f="${e%%:*}"; issue="${e##*:}"
   if [ ! -f "$ROOT/services/api/src/routes/$f" ]; then
