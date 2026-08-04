@@ -29,6 +29,11 @@ shared VPS, and locally against the same compose files.
   — where the tenant stands after the cutover: what it consumes and how that was
   proven, what remains of its own three services, local's real state, and the open
   decisions. The estate-level companion is Hill90's handoff of the same date.
+- [`docs/decisions/HANDOFF-2026-08-03.md`](docs/decisions/HANDOFF-2026-08-03.md)
+  — the silent-success seam and the rules that came out of it: the two questions that
+  found every defect that session, the twin rule, why a positive control's two numbers
+  must disagree, and the one thing nothing can alert on. Read it before picking up
+  #184 or #185, which are the same shape left parked.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — deploy verbs and conventions.
 - Published pages: [docs.hill90.com/ai-app](https://docs.hill90.com/ai-app/overview).
 
