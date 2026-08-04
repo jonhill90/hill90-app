@@ -216,6 +216,10 @@ only in code a person writing a different file never opens** — [#114](https://
 401 in `middleware/auth.ts` and the same shape survived four months in two other files until
 [#308](https://github.com/jonhill90/hill90-app/pull/308). When you fix a shape, search for the shape.
 
+**Write a handover from the tracker and the diffs, never from recall** — it is composed at
+the end of a long session, which is exactly when memory substitutes for verification, and on
+2026-08-04 one false claim in one led to a check that found four more of the same kind.
+
 This is not a maxim. It is what **2026-08-03** actually looked like — six times in one day:
 
 | Fixed | The twin, found afterwards | How far apart |
