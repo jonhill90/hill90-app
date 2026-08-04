@@ -79,7 +79,15 @@ let checkable=0, dynamic=0, out=[];
 for (const f of fs.readdirSync(dir).filter(f=>f.endsWith(".ts"))) {
   if (excluded.includes(f)) continue;
   const src=fs.readFileSync(path.join(dir,f),"utf8");
-  for (const m of src.matchAll(/query\(\s*([`\x27])([\s\S]*?)\1/g)) {
+  // COMMENTS AND WHITESPACE BETWEEN `query(` AND THE LITERAL.
+  //
+  // The first version allowed only \s*, so any statement with an explanatory
+  // comment above it was skipped SILENTLY — and this repository comments the
+  // interesting statements, which are the ones worth checking. Documenting a
+  // fix removed it from coverage: `checkable` slid 252 -> 245 while I annotated
+  // the very statements this check had just found, and the positive control
+  // then passed against a fault that was still in the tree.
+  for (const m of src.matchAll(/query\(\s*(?:\/\/[^\n]*\n\s*|\/\*[\s\S]*?\*\/\s*)*([`\x27])([\s\S]*?)\1/g)) {
     const sql=m[2].trim();
     if (!/^(SELECT|INSERT|UPDATE|DELETE|WITH)/i.test(sql)) continue;
     if (sql.includes("${")) { dynamic++; continue; }
