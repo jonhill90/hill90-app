@@ -125,7 +125,30 @@ async def ingest_source(
         chunk_tuples = [
             (c.index, c.content, c.token_estimate) for c in chunks
         ]
-        await shared_store.create_chunks(pool, document["id"], chunk_tuples, embeddings=embeddings)
+        inserted, embedded = await shared_store.create_chunks(
+            pool, document["id"], chunk_tuples, embeddings=embeddings
+        )
+
+        # Record what the embedder actually achieved (#210).
+        #
+        # Embedding stays best-effort — content that is keyword-searchable is
+        # worth keeping, and a five-minute AI-service outage should not throw
+        # away good work. But "best-effort" must not mean "reported as done".
+        # This is the same answer create_entry gives with sync_status: name the
+        # incomplete state in the response, and converge it later.
+        embedding_status = shared_store.embedding_status_for(inserted, embedded)
+        await shared_store.set_document_embedding_status(
+            pool, document["id"], embedding_status
+        )
+        if embedding_status != "embedded":
+            logger.warning(
+                "ingest_embeddings_incomplete",
+                source_id=source["id"],
+                document_id=document["id"],
+                chunks=inserted,
+                embedded=embedded,
+                embedding_status=embedding_status,
+            )
 
         # Mark job completed
         await shared_store.update_ingest_job(
@@ -157,6 +180,11 @@ async def ingest_source(
                 "id": document["id"],
                 "title": document["title"],
                 "chunk_count": document["chunk_count"],
+                # The caller can now tell a fully-embedded source from one with
+                # none. chunk_count alone was true and misleading: it implied
+                # those chunks were searchable the way every other source is.
+                "embedding_status": embedding_status,
+                "embedded_chunk_count": embedded,
             },
         }
 
