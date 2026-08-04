@@ -199,6 +199,14 @@ the app's own Keycloak proves nothing about a production that uses the platform'
   direct-port path would work and the Traefik-routed one would not. Hill90's
   `keycloak.sh tenant-clients` is the right place — this repo must not write to
   Hill90's realm directly.
+  **Decided the other way, 2026-08-04 (#271).** The prediction was right and the
+  routed path did fail, with `Invalid parameter: redirect_uri`. Rather than widen the
+  platform's client for a tenant's convenience, the app's `AUTH_URL` now points at the
+  published port the client already allows. Production has exactly one UI origin;
+  adding a second one locally would have been local growing a shape production does not
+  have — and `webOrigins` carries the same single value, so the redirect alone would
+  have traded the 400 for a CORS failure. The cost, stated rather than hidden: a local
+  login no longer traverses Traefik.
 - `compose/local/keycloak/realm-local.json` becomes dead for the tenant path. It stays
   for `--standalone`. **Do not delete it**: `local.auth.yml` bind-mounts it, and a
   missing bind-mount *file* does not error — Docker creates a directory in its place and

@@ -22,14 +22,51 @@ services:
       # app-keycloak, which the tenant path no longer starts. A local login now
       # exercises the tenancy, not just the realm design.
       AUTH_KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
-      # Still required: the browser resolves the Traefik hostname, this container
-      # cannot, so the back-channel keeps using the service name.
-      # `keycloak` is now unambiguous on the shared networks: the app's own
-      # Keycloak is gone, so this can only be Hill90's. That ambiguity was a
-      # measured defect — see the follow-up issue linked from README.
-      KEYCLOAK_INTERNAL_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
-      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
-      AUTH_URL: http://${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
+      # THE SERVICE NAME, and the comment here said so while the value did not.
+      # This read `auth.localtest.me:8080` — the browser-facing host — which
+      # inside the container resolves to 127.0.0.1, where nothing listens. The
+      # token exchange died on ECONNREFUSED 127.0.0.1:8080 and NextAuth reported
+      # it as `error=Configuration`, naming nothing. Found behind #271's 400:
+      # fixing the redirect_uri alone moved the failure one step later, it did
+      # not produce a login.
+      #
+      # Safe because Hill90's Keycloak pins KC_HOSTNAME to the browser-facing
+      # URL, so `iss` stays `http://auth.localtest.me:8080/realms/platform`
+      # whichever host the back-channel used — which is what AUTH_KEYCLOAK_ISSUER
+      # above, and the API, validate against.
+      #
+      # `keycloak` is unambiguous on the shared networks: the app's own Keycloak
+      # is gone, so this can only be Hill90's. That ambiguity was a measured
+      # defect — see the follow-up issue linked from README.
+      KEYCLOAK_INTERNAL_ISSUER: http://${KEYCLOAK_CONTAINER:-keycloak}:8080/realms/${KC_REALM:-platform}
+      KEYCLOAK_INTERNAL_URL: http://${KEYCLOAK_CONTAINER:-keycloak}:8080
+      # The PUBLISHED PORT, not the Traefik host — and that is a deliberate
+      # choice between two fixes for #271, where a browser login died on
+      # `Invalid parameter: redirect_uri`.
+      #
+      # AUTH_URL is what NextAuth canonicalises every URL to, so it decides the
+      # `redirect_uri` the browser carries to Keycloak. It was
+      # `app.localtest.me:8080`; the `hill90-ui` client on the local platform
+      # realm allows `http://localhost:13000/api/auth/callback/keycloak` and
+      # `https://hill90.com/...`, so every local login was rejected with HTTP 400.
+      #
+      # The other fix — teaching the client the Traefik callback — belongs to
+      # HILL90, not here: that client is written by Hill90's `scripts/local.sh`
+      # via `keycloak.sh tenant-clients`, and
+      # docs/decisions/local-parity-with-platform-services.md already recorded
+      # that this repo must not write to Hill90's realm directly. It would also
+      # give local TWO accepted UI origins where production has exactly one, and
+      # `webOrigins` carries the same single value, so the redirect alone would
+      # have fixed the 400 and left NextAuth's browser-side calls failing CORS.
+      #
+      # The trade-off, stated rather than hidden: a local login now goes to the
+      # published port and does NOT traverse Traefik, so it does not exercise
+      # the routed path production uses. `app.localtest.me:8080` still serves
+      # the UI — NextAuth just canonicalises to localhost:13000 on the way to
+      # sign-in. README's local table already names localhost:13000 as the URL
+      # to log in at, and local.api.yml's TERMINAL_ALLOWED_ORIGINS already lists
+      # it.
+      AUTH_URL: http://localhost:${PORT_UI:-13000}
     labels:
       # Production routes the UI at the APEX domain (hill90.com), not app.<domain>.
       # Locally the apex is localtest.me, which works -- but every runbook and the
