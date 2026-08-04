@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
+import Toast, { useToast, failureMessage } from '@/components/Toast'
 import Link from 'next/link'
 import { useSession } from 'next-auth/react'
 import { Menu, Bell, Bot, CheckCircle, AlertCircle, Play, Search } from 'lucide-react'
@@ -97,6 +98,7 @@ export default function TopBar({ navExtra }: TopBarProps) {
   const [notifOpen, setNotifOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [notifications, setNotifications] = useState<Notification[]>([])
+  const { toast, showToast } = useToast()
   const notifRef = useRef<HTMLDivElement>(null)
   const { data: session } = useSession()
 
@@ -152,13 +154,29 @@ export default function TopBar({ navExtra }: TopBarProps) {
     }
   }, [notifOpen, closeNotif])
 
-  const markAllRead = () => {
+  const markAllRead = async () => {
+    // #217: the optimistic update stays — it is the right feel — but it must
+    // not outlive the truth. This flipped every badge to read and then dropped
+    // the result on the floor, so a failed PUT left the screen claiming they
+    // were read until the 60s poll quietly brought them back, with nothing
+    // connecting the two for the person watching.
+    const before = notifications
     setNotifications(prev => prev.map(n => ({ ...n, read: true })))
-    fetch('/api/notifications/read-all', { method: 'PUT' }).catch(() => {})
+    try {
+      const res = await fetch('/api/notifications/read-all', { method: 'PUT' })
+      if (!res.ok) {
+        setNotifications(before)
+        showToast('error', await failureMessage('Could not mark notifications read', res))
+      }
+    } catch {
+      setNotifications(before)
+      showToast('error', 'Could not mark notifications read: the request did not complete')
+    }
   }
 
   return (
     <>
+      <Toast toast={toast} />
       <header className="flex items-center justify-between px-4 py-3 border-b border-navy-700 bg-navy-900">
         {/* Left: hamburger + logo + breadcrumb */}
         <div className="flex items-center gap-3">
