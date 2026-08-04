@@ -210,10 +210,32 @@ const CLOSE_ACCESS_REVOKED = 4004;
  */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
+/**
+ * Where the proxy connects once a caller is allowed in.
+ *
+ * INJECTABLE BECAUSE NOTHING AFTER THE HANDSHAKE WAS TESTABLE WITHOUT IT (#313).
+ * `resolveAgentWsUrl` builds `ws://agentbox-<agent_id>:8054/…` and `agent_id` is
+ * validated at creation against `^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$`, so no database
+ * value can point this at a test server. With the upstream unreachable,
+ * `agentWs.on('error')` runs `cleanupAll()`, which clears the expiry timer and the
+ * ping interval — so the credential deadline and the participation re-check were
+ * cleared before they could ever fire, whenever the upstream was absent, which in a
+ * test it always is. Not a race: the ordering the code guarantees.
+ *
+ * This is the THIRD instance of a pattern this codebase has already chosen twice —
+ * `resolveAgentModels`'s `exec` parameter and `boot/fatal.ts`'s `Exit` hook. Same
+ * shape, same reason, same default-to-production behaviour when omitted.
+ */
+export interface TerminalProxyOptions {
+  resolveUpstream?: (threadId: string) => Promise<string | null>;
+}
+
 export function attachTerminalProxy(
   server: ReturnType<typeof import('http').createServer>,
   verifyToken: (token: string) => Promise<{ sub: string; roles?: string[]; exp: number } | null>,
+  options: TerminalProxyOptions = {},
 ): void {
+  const resolveUpstream = options.resolveUpstream ?? ((threadId: string) => resolveAgentWsUrl(threadId, ''));
   // Only ever select the plain version subprotocol. Returning the bearer entry would
   // echo the token back in the response's Sec-WebSocket-Protocol header.
   const wss = new WebSocketServer({
@@ -298,7 +320,7 @@ export function attachTerminalProxy(
       }
 
       // Resolve agentbox WebSocket URL
-      const agentWsUrl = await resolveAgentWsUrl(threadId, '');
+      const agentWsUrl = await resolveUpstream(threadId);
       console.log(`[terminal-proxy] Resolved agentbox URL for thread=${threadId}: ${agentWsUrl ? 'found' : 'not found'}`);
       if (!agentWsUrl) {
         socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
