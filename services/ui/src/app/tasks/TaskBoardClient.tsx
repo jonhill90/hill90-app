@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
+import Toast, { useToast, failureMessage } from '@/components/Toast'
 
 interface Task {
   id: string
@@ -69,6 +70,7 @@ export default function TaskBoardClient() {
   const [agents, setAgents] = useState<Array<{ agent_id: string; name: string }>>([])
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
   const [transitioning, setTransitioning] = useState<string | null>(null)
+  const { toast, showToast } = useToast()
   const [showNewForm, setShowNewForm] = useState(false)
   const [newTask, setNewTask] = useState<NewTaskForm>({ agent_id: '', title: '', description: '', priority: 3 })
   const [creating, setCreating] = useState(false)
@@ -121,9 +123,14 @@ export default function TaskBoardClient() {
         const updated = await res.json()
         setTasks(prev => prev.map(t => t.id === taskId ? updated : t))
         if (selectedTask?.id === taskId) setSelectedTask(updated)
+      } else {
+        // #217: the most legible of the five — the card snaps back, so the user
+        // sees SOMETHING. What they cannot see is why, and a revert with no
+        // reason reads as a UI glitch rather than as a refusal.
+        showToast('error', await failureMessage('Could not move the task', res))
       }
     } catch {
-      // Non-fatal
+      showToast('error', 'Could not move the task: the request did not complete')
     } finally {
       setTransitioning(null)
     }
@@ -220,6 +227,7 @@ export default function TaskBoardClient() {
 
   return (
     <div>
+      <Toast toast={toast} />
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-white">Tasks</h1>

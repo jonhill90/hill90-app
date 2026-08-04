@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import Toast, { useToast } from '@/components/Toast'
 import { useSession } from 'next-auth/react'
 import {
   ChevronDown,
@@ -305,7 +306,7 @@ export default function SecretsClient() {
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+  const { toast, showToast } = useToast()
 
   // CRUD state
   const [showForm, setShowForm] = useState(false)
@@ -313,10 +314,6 @@ export default function SecretsClient() {
   const [deleteTarget, setDeleteTarget] = useState<{ path: string; key: string } | null>(null)
   const [saving, setSaving] = useState(false)
 
-  const showToast = useCallback((type: 'success' | 'error', message: string) => {
-    setToast({ type, message })
-    setTimeout(() => setToast(null), 4000)
-  }, [])
 
   const fetchData = useCallback(async () => {
     try {
@@ -423,17 +420,7 @@ export default function SecretsClient() {
   return (
     <div>
       {/* Toast notification */}
-      {toast && (
-        <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg text-sm shadow-lg border transition-opacity ${
-            toast.type === 'success'
-              ? 'bg-brand-900/80 text-brand-300 border-brand-700'
-              : 'bg-red-900/80 text-red-300 border-red-700'
-          }`}
-        >
-          {toast.message}
-        </div>
-      )}
+      <Toast toast={toast} />
 
       {/* Delete confirmation dialog */}
       {deleteTarget && (
