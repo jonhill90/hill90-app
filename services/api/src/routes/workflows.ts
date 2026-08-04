@@ -310,7 +310,7 @@ router.post('/:id/run', requireRole('user'), async (req: Request, res: Response)
       // — the table uses author_id/author_type. Both workflow write paths would
       // have failed on every run. Found by check_sql_identifiers.sh, never by a
       // test, because the pool is mocked and a mocked query reaches no parser.
-      `INSERT INTO chat_messages (thread_id, author_id, author_type, content, status)
+      `INSERT INTO chat_messages (thread_id, sender_id, sender_type, content, status)
        VALUES ($1, $2, 'human', $3, 'delivered')
        RETURNING id`,
       [threadId, user.sub, wf.prompt]
