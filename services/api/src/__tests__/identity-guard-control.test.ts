@@ -42,22 +42,15 @@
  * daemon's transport. It is a control on the detector's logic, not a simulation of
  * the field failure.
  *
- * ARM B (FOREIGN STAMP) IS NOT SHIPPED ACTIVE, and that is deliberate, not an
- * oversight. Alone, and under artificial CPU load, it is 100% reliable (dozens of
- * runs). Under the real full 117-suite parallel run it failed twice out of two —
- * with `__setStampForControl('other-worker:9')` set synchronously before the
- * request and reset synchronously in a `finally` after it resolves, the response
- * this test's own server sent back carried this worker's correct, un-overridden
- * ID, not the forced value, so no violation was recorded. Patch-stacking across
- * test files sharing one worker process was the first suspect and was ruled out
- * directly: an instrumented run showed the guard's setup file loads exactly once
- * per worker (no repeated monkey-patching). Small hand-built repros — up to ten
- * sibling files run before this one, in-band or with two workers, ten attempts —
- * never reproduced it. Root cause not found. Shipping it active would mean a
- * control that cannot reliably go green, which is the same defect this issue
- * exists to keep out of the tree. See the PR/issue discussion for the full
- * writeup; this is left `test.skip` with the evidence above rather than deleted,
- * so the next person doesn't have to rediscover any of it.
+ * ARM B (FOREIGN STAMP) IS NOT IN THIS FILE. It was built, and failed twice out
+ * of two real full-suite parallel runs while passing every isolated and
+ * artificial-load run — a genuine, unexplained finding, not app breakage. A
+ * committed test.skip was tried first and rejected: a check that cannot fire is
+ * the same shape this repo has already deleted twice today and filed an issue
+ * about once, a good comment on a skip doesn't change that, and it would read in
+ * six months as something someone meant to come back to. The full reproduction
+ * and evidence trail is filed as its own issue instead, where it's searchable
+ * rather than buried in a skipped block — see the repo's open issues for arm B.
  */
 import http from 'http';
 import net from 'net';
@@ -108,30 +101,6 @@ describe('identity guard control (#179)', () => {
     await close(server);
 
     expect(guard.__drainViolationsForControl()).toEqual([]);
-  });
-
-  // Not shipped active — see the file header. This body is preserved, unskipped,
-  // as the reproduction the next person picking this up should start from.
-  test.skip('arm B — FOREIGN STAMP: a stamp that is not this worker\'s is a violation', async () => {
-    const server = http.createServer((_req, res) => {
-      res.writeHead(200);
-      res.end('ok');
-    });
-    await listen(server, 0);
-    const port = (server.address() as net.AddressInfo).port;
-
-    guard.__setStampForControl('other-worker:9');
-    try {
-      await get({ port, path: '/', method: 'GET' });
-    } finally {
-      guard.__setStampForControl(guard.__ID);
-    }
-    await close(server);
-
-    const violations = guard.__drainViolationsForControl();
-    expect(violations).toHaveLength(1);
-    expect(violations[0].kind).toBe('FOREIGN STAMP');
-    expect(violations[0].got).toBe('other-worker:9');
   });
 
   test('arm C — NO STAMP: an in-process UDS listener answering raw is a violation', async () => {
