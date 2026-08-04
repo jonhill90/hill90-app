@@ -408,16 +408,46 @@ export async function execInContainerWithExit(
     rawStream.on('close', () => resolve());
   });
 
-  if (timeoutMs && timeoutMs > 0) {
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        rawStream.destroy();
-        reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s`));
-      }, timeoutMs);
-    });
-    await Promise.race([streamPromise, timeoutPromise]);
-  } else {
-    await streamPromise;
+  /*
+   * THE TIMEOUT MUST BE CANCELLED WHEN THE COMMAND WINS THE RACE.
+   *
+   * `Promise.race` settles as soon as the command finishes and this function
+   * returns — but the timer was left armed for its full window, holding
+   * `rawStream` and this closure alive.
+   *
+   * NOTHING OBSERVED IT, because nothing goes wrong when it finally fires:
+   * `rawStream.destroy()` on a finished stream is a no-op, and the late `reject`
+   * is HANDLED, because `Promise.race` leaves its handlers attached to every
+   * input. That was measured rather than assumed — a settled race whose loser
+   * rejects afterwards produces zero `unhandledRejection` events. So this was
+   * never the process-death class; it was pure accrual.
+   *
+   * The window is not small. INSTALL_TIMEOUTS in tool-installer.ts is builtin
+   * 30s / apt 120s / binary 300s, and MAX_INSTALL_RETRIES means one install can
+   * arm several. Each armed timer also keeps the event loop non-empty, so the
+   * process cannot exit while any is pending.
+   *
+   * THIS BLOCK EXISTS TWICE IN THIS FILE — here and in `execWithStdin` — and the
+   * defect was in both copies, byte for byte. See CONTRIBUTING, "Look for the
+   * twin before you look for the next defect".
+   */
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    if (timeoutMs && timeoutMs > 0) {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutTimer = setTimeout(() => {
+          rawStream.destroy();
+          reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      });
+      await Promise.race([streamPromise, timeoutPromise]);
+    } else {
+      await streamPromise;
+    }
+  } finally {
+    // `finally`, not after the race: the timeout path throws, and a command that
+    // times out must not leave its own timer armed either.
+    if (timeoutTimer) clearTimeout(timeoutTimer);
   }
 
   const inspect = await exec.inspect();
@@ -487,16 +517,25 @@ export async function execWithStdin(
     rawStream.on('close', () => resolve());
   });
 
-  if (timeoutMs && timeoutMs > 0) {
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        rawStream.destroy();
-        reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s`));
-      }, timeoutMs);
-    });
-    await Promise.race([streamPromise, timeoutPromise]);
-  } else {
-    await streamPromise;
+  // The second copy of the block documented in `execInContainerWithExit` above.
+  // It had the same defect, because it is the same code.
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    if (timeoutMs && timeoutMs > 0) {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutTimer = setTimeout(() => {
+          rawStream.destroy();
+          reject(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      });
+      await Promise.race([streamPromise, timeoutPromise]);
+    } else {
+      await streamPromise;
+    }
+  } finally {
+    // `finally`, not after the race: the timeout path throws, and a command that
+    // times out must not leave its own timer armed either.
+    if (timeoutTimer) clearTimeout(timeoutTimer);
   }
 
   const inspect = await exec.inspect();

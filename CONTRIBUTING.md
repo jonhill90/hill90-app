@@ -143,3 +143,45 @@ choosing the right tool.** `no-misused-promises` reported 191 sites in the same 
 `router.get('/x', async …)` in the service — all of them already safe because of the vendored
 middleware in `src/boot/async-errors.ts`. Reporting 197 would have counted a solved problem as
 an open one.
+
+## Look for the twin before you look for the next defect
+
+When you fix something, the next question is not *what else is broken*. It is **where else does
+this exact code live**. Ask it before you move on, every time, and read the answer rather than
+reasoning about it — the twin is usually a copy that was never edited, so it is found by
+searching for the shape, not by thinking about the design.
+
+This is not a maxim. It is what **2026-08-03** actually looked like — six times in one day:
+
+| Fixed | The twin, found afterwards | How far apart |
+|---|---|---|
+| [#141](https://github.com/jonhill90/hill90-app/pull/141) clamped `?tail=` on `/agents/:id/events` | the same clamp had existed on the export endpoint all along — #141 *was* the twin nobody had checked for | one route |
+| #141's clamp, plus the byte cap from [#143](https://github.com/jonhill90/hill90-app/pull/143) | [#153](https://github.com/jonhill90/hill90-app/pull/153) — the chat events route had **neither**, and multiplied both by up to 8 agents | two files |
+| [#182](https://github.com/jonhill90/hill90-app/pull/182) bounded `list_entries` | [#186](https://github.com/jonhill90/hill90-app/pull/186) — "bound the agent-facing entries list **too**" | same service |
+| [#181](https://github.com/jonhill90/hill90-app/pull/181) fixed a stale response overwriting the agent you are on | [#187](https://github.com/jonhill90/hill90-app/pull/187) — the chat browser pane had the same shape, and its stale value is a POST body | api → ui |
+| [#192](https://github.com/jonhill90/hill90-app/pull/192) registered stream cleanup before the await | found in **three** routes at once, because that time the search came first | three handlers |
+| this PR | `execInContainerWithExit` and `execWithStdin` in `services/docker.ts` — byte-identical blocks, the same uncancelled timer in both | 80 lines |
+
+**Not one of the six was found by something failing.** Every one came from someone deciding to
+look, and none of the twins had a bug report. Two of them — #153 and #187 — were more severe than the original: #153 multiplied by
+the number of agents in a thread, and #187's stale value reaches a write rather than a display.
+So the twin is not a tidy-up after the real fix. It is as likely to be the worse instance.
+
+**The mechanism is drift, and drift has a direction.** A bound, a guard or a cancel gets added
+where the bug was reported. The copy nobody reported keeps the old shape and now looks
+deliberate, because the fixed one is elsewhere and no longer resembles it. That is why the
+search must be textual: `grep` the block, not the intent.
+
+**What to do, concretely.** Before opening the PR, take the two or three lines you changed and
+search the repository for them — the surrounding lines, not the symbol name. If the block exists
+twice, fix both in the same PR and say so in the diff; splitting them leaves the second behind a
+review of the first. If it exists once, say *that* in the PR, because a checked negative stops
+the next person re-running the search. And where the same bound belongs in more than one place,
+put it in a shared constant rather than a literal typed in three files — `event-log-limits.ts`
+exists because #153 proved the alternative.
+
+**One instance checked and excluded, so the count is evidence rather than a slogan:**
+[#166](https://github.com/jonhill90/hill90-app/pull/166) (`log` where the helper is `info`) was
+considered for this list and does not belong. Its diff changes exactly one line and
+`revision stamp` appears once in `scripts/deploy.sh`. It was a single-occurrence defect that a
+test could not see, which is a different lesson and already recorded above.
