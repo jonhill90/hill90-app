@@ -5,12 +5,9 @@ import './bootstrap-redaction';
 import { app } from './app';
 import { getPool, closePool } from './db/pool';
 import { runMigrations } from './db/migrate';
-import { createJwksKeyResolver } from './middleware/auth';
-import { getIssuer, getJwksUri } from './middleware/keycloak-config';
 import { runReconcilePass, startAgentReconciler, stopAgentReconciler } from './services/agent-reconciler';
 import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
-import { attachTerminalProxy } from './services/terminal-proxy';
-import { verifyTerminalToken } from './services/terminal-token';
+import { attachTerminalProxyFromConfig } from './services/terminal-wiring';
 import { startStaleSweeper, stopStaleSweeper } from './routes/chat';
 import { dieOnStartupFailure, shutdownSafely, installUnhandledRejectionBackstop } from './boot/fatal';
 
@@ -100,14 +97,12 @@ async function start() {
     console.log(`Hill90 API service listening on port ${PORT}`);
   });
 
-  // Attach WebSocket terminal proxy for live agent terminal sessions
-  const issuer = getIssuer();
-  const jwksUri = getJwksUri(issuer);
-  const getSigningKey = createJwksKeyResolver(jwksUri);
-
-  // The verifier lives in services/terminal-token.ts so it can be tested: this is
-  // the most privileged surface in the service and its refusals were silent.
-  const terminals = attachTerminalProxy(server, (token: string) => verifyTerminalToken(token, { issuer, getSigningKey }));
+  // Attach WebSocket terminal proxy for live agent terminal sessions.
+  //
+  // The wiring itself — which issuer, which key resolver — lives in
+  // terminal-wiring.ts, not inline here, so a test can import it without also
+  // running this file's migrations-and-listen sequence at module load (#313).
+  const terminals = attachTerminalProxyFromConfig(server);
 
   console.log('[startup] WebSocket terminal proxy attached');
 
