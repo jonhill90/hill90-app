@@ -51,6 +51,18 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    # See docker-compose.api.yml. Measured on the VPS 2026-08-03: app-mcp
+    # 74.3 MiB, no ceiling. 512m matches its FastAPI siblings knowledge and ai,
+    # which sit at ~85 MiB against the same 512m.
+    #
+    # An earlier draft proposed 768m on the strength of a 297.5 MiB cgroup peak
+    # seen LOCALLY over two days. The host reading does not support that, so it
+    # is not used — but the local peak is recorded here rather than discarded,
+    # because it is the only evidence either way that this service spikes well
+    # above its resting size. If mcp is ever OOM-killed, that number is the
+    # first place to look and 512m is the first thing to question.
+    # No --max-old-space-size equivalent: this is Python, not node.
+    mem_limit: 512m
     labels:
       # Which commit this container was created from. Nothing else on the
       # host can answer that — see #158. Set by scripts/deploy.sh.

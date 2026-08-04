@@ -80,6 +80,21 @@ services:
       dockerfile: Dockerfile
     image: hill90/api:${VERSION:-latest}
     container_name: ${CONTAINER_PREFIX:-}app-api
+    # --max-old-space-size, because a mem_limit ALONE makes this worse under a
+    # leak, not better. V8 sizes its heap from HOST memory and ignores the
+    # cgroup: both node containers were measured reporting a 2096 MiB heap
+    # ceiling on a 7.75 GiB machine. Without this flag the process happily
+    # grows past 512m and the kernel kills the container, instead of V8
+    # collecting harder as it approaches its own limit.
+    #
+    # Set via `command` rather than NODE_OPTIONS on purpose: the Dockerfile
+    # already sets NODE_OPTIONS="--require ./dist/tracing.js", and an
+    # environment entry here would REPLACE it and silently disable tracing.
+    #
+    # 320 is 62% of the container limit. Buffers live OUTSIDE the V8 heap, so
+    # the remaining ~190 MiB is what the upload buffers above draw on; this
+    # flag bounds JS-object growth, mem_limit bounds the rest.
+    command: ["node", "--max-old-space-size=320", "dist/index.js"]
     restart: unless-stopped
     networks:
       - edge
@@ -187,6 +202,20 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    # Memory ceiling. This is a TENANT on a host shared with the platform, and
+    # the OOM killer does not respect tenancy boundaries: an unbounded app
+    # container can starve the Postgres and Keycloak this app depends on, which
+    # would break the very contract that says the platform provides identity
+    # and data (#144).
+    #
+    # 512m is derived, not rounded to taste. Measured on the VPS 2026-08-03:
+    # app-api 60.03 MiB against the full 15.61 GiB, because it had no ceiling.
+    # The headroom above that is for the largest transient this service can
+    # legitimately hold: routes/storage.ts uses multer.memoryStorage() with
+    # fileSize 50 MB, so every concurrent upload buffers 50 MiB of RAM.
+    # 60 + 2x50 + runtime lands near 200 MiB; 512m is ~2.5x that, and matches
+    # what knowledge and ai already carry.
+    mem_limit: 512m
     labels:
       # Which commit this container was created from. Nothing else on the
       # host can answer that — see #158. Set by scripts/deploy.sh.
