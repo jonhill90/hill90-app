@@ -21,6 +21,14 @@
  * a healthy dependency. If the `unknown` assertion ever passes for both, this
  * file has stopped measuring anything.
  *
+ * SEMANTICS NOTE, because this file already got it wrong once. Since #252 (which
+ * fixed #239) `reportedStatus` reports ANY unverified status as `unknown`, not
+ * only `running`. This file was written against the earlier rule and asserted
+ * that a `stopped` row stays `stopped`; that premise expired roughly an hour
+ * later. It failed only in CI because CI builds the MERGE commit while a local
+ * run of the branch does not — the environment difference was never
+ * environmental, it was a stale base.
+ *
  * NOT COVERED, on purpose: the dispatch gates. `POST /chat/threads` and
  * `POST /chat/threads/:id/messages` still test the RECORDED row, so an agent we
  * could not verify is still allowed a message. Unverifiable is not absent, and
@@ -47,6 +55,7 @@ jest.mock('../db/pool', () => ({
 
 import { createApp } from '../app';
 import { runReconcilePass } from '../services/agent-reconciler';
+import { CONTAINER_ABSENT } from '../services/docker';
 import {
   resetStatusVerification,
   reportedStatus,
@@ -86,10 +95,12 @@ const adminToken = jwt.sign(
  * `docs/decisions/api-suite-flakiness.md`, where "is the response ours?" is the
  * central question. They are no longer evidence for a crossing.
  *
- * What survives is a contradiction, unresolved as of this commit: the stub
- * served `stopped` exactly once, the body carries this test's own id, and the
- * status came back `unknown`, which `reportedStatus` cannot produce from
- * `stopped`. `dumpResponse` below exists to read that instead of inferring it.
+ * The contradiction they left behind is RESOLVED: `reportedStatus` could
+ * produce `unknown` from `stopped` all along, once #252 removed the
+ * `running`-only early return. Six rounds went to instrumenting the harness
+ * because a source reading was treated as a measurement — the file read at this
+ * branch's base, not the one CI compiles. `dumpResponse` below is what finally
+ * made the helper's live answer readable rather than assumed, and it stays.
  */
 let AGENT_UUID = '';
 let THREAD_ID = '';
@@ -126,8 +137,9 @@ function proxyUnreachable() {
  * fixture said `stopped`, and that symptom has two very different causes which
  * the assertion could not separate: the stub was not the active implementation,
  * or the route mapped a correct row wrongly. `reportedStatus` returns `unknown`
- * only when handed `running`, so recording what was served decides it. A test
- * that reports a symptom it cannot locate costs more than it saves.
+ * for an unverified row, so recording what was served separates "the fixture
+ * did not apply" from "the mapping answered this way". A test that reports a
+ * symptom it cannot locate costs more than it saves.
  */
 let servedParticipantStatuses: string[] = [];
 
@@ -396,11 +408,24 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
     expectAgentStatus(res, 'unknown');
   });
 
-  it('a stopped row stays stopped — #239 is a different defect, not this one', async () => {
+  // ── An UNVERIFIED `stopped` row is unknown too, since #252 ────────────────
+  //
+  // This pair replaces a test that asserted the opposite, and the reason it was
+  // wrong is worth keeping. It was written as `a stopped row stays stopped —
+  // #239 is a different defect, not this one`, which was TRUE at this branch's
+  // base commit: `reportedStatus` began `if (recordedStatus !== 'running')
+  // return recordedStatus`, so only a `running` row could be reported unknown.
+  //
+  // #252 removed that early return when it fixed #239. The reconciler now reads
+  // every row and corrects in both directions, so a `stopped` row is a claim it
+  // backs — and an unchecked one is exactly as unbacked as an unchecked
+  // `running` one. The test's premise expired about an hour after it was
+  // written, and it only ever failed in CI because CI builds the MERGE commit
+  // while a local run of this branch does not.
+
+  it('POSITIVE CONTROL: an UNVERIFIED stopped row is reported unknown (#252 widened this)', async () => {
     mockQuery.mockRejectedValueOnce(new Error('database is not accepting connections'));
     await runReconcilePass();
-    // Nothing is verified, and the row still must not be reported as unknown:
-    // only a `running` claim is one this reconciler backs.
     stubChatQueries('stopped');
 
     const res = await request(app)
@@ -408,12 +433,51 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .set('Authorization', `Bearer ${adminToken}`);
 
     expectServed('stopped');
-    // CANDIDATE B PROBE. The shipped #250 helper, called directly, in-process,
-    // at the moment of the failing assertion. Six dumps have shown the route
-    // handed a row reading `stopped` and emitting `unknown`, which this
-    // function has no code path to produce. If THIS fails, the defect is in
-    // agent-status-verification.ts — shipped in #250, reaching every consumer
-    // of the third state — and not in the rendering change under review.
+    // Pinned at the helper as well as through the route: this is the exact
+    // semantic #252 changed, and asserting it here means a future revert of
+    // that decision fails on the decision rather than on a rendering test.
+    expect(reportedStatus(AGENT_SLUG, 'stopped')).toBe('unknown');
+    expectAgentStatus(res, 'unknown');
+  });
+
+  it('TWIN: a VERIFIED stopped row is reported stopped, not unknown', async () => {
+    // Without this twin the pair above is unfalsifiable — after #252 a helper
+    // that returned `unknown` unconditionally would satisfy it. The twin is
+    // what makes `unknown` mean "we could not check" rather than "we never say
+    // stopped".
+    //
+    // A successful pass over an agent recorded `stopped` whose container is
+    // absent: inspectContainer returns null on a 404, the row already agrees
+    // with what was seen, so nothing is written and the agent is VERIFIED.
+    // A standing implementation, not `mockResolvedValueOnce`: the pass makes
+    // more than one query (it also escalates unrenewed tokens), and starving
+    // the later ones makes the pass FAIL, which would mark the agent
+    // unverified and silently turn this twin into a second copy of the
+    // positive control above.
+    mockQuery.mockImplementation(async (sql: string) =>
+      String(sql).includes('FROM agents')
+        ? {
+            rows: [{
+              id: AGENT_UUID, agent_id: AGENT_SLUG, status: 'stopped',
+              container_id: null, container_state: CONTAINER_ABSENT,
+              created_by: 'admin-user', model_router_exp: null,
+            }],
+          }
+        : { rows: [] }
+    );
+    const notFound: any = new Error('no such container');
+    notFound.statusCode = 404;
+    mockContainerInspect.mockRejectedValue(notFound);
+    await runReconcilePass();
+
+    expect(isStatusVerified(AGENT_SLUG)).toBe(true);
+    stubChatQueries('stopped');
+
+    const res = await request(app)
+      .get('/chat/threads')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expectServed('stopped');
     expect(reportedStatus(AGENT_SLUG, 'stopped')).toBe('stopped');
     expectAgentStatus(res, 'stopped');
   });
