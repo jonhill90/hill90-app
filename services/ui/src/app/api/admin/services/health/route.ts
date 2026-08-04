@@ -14,8 +14,14 @@ async function checkService(service: { name: string; internalUrl: string; path: 
       status: res.ok ? 'healthy' as const : 'unhealthy' as const,
       responseTime,
     }
-  } catch {
+  } catch (error) {
     const responseTime = Date.now() - start
+    // Its twin at api/services/health logs this; this one did not, so an
+    // unreachable admin service left no trace anywhere.
+    console.error(
+      `[admin-health] ${service.name} failed (${responseTime}ms):`,
+      error instanceof Error ? error.message : error,
+    )
     return {
       name: service.name,
       status: 'unhealthy' as const,

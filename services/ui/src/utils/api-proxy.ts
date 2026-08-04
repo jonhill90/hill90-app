@@ -38,7 +38,13 @@ const NO_SHARED_CACHE = { 'Cache-Control': 'private, no-store' } as const
  */
 const FORWARDED_HEADERS = ['x-total-count'] as const
 
-function passThroughHeaders(res: Response): Record<string, string> {
+/**
+ * Exported so hand-rolled proxies use the SAME list rather than each keeping a
+ * copy. A header added here must reach every hop; a second copy is a header that
+ * reaches one of them, which is how `x-total-count` came to be forwarded by this
+ * helper and dropped by the agents route.
+ */
+export function passThroughHeaders(res: Response): Record<string, string> {
   const out: Record<string, string> = {}
   for (const name of FORWARDED_HEADERS) {
     const value = res.headers.get(name)
