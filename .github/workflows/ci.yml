@@ -237,6 +237,52 @@ jobs:
   # public"). Verified as a real answer rather than a failed call by running the
   # same request against the public Hill90 repo, where it succeeds and returns
   # required_status_checks.contexts = ["Run Tests"].
+  cli:
+    name: services/cli (go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CLI had tests and no job. Eight of them, plus the client's own, ran
+      # only on whoever remembered to type `go test` — so they were decoration:
+      # a check that cannot fire, the same class as an alert rule that matches
+      # nothing production emits. Converting them into a gate is worth more than
+      # the tests were, because until now the CLI could be broken arbitrarily and
+      # every check stayed green.
+      #
+      # Found by auditing the day's merges for durability rather than for defects.
+      - uses: actions/setup-go@v5
+        with:
+          # Matches services/knowledge/cli/go.mod. A mismatch here fails on a
+          # toolchain download rather than on the code, which reads as flakiness.
+          go-version-file: services/knowledge/cli/go.mod
+          cache-dependency-path: services/knowledge/cli/go.sum
+
+      - name: Build
+        working-directory: services/knowledge/cli
+        run: go build ./...
+
+      - name: Vet
+        working-directory: services/knowledge/cli
+        run: go vet ./...
+
+      # ./... rather than ./cmd/: a package added later would otherwise be
+      # skipped silently, which is how this job came to be needed.
+      #
+      # The grep is not decoration. `go test` on a tree with no test files prints
+      # "no test files" and EXITS 0, so a job that merely runs it stays green
+      # after someone deletes the last test — a gate that cannot fire, which is
+      # the exact fault this job was added to fix. Requiring at least one passing
+      # package makes the gate prove it ran something.
+      - name: Test
+        working-directory: services/knowledge/cli
+        run: |
+          go test ./... -count=1 | tee /tmp/go-test.out
+          grep -q '^ok ' /tmp/go-test.out || {
+            echo "::error::go test ran but no package reported ok — the CLI has no tests, or none were found"
+            exit 1
+          }
+
   scripts:
     name: scripts (bats)
     runs-on: ubuntu-latest
