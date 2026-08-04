@@ -26,11 +26,16 @@ shared VPS, and locally against the same compose files.
   proven, what remains of its own three services, local's real state, and the open
   decisions. The estate-level companion is Hill90's handoff of the same date.
 - [`docs/decisions/HANDOFF-2026-08-04.md`](docs/decisions/HANDOFF-2026-08-04.md)
-  — **read this first.** The instrument-side seam (a check that passes on a system where
-  the thing it certifies is wholly broken) and the two questions that found everything;
-  what happened when the day's fixes were exercised rather than reasoned about — one of
-  three observed, and why the other two were not; and #278, the largest open unknown,
-  with the one test that would settle it and why it is Jon's to run.
+  — **read this first, and its sections 0A–0D before touching anything.** The bounds a
+  green run does not cover (nothing is tested past the WebSocket handshake against a real
+  agentbox; the SQL gate proves parsing and not correctness; 56 interpolated statements
+  are uncheckable and counted on every run); that `process.exit()` does not wait for a
+  pending write, so a fix that logs and exits loses the log — three separate designs
+  turned on it today; **the realm hazard that runs backwards**, where importing the
+  committed `platform-realm.json` strips `sub` and makes the API refuse every user; and
+  the three standing decisions that are Jon's rather than a lane's. Then the
+  instrument-side seam the day was about, and what happened when the fixes were exercised
+  rather than reasoned about.
 - [`docs/decisions/HANDOFF-2026-08-03.md`](docs/decisions/HANDOFF-2026-08-03.md)
   — the silent-success seam and the rules that came out of it: the two questions that
   found every defect that session, the twin rule, why a positive control's two numbers
