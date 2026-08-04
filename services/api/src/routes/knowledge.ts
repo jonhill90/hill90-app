@@ -14,6 +14,7 @@ import { requireRole } from '../middleware/role';
 import { scopeToOwner } from '../helpers/scope';
 import { getPool } from '../db/pool';
 import * as akmProxy from '../services/akm-proxy';
+import { parsePageParams } from '../helpers/page-params';
 
 const router = Router();
 
@@ -32,37 +33,6 @@ async function getAllowedAgentIds(req: Request): Promise<string[] | null> {
     scope.params,
   );
   return rows.map((r: { agent_id: string }) => r.agent_id);
-}
-
-/** Upper bound on a single page, mirroring the knowledge service's own clamp. */
-const MAX_PAGE = 2000;
-
-/**
- * Read `limit`/`offset` from the query string.
- *
- * Rejected rather than clamped: a caller that asks for 5000 and silently
- * receives 2000 is back in the family this work exists to remove — an answer
- * that is not what was asked for and does not say so. The knowledge service
- * returns 422 for the same input; this check exists so the api does not
- * forward garbage and translate a validation error into a 500.
- */
-function parsePageParams(req: Request): { limit?: number; offset?: number } | { error: string } {
-  const out: { limit?: number; offset?: number } = {};
-
-  for (const key of ['limit', 'offset'] as const) {
-    const raw = req.query[key];
-    if (raw === undefined) continue;
-
-    const n = Number(raw);
-    if (!Number.isInteger(n)) return { error: `${key} must be an integer` };
-    if (key === 'limit' && (n < 1 || n > MAX_PAGE)) {
-      return { error: `limit must be between 1 and ${MAX_PAGE}` };
-    }
-    if (key === 'offset' && n < 0) return { error: 'offset must be >= 0' };
-    out[key] = n;
-  }
-
-  return out;
 }
 
 /**

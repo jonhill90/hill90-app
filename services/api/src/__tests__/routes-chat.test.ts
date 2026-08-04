@@ -97,6 +97,9 @@ describe('Chat thread CRUD', () => {
             created_at: new Date(), updated_at: new Date(), last_message: 'Hello', last_author_type: 'human' },
         ],
       })
+      // The count query now runs alongside the page query (Promise.all), so
+      // it is the SECOND call and the participant enrichment is the third.
+      .mockResolvedValueOnce({ rows: [{ total: '1' }] })
       .mockResolvedValueOnce({
         rows: [
           { thread_id: 'thread-1', participant_id: 'agent-uuid', participant_type: 'agent',
@@ -117,6 +120,7 @@ describe('Chat thread CRUD', () => {
   it('GET /chat/threads admin sees all', async () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] })
       .mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
@@ -127,6 +131,97 @@ describe('Chat thread CRUD', () => {
     // Admin query should NOT join participants
     const sql = mockQuery.mock.calls[0][0];
     expect(sql).not.toContain('participant_id = $1');
+  });
+
+  // ── #185: the list is bounded, and the total is not the page ──────────
+  //
+  // The issue title said "volume". Checked before assuming: the admin branch
+  // having no WHERE is DELIBERATE and matches scopeToOwner (admin -> no
+  // filter) and isParticipant (admin bypass), so this is a volume bound, not
+  // an authorization change. Both facts are asserted below so a later reader
+  // does not "fix" the admin branch into scoping and silently change who can
+  // see what.
+
+  it('caps the page and reports a total that DIFFERS from it', async () => {
+    // Two rows on the page, forty thousand in the world. The numbers must
+    // disagree or a `rows.length` implementation passes this unnoticed.
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 't1' }, { id: 't2' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '40000' }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get('/chat/threads?limit=2')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.headers['x-total-count']).toBe('40000');
+  });
+
+  it('counts the SAME scope as the page it returned', async () => {
+    // A count over a different scope reports someone else's thread count to
+    // this user. Both statements must carry the participant predicate.
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await request(app)
+      .get('/chat/threads')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    const pageSql = mockQuery.mock.calls[0][0];
+    const countSql = mockQuery.mock.calls[1][0];
+    expect(pageSql).toContain("cp.participant_type = 'human'");
+    expect(countSql).toContain("cp.participant_type = 'human'");
+    expect(countSql).toContain('COUNT(*)');
+    expect(mockQuery.mock.calls[1][1]).toEqual(['regular-user']);
+  });
+
+  it('the admin count is over every thread, matching the admin page', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 't1' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '9' }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get('/chat/threads?limit=1')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.headers['x-total-count']).toBe('9');
+    // Still no participant filter — admin scope is unchanged by this PR.
+    expect(mockQuery.mock.calls[1][0]).not.toContain('participant_id');
+  });
+
+  it('pages deterministically, with an id tiebreak on a non-unique sort key', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await request(app)
+      .get('/chat/threads?limit=10&offset=20')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    const sql = mockQuery.mock.calls[0][0];
+    expect(sql).toContain('ORDER BY t.updated_at DESC, t.id DESC');
+    expect(sql).toContain('LIMIT');
+    expect(mockQuery.mock.calls[0][1]).toEqual(['regular-user', 10, 20]);
+  });
+
+  it.each([
+    ['limit=0', 'limit must be between'],
+    ['limit=5000', 'limit must be between'],
+    ['limit=abc', 'limit must be an integer'],
+    ['offset=-1', 'offset must be >= 0'],
+  ])('rejects %s rather than silently clamping', async (qs, message) => {
+    const res = await request(app)
+      .get(`/chat/threads?${qs}`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(message);
   });
 
   it('POST /chat/threads creates direct thread and dispatches', async () => {
