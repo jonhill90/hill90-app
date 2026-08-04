@@ -25,10 +25,17 @@ export function startWorkflowScheduler(): void {
   console.log('[workflow-scheduler] Starting (interval=%dms)', CHECK_INTERVAL_MS);
 
   // Compute next_run_at for any workflows that don't have one
+  // SAFE ONLY BECAUSE OF THE CALLEE. `void` attaches no rejection handler, so this
+  // line's safety is entirely `initializeNextRuns`'s: its body is one try/catch that
+  // logs and returns. Remove or narrow that try and this becomes #133 exactly — an
+  // unhandled rejection, and Node 20 exits the process on one because this service
+  // registers no handler (boot/fatal.ts installs a backstop that logs it, nothing more).
   void initializeNextRuns();
 
   setInterval(() => {
     if (running) return; // Skip if previous tick still processing
+    // Same dependency as initializeNextRuns above: `tick`'s whole body is a
+    // try/catch that logs. This line adds no protection of its own.
     void tick();
   }, CHECK_INTERVAL_MS);
 }
