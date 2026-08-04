@@ -135,6 +135,35 @@ choosing the right tool.** `no-misused-promises` reported 191 sites in the same 
 middleware in `src/boot/async-errors.ts`. Reporting 197 would have counted a solved problem as
 an open one.
 
+## The instrument can contain the fault it was built to catch
+
+The section above says check the instrument. This one is narrower and worse: **an instrument
+written specifically to rule out a confusion can reproduce that confusion internally**, and it
+will not look wrong when it does.
+
+Measured on 2026-08-04, rotating `DB_PASSWORD` in [#282](https://github.com/jonhill90/hill90-app/pull/282). The
+question was whether any deployable stack consumes the value. A name grep was rejected on the
+grounds that a search pointed at the wrong tree returns the same zero as a search that is
+right — so each production compose file was rendered with the real store interpolated and the
+**value** was searched for in the rendered text, and a render that produced nothing was made to
+refuse to report a count at all. That guard was the whole point of the script.
+
+The count was then written as `n=$(render "$st" | grep -Fc -- "$v") || return 1`. **`grep -c`
+exits 1 on zero matches**, so a stack with no hits returned the same status as a render that had
+died — the exact conflation the render guard existed to prevent, one line below it. The first run
+reported both positive controls as failures, which is the only reason it was noticed. **Had it
+failed in the other direction it would have read as a pass**, and a zero would have been reported
+for a key that was still in use.
+
+Fix: render and count are separate steps, the render is checked on its own, and the count is
+`grep -Fc … || true`.
+
+**The rule:** when you build an instrument to rule out a specific failure mode, check whether
+that failure mode exists inside the instrument. Exit-status conflation in pipelines is the common
+one — `grep -c`, `grep -q` and `diff` all use exit status for *both* "found nothing" and "could
+not run" — but the shape generalises: a positive control that fails loudly is what caught this,
+and a script whose controls always pass has told you nothing about itself.
+
 ## Look for the twin before you look for the next defect
 
 When you fix something, the next question is not *what else is broken*. It is **where else does
