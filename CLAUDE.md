@@ -25,6 +25,12 @@ shared VPS, and locally against the same compose files.
   — where the tenant stands after the cutover: what it consumes and how that was
   proven, what remains of its own three services, local's real state, and the open
   decisions. The estate-level companion is Hill90's handoff of the same date.
+- [`docs/decisions/HANDOFF-2026-08-04.md`](docs/decisions/HANDOFF-2026-08-04.md)
+  — **read this first.** The instrument-side seam (a check that passes on a system where
+  the thing it certifies is wholly broken) and the two questions that found everything;
+  what happened when the day's fixes were exercised rather than reasoned about — one of
+  three observed, and why the other two were not; and #278, the largest open unknown,
+  with the one test that would settle it and why it is Jon's to run.
 - [`docs/decisions/HANDOFF-2026-08-03.md`](docs/decisions/HANDOFF-2026-08-03.md)
   — the silent-success seam and the rules that came out of it: the two questions that
   found every defect that session, the twin rule, why a positive control's two numbers
