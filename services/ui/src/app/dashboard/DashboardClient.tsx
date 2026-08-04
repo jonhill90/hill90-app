@@ -93,14 +93,42 @@ export default function DashboardClient({ session }: { session: Session }) {
       if (!res.ok) return
       const threads = await res.json()
       const arr = Array.isArray(threads) ? threads : []
-      const start = new Date().toISOString().split('T')[0] + 'T00:00:00.000Z'
-      let messagesToday = 0
-      for (const t of arr) {
-        if (t.last_message_at && t.last_message_at >= start) {
-          messagesToday += Number(t.message_count ?? 0)
-        }
-      }
-      setChat({ threads: arr.length, messagesToday })
+
+      /*
+       * TWO FIGURES, TWO DIFFERENT DEFECTS (issue #197). They are fixed
+       * differently on purpose, because they are not the same kind of wrong.
+       *
+       * THREADS was a CALLER BUG. This used `arr.length`, the length of a PAGE —
+       * /chat/threads is bounded at 500 — while the api has always sent the real
+       * total in X-Total-Count, computed by its own COUNT(*) over the same scope,
+       * and utils/api-proxy.ts forwards that header. The right answer was already
+       * arriving and was being thrown away. No contract change was needed, and
+       * making one would have added a second source of truth for a number the api
+       * already publishes.
+       *
+       * MESSAGES TODAY was MISSING DATA. It summed `t.last_message_at` and
+       * `t.message_count`, and neither field exists in this response — so the
+       * body of that loop never ran and the figure was structurally 0. Nothing
+       * returned here could produce it, and adding the two columns so the sum
+       * would work would have made the total an aggregate over a page. That is
+       * the defect #180, #184 and #188 were each about, and it would have been
+       * the fourth instance. It needs a real count, so it comes from an endpoint
+       * that does one.
+       */
+      // `headers.get` returns null when absent, and Number(null) is 0 — which is
+      // finite and non-negative, so a naive parse renders "0 threads" whenever the
+      // header goes missing. That is the same shape as the bug being fixed: a
+      // confident number nobody computed. Absent falls back to the page length,
+      // which is at least a floor.
+      // Optional-chained for BLAST RADIUS, not to satisfy a test double: this
+      // function also populates the recent-threads widget below, and a throw here
+      // would take that widget out too. One figure failing must not silently
+      // remove an unrelated one.
+      const rawTotal = res.headers?.get('X-Total-Count') ?? null
+      const total = rawTotal === null ? Number.NaN : Number(rawTotal)
+      const threadCount = Number.isFinite(total) && total >= 0 ? total : arr.length
+
+      setChat((prev) => ({ ...prev, threads: threadCount }))
 
       // Extract 5 most recent threads for the widget
       const sorted = [...arr]
@@ -182,15 +210,34 @@ export default function DashboardClient({ session }: { session: Session }) {
     }
   }, [])
 
+  /**
+   * The count that cannot be derived from the thread list, from an endpoint that
+   * does its own COUNT(*) (issue #197). Kept separate from fetchChat rather than
+   * folded into it: the list is fetched for the recent-threads widget and is a
+   * page, and a figure computed from a page is what was wrong here.
+   */
+  const fetchChatStats = useCallback(async () => {
+    try {
+      const res = await fetch('/api/chat/stats')
+      if (!res.ok) return
+      const data = await res.json()
+      const n = Number(data?.messages_today)
+      if (Number.isFinite(n)) setChat((prev) => ({ ...prev, messagesToday: n }))
+    } catch (err) {
+      console.error('Failed to fetch chat stats:', err)
+    }
+  }, [])
+
   const refreshAll = useCallback(() => {
     checkHealth()
     fetchHarness()
     fetchChat()
+    fetchChatStats()
     // Fetch workflow + knowledge counts
     fetch('/api/workflows').then(r => r.ok ? r.json() : []).then(d => setWorkflowCount(Array.isArray(d) ? d.length : 0)).catch(() => {})
     fetch('/api/shared-knowledge/stats').then(r => r.ok ? r.json() : null).then(d => { if (d?.sources?.by_status?.active) setKnowledgeSources(d.sources.by_status.active) }).catch(() => {})
     fetch('/api/notifications?limit=10').then(r => r.ok ? r.json() : null).then(d => { if (d?.notifications) setRecentActivity(d.notifications.slice(0, 8)) }).catch(() => {})
-  }, [checkHealth, fetchHarness, fetchChat])
+  }, [checkHealth, fetchHarness, fetchChat, fetchChatStats])
 
   useEffect(() => {
     refreshAll()

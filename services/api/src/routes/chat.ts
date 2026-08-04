@@ -268,6 +268,63 @@ async function dispatchToAgents(opts: {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// GET /chat/stats — figures that CANNOT be derived from a page
+// ───────────────────────────────────────────────────────────────────
+
+/**
+ * Today's message count, for the dashboard (issue #197).
+ *
+ * WHY THIS IS A NEW ENDPOINT RATHER THAN TWO MORE COLUMNS ON /threads.
+ * The dashboard wanted `message_count` and `last_message_at` per thread so it
+ * could sum them. Adding those columns would have worked and would have been the
+ * smaller diff — and it would have made the figure a total assembled from a PAGE,
+ * which is precisely the defect #180, #184 and #188 were each about. `/threads`
+ * is bounded at DEFAULT_PAGE (500), so the sum would silently stop counting at
+ * the page edge. A count that is wrong only for the busiest accounts is worse
+ * than one that is wrong always, because nothing looks unusual.
+ *
+ * So the count is done here, once, with its own COUNT(*) over the whole scope.
+ *
+ * "TODAY" IS UTC, deliberately and explicitly. The client used to compute a UTC
+ * midnight boundary itself; keeping that meaning avoids a figure whose value
+ * depends on the reader's timezone. `created_at` is TIMESTAMPTZ, so the boundary
+ * is converted back to an instant rather than compared against a bare timestamp.
+ *
+ * The boundary is NOT accepted from the caller. A client-supplied range on a
+ * count is a client that can ask "how many messages have there ever been" and be
+ * answered.
+ */
+router.get('/stats', requireRole('user'), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const admin = isAdmin(req);
+
+    // Same scoping as GET /threads: an admin counts everything, a user counts
+    // only threads they are still a participant in. A count over a wider scope
+    // would report other people's activity as the caller's own.
+    const TODAY_UTC = `date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`;
+
+    const sql = admin
+      ? `SELECT COUNT(*) AS messages_today
+         FROM chat_messages m
+         WHERE m.created_at >= ${TODAY_UTC}`
+      : `SELECT COUNT(*) AS messages_today
+         FROM chat_messages m
+         JOIN chat_participants cp ON cp.thread_id = m.thread_id
+         WHERE cp.participant_id = $1
+           AND cp.participant_type = 'human'
+           AND cp.left_at IS NULL
+           AND m.created_at >= ${TODAY_UTC}`;
+
+    const { rows } = await getPool().query(sql, admin ? [] : [user.sub]);
+    res.json({ messages_today: Number(rows[0].messages_today) });
+  } catch (err) {
+    console.error('[chat] Failed to compute stats:', err);
+    res.status(500).json({ error: 'Failed to compute chat stats' });
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────
 // GET /chat/threads — list threads for current user
 // ───────────────────────────────────────────────────────────────────
 

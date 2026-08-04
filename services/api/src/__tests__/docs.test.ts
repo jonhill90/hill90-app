@@ -204,6 +204,7 @@ const EXPECTED_PATHS = [
   '/agents/{id}/stats',
   '/agents/{id}/metrics',
   '/agents/{id}/artifacts',
+  '/chat/stats',
   '/chat/threads',
   '/chat/threads/{id}',
   '/chat/threads/{id}/participants',
