@@ -204,31 +204,32 @@ describe('DashboardClient', () => {
   it('renders active agents widget with running agents', async () => {
     render(<DashboardClient session={MOCK_SESSION as any} />)
 
+    // #117, DIAGNOSED AND FIXED — see docs/decisions/api-suite-flakiness.md.
+    //
+    // This waited on `getByText('Active Agents')`, which does not depend on the
+    // agents fetch: DashboardClient.tsx renders that <h2> unconditionally, before
+    // `fetchHarness()`'s Promise.all has resolved. So the wait was satisfied on
+    // first paint and the synchronous `getByText('Scout')` that followed it raced
+    // the real data — intermittently in CI (17 recorded occurrences, all "ARRIVED
+    // LATE" at exactly 20ms, swept from every CI run since the discriminator
+    // landed), never locally, where the same chain resolves inside a tick.
+    //
+    // THE FIX waits for something that only changes once `activeAgents` is
+    // actually set — the empty-state text disappearing. `setActiveAgents` and
+    // `setHarness` run back to back with no `await` between them in
+    // fetchHarness(), so both land in the same React commit: once this resolves,
+    // Scout is already there. Proven, not assumed — see the reproduction test
+    // below, which forces the old gate red on demand with a controlled promise
+    // instead of hoping to land inside CI's ~20ms window by chance.
     await waitFor(() => {
-      expect(screen.getByText('Active Agents')).toBeInTheDocument()
+      expect(screen.queryByText('No active agents')).not.toBeInTheDocument()
     })
 
-    // TWO ASSERTIONS ON PURPOSE — see docs/decisions/api-suite-flakiness.md, issue #117.
-    //
-    // This test fails intermittently in CI with "Unable to find an element with the
-    // text: Scout" and has never reproduced locally (~40 runs across four emulated CI
-    // conditions). The synchronous query below is a candidate cause: it sits outside
-    // the waitFor that guards 'Active Agents' above, so it races the render if Scout
-    // arrives a tick later.
-    //
-    // The sync assertion is DELIBERATELY KEPT. Replacing it with findByText would very
-    // likely turn CI green while teaching nothing — indistinguishable from the flake
-    // not occurring, which is the failure mode this repository has spent a day closing.
-    // Running both makes their DISAGREEMENT the signal:
-    //   sync fails, async passes -> the race is real
-    //   both fail                -> the data is genuinely absent, the query is innocent
-    // #117. This REPLACES the findByText/getByText pair that used to sit here.
-    // `await findByText` waits for late data, so a race that would have failed
-    // this test now passes it — which suppresses the very failure we are waiting
-    // to read. observeTextTiming fails on exactly the same condition the bare
-    // getByText did, and additionally records WHY: it looks again for 1.5s and
-    // says whether the text arrived late or never came, writing the DOM and the
-    // fetch calls to test-artifacts/ for CI to collect.
+    // BACKSTOP, not the fix. If this ever fires again, the fix above is
+    // incomplete or something new is racing — either way it is a signal worth
+    // reading, not a flake to retry away. Expected to always take the
+    // instant path now: the wait above already guarantees Scout is in the
+    // same commit it resolved on.
     await observeTextTiming('Scout', 'dashboard-active-agents', {
       context: () => ({
         fetchCalls: mockFetch.mock.calls.map((c) => String(c[0])),
@@ -243,6 +244,60 @@ describe('DashboardClient', () => {
     const openLinks = screen.getAllByText('Open')
     expect(openLinks.length).toBe(1)
     expect(openLinks[0].closest('a')).toHaveAttribute('href', '/agents/a1')
+  })
+
+  it('the active-agents wait depends on the agents data resolving, not on the heading that renders regardless (#117)', async () => {
+    // #117's mechanism, forced open deterministically instead of hoped-for at
+    // CI's ~20ms window. ~40 earlier local attempts across four emulated CI
+    // conditions never once landed inside a window that small; a manually
+    // controlled promise makes the gap arbitrarily wide and reproduces it
+    // on demand, on any machine.
+    let resolveAgents!: (v: unknown) => void
+    const agentsGate = new Promise((resolve) => { resolveAgents = resolve })
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/agents') {
+        return agentsGate.then(() => ({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) }))
+      }
+      if (url === '/api/services/health') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_HEALTH) })
+      }
+      if (url === '/api/user-models') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_MODELS) })
+      }
+      if (typeof url === 'string' && url.startsWith('/api/usage')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_USAGE) })
+      }
+      if (url === '/api/chat') {
+        return Promise.resolve({
+          ok: true,
+          headers: { get: (k: string) => (k.toLowerCase() === 'x-total-count' ? String(MOCK_THREADS.length) : null) },
+          json: () => Promise.resolve(MOCK_THREADS),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<DashboardClient session={MOCK_SESSION as any} />)
+
+    // PROVEN, not asserted: the heading is on screen before the agents fetch
+    // has even been released. This is the whole mechanism #117 traced to
+    // DashboardClient.tsx:369 — the <h2> is unconditional.
+    expect(screen.getByText('Active Agents')).toBeInTheDocument()
+    // And the data genuinely is not there yet — the gap this control exists
+    // to hold open, so the assertions below are not vacuously true.
+    expect(screen.queryByText('Scout')).not.toBeInTheDocument()
+
+    resolveAgents(undefined)
+
+    // THE FIX: wait for something that only changes once `activeAgents` has
+    // actually been set, not for chrome that was already there. Once this
+    // resolves, Scout is already in the DOM — same React commit, since
+    // `setActiveAgents` and `setHarness` run back to back with no `await`
+    // between them in fetchHarness().
+    await waitFor(() => {
+      expect(screen.queryByText('No active agents')).not.toBeInTheDocument()
+    })
+    expect(screen.getByText('Scout')).toBeInTheDocument()
   })
 
   it('shows empty state when no active agents', async () => {
@@ -273,16 +328,22 @@ describe('DashboardClient', () => {
   })
 
   it('renders recent chat threads widget', async () => {
-    // The second #117 victim, and until now the one that could tell us nothing:
-    // it had no paired assertion, so a failure showed only that it failed.
+    // The second #117 victim — identical shape to 'Active Agents' (a
+    // static <h2>Recent Chats</h2>, gated on nothing, ahead of the
+    // fetchChat()-populated thread list) and fixed the same way: wait on the
+    // empty-state text disappearing, which only changes once `recentThreads`
+    // is actually set. Never independently confirmed to race in CI (17 recorded
+    // #117 occurrences since the discriminator landed were all the OTHER
+    // widget — see docs/decisions/api-suite-flakiness.md) but the render
+    // structure is the same defect, so it gets the same fix rather than being
+    // left half-corrected.
     render(<DashboardClient session={MOCK_SESSION as any} />)
 
     await waitFor(() => {
-      expect(screen.getByText('Recent Chats')).toBeInTheDocument()
+      expect(screen.queryByText('No chat threads yet')).not.toBeInTheDocument()
     })
 
-    // The second #117 victim, and until now the one that could say nothing: it
-    // had no discriminator at all. Same treatment as 'Scout' above.
+    // BACKSTOP — see the identical comment on the Active Agents test above.
     await observeTextTiming('Deploy discussion', 'dashboard-recent-chats', {
       context: () => ({
         fetchCalls: mockFetch.mock.calls.map((c) => String(c[0])),
