@@ -185,3 +185,47 @@ exists because #153 proved the alternative.
 considered for this list and does not belong. Its diff changes exactly one line and
 `revision stamp` appears once in `scripts/deploy.sh`. It was a single-occurrence defect that a
 test could not see, which is a different lesson and already recorded above.
+
+## A test that HANGS on the defect has not caught it
+
+Design the red state to **fail**, not to hang. A failing test is read; a hanging one is
+re-run, because a hang looks like infrastructure and a failure looks like a defect. The two
+are treated completely differently by the person who meets them, and only one of them gets
+the bug fixed.
+
+Measured on **2026-08-04**, taking the red control for [#199](https://github.com/jonhill90/hill90-app/pull/199).
+The assertion was that an SSE stream closes when the viewer's participation is revoked. With
+the fix removed, the stream never closed, so the request never settled — and because the test
+used `jest.useFakeTimers()`, **jest's own test timeout could not fire either**, since that
+timeout is itself a timer. The run hung indefinitely and had to be killed. Nothing printed. A
+cold reader would have concluded the runner was wedged.
+
+Bounding it turned the same control into one line of evidence:
+
+```js
+const settled = await Promise.race([
+  pending.then((r) => r.text),
+  (async () => { for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
+                 return 'STREAM NEVER CLOSED'; })(),
+]);
+expect(settled).toMatch(/Access revoked/);
+```
+
+```
+Received string:  "STREAM NEVER CLOSED"
+```
+
+**Three things that generalise:**
+
+- **A sentinel beats a timeout.** `'STREAM NEVER CLOSED'` names the defect in the failure
+  output. A bare timeout says only that time passed, which is what a slow CI runner also says.
+- **Bound it with something the test is not faking.** `setImmediate` is left real
+  (`useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] })`) precisely so the bound does
+  not depend on the clock under test. A bound built from the faked timer cannot fire when the
+  faked timer is the thing that stopped.
+- **This is not the same rule as "wait on the condition, not the clock"** ([#165](https://github.com/jonhill90/hill90-app/pull/165)).
+  That one is about how you wait for success. This one is about what happens when success never
+  arrives — and a test can obey the first and still hang under the second.
+
+Same family as the other instrument notes above: the run said nothing, and silence was taken
+for a problem with the tooling.
