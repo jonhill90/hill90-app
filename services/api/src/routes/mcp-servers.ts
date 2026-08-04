@@ -12,6 +12,7 @@
 import { Router, Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
+import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isAdmin } from '../helpers/elevated-scope';
 
 const router = Router();
@@ -111,7 +112,20 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
       [req.params.id]
     );
 
-    res.json({ ...rows[0], agents });
+    // #262 asked for this to be DECIDED rather than left silent. Mapped, not
+    // left as-is: it has no UI reader today, which makes it a latent trap
+    // rather than a live defect — and an unmapped payload is exactly how this
+    // family reached a third route after two rounds of fixing it. The cost of
+    // mapping a payload nobody reads is nothing; the cost of the next reader
+    // finding a raw status here is the whole of #238 again.
+    res.json({
+      ...rows[0],
+      agents: agents.map((a: any) => ({
+        ...a,
+        status: reportedStatus(a.agent_id, a.status),
+        status_verified: isStatusVerified(a.agent_id),
+      })),
+    });
   } catch (err: any) {
     console.error('[mcp-servers] Get error:', err);
     res.status(500).json({ error: 'Failed to get MCP server' });
