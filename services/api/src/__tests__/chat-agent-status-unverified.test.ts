@@ -47,7 +47,11 @@ jest.mock('../db/pool', () => ({
 
 import { createApp } from '../app';
 import { runReconcilePass } from '../services/agent-reconciler';
-import { resetStatusVerification } from '../services/agent-status-verification';
+import {
+  resetStatusVerification,
+  reportedStatus,
+  isStatusVerified,
+} from '../services/agent-status-verification';
 
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -258,6 +262,11 @@ function threadFrom(res: request.Response) {
  *                       be the first instance, and would move the whole
  *                       investigation — so it must be read, never inferred.
  */
+/** A diagnostic must never mask the failure it is describing by throwing. */
+function safely(f: () => string): string {
+  try { return f(); } catch (e: any) { return `<threw: ${e?.message}>`; }
+}
+
 function dumpResponse(res: request.Response): string {
   const stamp = res.headers?.['x-test-app-id'];
   const ours = `${process.pid}:${process.env.JEST_WORKER_ID || '0'}`;
@@ -286,6 +295,13 @@ function dumpResponse(res: request.Response): string {
         `    [${i}] MUTATED?      : ${liveNow === atServe ? 'no — identical' : 'YES — the route changed the row in place'}`,
       ];
     }),
+    // The shipped #250 helper, called directly, in this process, right now.
+    // Splits "the route did not reach the mapping with that row" from "the
+    // mapping itself misbehaves here" — the latter being a defect in #250
+    // rather than in this branch.
+    `  helper reportedStatus(agent,'stopped') : ${safely(() => reportedStatus(AGENT_SLUG, 'stopped'))}`,
+    `  helper reportedStatus(agent,'running') : ${safely(() => reportedStatus(AGENT_SLUG, 'running'))}`,
+    `  helper isStatusVerified(agent)         : ${safely(() => String(isStatusVerified(AGENT_SLUG)))}`,
     `  sql issued       : ${servedParticipantRows.length === 0 && sqlSeen.length === 0 ? '<none>' : ''}`,
     ...sqlSeen.map((q, i) => `    [${i}] ${q}`),
     `  parsed body      : ${JSON.stringify(res.body)}`,
@@ -392,6 +408,13 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .set('Authorization', `Bearer ${adminToken}`);
 
     expectServed('stopped');
+    // CANDIDATE B PROBE. The shipped #250 helper, called directly, in-process,
+    // at the moment of the failing assertion. Six dumps have shown the route
+    // handed a row reading `stopped` and emitting `unknown`, which this
+    // function has no code path to produce. If THIS fails, the defect is in
+    // agent-status-verification.ts — shipped in #250, reaching every consumer
+    // of the third state — and not in the rendering change under review.
+    expect(reportedStatus(AGENT_SLUG, 'stopped')).toBe('stopped');
     expectAgentStatus(res, 'stopped');
   });
 
