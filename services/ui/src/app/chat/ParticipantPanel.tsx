@@ -3,6 +3,9 @@
 import { useState, useEffect } from 'react'
 import { X, Plus, UserMinus } from 'lucide-react'
 import type { ChatAgent } from './ChatLayout'
+import {
+  statusDotClass, statusLabel, mayBeAvailable, isUnknownStatus, UNVERIFIED_HINT,
+} from '@/utils/agent-status'
 
 interface Agent {
   id: string
@@ -28,8 +31,16 @@ export default function ParticipantPanel({ threadId, currentAgents, onUpdated, o
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
 
   const currentIds = new Set(currentAgents.map(a => a.id))
+  // A deliberate decision, not a side effect of `!== 'running'` (#251).
+  //
+  // An agent whose status the API could not verify STAYS in this list, marked.
+  // Hiding it would make an agent that may well be running silently absent,
+  // indistinguishable from "you have no agents to add" — the same shape as
+  // #237, where a dependency outage was rendered as an empty result. If the
+  // agent really is stopped the add request fails and says so, which is a
+  // visible, actionable outcome rather than a missing row.
   const addableAgents = availableAgents.filter(
-    a => !currentIds.has(a.id) && a.status === 'running'
+    a => !currentIds.has(a.id) && mayBeAvailable(a.status)
   )
   const atLimit = currentAgents.length >= MAX_AGENTS
 
@@ -130,12 +141,16 @@ export default function ParticipantPanel({ threadId, currentAgents, onUpdated, o
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <span
-                    className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                      agent.status === 'running' ? 'bg-brand-400' : 'bg-mountain-500'
-                    }`}
+                    className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDotClass(agent.status)}`}
+                    title={isUnknownStatus(agent.status) ? UNVERIFIED_HINT : undefined}
+                    data-testid="participant-status-dot"
+                    data-status-label={statusLabel(agent.status)}
                   />
                   <span className="text-sm text-gray-200 truncate">{agent.name}</span>
                   <span className="text-xs text-mountain-500">@{agent.agent_id}</span>
+                  {isUnknownStatus(agent.status) && (
+                    <span className="text-[10px] text-yellow-400 flex-shrink-0">unverified</span>
+                  )}
                 </div>
                 {confirmRemoveId === agent.id ? (
                   <div className="flex items-center gap-1">
@@ -192,6 +207,14 @@ export default function ParticipantPanel({ threadId, currentAgents, onUpdated, o
                     <Plus size={14} className="text-brand-400 flex-shrink-0" />
                     <span className="text-sm text-gray-200 truncate">{agent.name}</span>
                     <span className="text-xs text-mountain-500">@{agent.agent_id}</span>
+                    {isUnknownStatus(agent.status) && (
+                      <span
+                        className="text-[10px] text-yellow-400 ml-auto flex-shrink-0"
+                        title={UNVERIFIED_HINT}
+                      >
+                        unverified
+                      </span>
+                    )}
                   </button>
                 ))}
               </div>

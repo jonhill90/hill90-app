@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { X, Crown } from 'lucide-react'
+import { statusDotClass, mayBeAvailable, isUnknownStatus, UNVERIFIED_HINT } from '@/utils/agent-status'
 
 interface Agent {
   id: string
@@ -30,7 +31,12 @@ export default function NewThreadDialog({ onClose, onCreated }: Props) {
         const res = await fetch('/api/agents')
         if (res.ok) {
           const data = await res.json()
-          setAgents(data.filter((a: Agent) => a.status === 'running'))
+          // Deliberate, per #251: an agent the API could not verify stays in
+          // the picker, marked, rather than vanishing. Excluding it was never
+          // chosen — it fell out of `=== 'running'` — and a missing row is
+          // indistinguishable from having no agents at all. A stopped agent
+          // still fails at POST /chat with a message the user can read.
+          setAgents(data.filter((a: Agent) => mayBeAvailable(a.status)))
         }
       } catch {
         setError('Failed to load agents')
@@ -148,8 +154,14 @@ export default function NewThreadDialog({ onClose, onCreated }: Props) {
                         )}
                       </span>
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-brand-400 flex-shrink-0" />
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDotClass(agent.status)}`}
+                          title={isUnknownStatus(agent.status) ? UNVERIFIED_HINT : undefined}
+                        />
                         <span className="text-sm text-gray-200 truncate">{agent.name}</span>
+                        {isUnknownStatus(agent.status) && (
+                          <span className="text-[10px] text-yellow-400 flex-shrink-0">unverified</span>
+                        )}
                       </div>
                     </label>
                   )

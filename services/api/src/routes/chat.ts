@@ -35,6 +35,7 @@ import { auditLog } from '../helpers/audit';
 import { dispatchChatWork } from '../services/chat-dispatch';
 import { execInContainer } from '../services/docker';
 import { appendJournal } from '../services/akm-proxy';
+import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 
 const router = Router();
 
@@ -52,6 +53,35 @@ const DEFAULT_CHAT_MODEL = process.env.DEFAULT_CHAT_MODEL || 'claude-sonnet-4-20
 // ───────────────────────────────────────────────────────────────────
 // Helpers
 // ───────────────────────────────────────────────────────────────────
+
+/**
+ * What this route is entitled to say about a participant agent's status.
+ *
+ * #250 added the third state — a `running` row reconciliation could not check
+ * against a real container reports `unknown` rather than the last value the
+ * database happens to hold — but applied it in `routes/agents.ts` only. Every
+ * chat surface in the UI reads its agent status from *these* routes, so the
+ * distinction was gathered, recorded, and then dropped on the path that four of
+ * the five rendering surfaces actually use. That is #141/#153 again: the fix
+ * landed on one route and not its twin.
+ *
+ * Serialization only, deliberately. The dispatch gates at `POST /threads`
+ * (`agent.status !== 'running'`) and `POST /threads/:id/messages` read the
+ * recorded row and are left exactly as they are — see #251. An agent we could
+ * not verify must not be refused a message: unverifiable is not absent, and
+ * turning a reporting fix into a functional restriction would be a worse defect
+ * than the one being fixed. Do not tidy these into consistency.
+ */
+function participantAgentStatus(agentId: string | null, recordedStatus: string | null) {
+  // A human participant, or an agent row the LEFT JOIN did not match.
+  if (!agentId || recordedStatus == null) {
+    return { status: recordedStatus, status_verified: undefined as boolean | undefined };
+  }
+  return {
+    status: reportedStatus(agentId, recordedStatus),
+    status_verified: isStatusVerified(agentId),
+  };
+}
 
 /** Check if user is a participant in a thread (or admin). */
 async function isParticipant(threadId: string, userId: string, admin: boolean): Promise<boolean> {
@@ -433,14 +463,14 @@ router.get('/threads', requireRole('user'), async (req: Request, res: Response) 
           id: a.participant_id,
           agent_id: a.agent_id,
           name: a.agent_name,
-          status: a.agent_status,
+          ...participantAgentStatus(a.agent_id, a.agent_status),
         })),
         // Backward compat: single agent field for direct threads
         agent: agents.length === 1 ? {
           id: agents[0].participant_id,
           agent_id: agents[0].agent_id,
           name: agents[0].agent_name,
-          status: agents[0].agent_status,
+          ...participantAgentStatus(agents[0].agent_id, agents[0].agent_status),
         } : undefined,
       };
     });
@@ -731,6 +761,11 @@ router.get('/threads/:id', requireRole('user'), async (req: Request, res: Respon
        WHERE cp.thread_id = $1`,
       [req.params.id]
     );
+    for (const p of participants) {
+      const { status, status_verified } = participantAgentStatus(p.agent_id, p.agent_status);
+      p.agent_status = status;
+      p.agent_status_verified = status_verified;
+    }
 
     // Get messages — the NEWEST page, not the oldest (#203).
     //
@@ -1017,6 +1052,11 @@ router.put('/threads/:id/participants', requireRole('user'), async (req: Request
        WHERE cp.thread_id = $1`,
       [threadId]
     );
+    for (const p of participants) {
+      const { status, status_verified } = participantAgentStatus(p.agent_id, p.agent_status);
+      p.agent_status = status;
+      p.agent_status_verified = status_verified;
+    }
 
     res.json({ participants });
   } catch (err) {
