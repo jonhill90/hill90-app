@@ -121,9 +121,13 @@ describe('JSON proxy pass-through', () => {
     const req = makeRequest(['some-id'])
     const res = await GET(req as any, makeParams(['some-id']))
 
+    // `headers` is now always passed, carrying whatever the upstream sent that
+    // crosses this hop — empty here because this fixture sends none. The route
+    // used to omit the option entirely and so dropped `X-Total-Count`, which the
+    // stats and artifacts endpoints set from their own COUNT(*).
     expect(NextResponse.json).toHaveBeenCalledWith(
       { id: '123', name: 'test-agent' },
-      { status: 200 }
+      { status: 200, headers: {} }
     )
   })
 
