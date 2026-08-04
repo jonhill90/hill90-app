@@ -203,15 +203,26 @@ class AgentRuntime:
                 "type": work_type,
             })
         else:
-            # Unknown type: stub — emit work_completed
+            # Unrecognised work type: reject at the boundary, matching every
+            # other rejection in this function rather than acknowledging it
+            # (#222 finding 2). Closest siblings in shape are shell_disabled
+            # and the missing-command check just above — both run after
+            # work_id exists, so both carry it in metadata, which is why
+            # this is an inline emit rather than the _emit_work_failed
+            # helper the pre-work_id validations use.
+            detail = f"Unknown work type: {work_type!r}"
             self._emitter.emit(
-                type="work_completed",
+                type="work_failed",
                 tool="runtime",
                 input_summary=summary,
-                output_summary=f"work_id={work_id} (stub — no execution)",
+                output_summary=detail,
                 duration_ms=0,
-                success=True,
+                success=False,
                 metadata={"work_id": work_id},
+            )
+            return JSONResponse(
+                {"error": "validation_error", "detail": detail},
+                status_code=400,
             )
 
         # 8. Return ack
