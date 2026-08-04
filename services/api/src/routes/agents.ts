@@ -9,6 +9,7 @@ import { ELEVATED_SCOPES, isAdmin, getAgentElevatedScope, getAgentEffectiveScope
 import { auditLog } from '../helpers/audit';
 import { writeAgentFiles, removeAgentFiles } from '../services/agent-files';
 import { mergeToolsConfigs, DEFAULT_TOOLS_CONFIG } from '../services/merge-tools-config';
+import { reportedStatus, isStatusVerified, markStatusVerified } from '../services/agent-status-verification';
 import { ensureRequiredToolsInstalled, reconcileToolInstalls } from '../services/tool-installer';
 import {
   createAndStartContainer,
@@ -304,6 +305,11 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
       row.hasAvatar = !!row.avatar_key;
       delete row.avatar_key;
 
+      // #238: a `running` row that reconciliation could not check is reported
+      // as `unknown`, not as the last value the database happens to hold.
+      row.status_verified = isStatusVerified(row.agent_id);
+      row.status = reportedStatus(row.agent_id, row.status);
+
       row.container_profile = row.container_profile_id
         ? { id: row.container_profile_id, name: row.cp_name, docker_image: row.cp_docker_image }
         : null;
@@ -543,6 +549,10 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const agent = rows[0];
     agent.hasAvatar = !!agent.avatar_key;
     delete agent.avatar_key;
+
+    // #238: see the list route.
+    agent.status_verified = isStatusVerified(agent.agent_id);
+    agent.status = reportedStatus(agent.agent_id, agent.status);
 
     // AI-115: Add principal identity fields
     agent.principal_id = agent.id;
@@ -1360,6 +1370,11 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
       `UPDATE agents SET status = 'running', container_id = $1, work_token = $2, error_message = NULL, updated_at = NOW() WHERE id = $3`,
       [containerId, workToken, req.params.id]
     );
+
+    // First-hand evidence: this request started the container. Without this an
+    // agent started while reconciliation is failing would report `unknown`
+    // until the next successful pass, which would be needlessly pessimistic.
+    markStatusVerified(agent.agent_id);
 
     // Record status transition
     try {

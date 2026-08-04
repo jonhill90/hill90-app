@@ -8,7 +8,7 @@ import { getPool, closePool } from './db/pool';
 import { runMigrations } from './db/migrate';
 import { createJwksKeyResolver } from './middleware/auth';
 import { getIssuer, getJwksUri, rolesFrom } from './middleware/keycloak-config';
-import { reconcileAgentStatuses } from './services/docker';
+import { runReconcilePass, startAgentReconciler, stopAgentReconciler } from './services/agent-reconciler';
 import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
 import { attachTerminalProxy } from './services/terminal-proxy';
 import { startStaleSweeper, stopStaleSweeper } from './routes/chat';
@@ -25,26 +25,13 @@ async function start() {
       console.error('[startup] Migration failed, agent routes may return 503:', err);
     }
 
-    // Reconcile agent container statuses
-    try {
-      await reconcileAgentStatuses(
-        async () => {
-          const { rows } = await getPool().query(
-            "SELECT id, agent_id FROM agents WHERE status = 'running'"
-          );
-          return rows;
-        },
-        async (id, status, containerId, error) => {
-          await getPool().query(
-            'UPDATE agents SET status = $1, container_id = $2, error_message = $3, updated_at = NOW() WHERE id = $4',
-            [status, containerId, error, id]
-          );
-        }
-      );
-      console.log('[startup] Agent status reconciliation complete');
-    } catch (err) {
-      console.error('[startup] Agent reconciliation failed:', err);
-    }
+    // Reconcile agent container statuses. Awaited before app.listen below, so
+    // the API never serves a status before a pass has at least been attempted —
+    // and a pass that fails records itself, so the affected agents report
+    // `unknown` instead of whatever the database last wrote (#238). Was: a
+    // try/catch that logged the failure and carried on serving unverified state
+    // as fact.
+    await runReconcilePass();
   } else {
     // Was: log and carry on. During a cutover, where the variable name itself is
     // changing, that turns a typo into a GREEN container with no schema — a healthy
@@ -66,6 +53,11 @@ async function start() {
   } catch (err) {
     console.error('[startup] Avatar bucket init failed, avatar routes may error:', err);
   }
+
+  // Keep reconciling. A docker-proxy fault used to persist until the next
+  // restart because there was one call site and no timer.
+  startAgentReconciler();
+  console.log('[startup] Agent status reconciler started');
 
   // Start chat stale message sweeper (§9, cleanup path 2)
   startStaleSweeper();
@@ -113,6 +105,7 @@ async function start() {
   const shutdown = async () => {
     console.log('[shutdown] Closing server...');
     stopStaleSweeper();
+    stopAgentReconciler();
     server.close();
     await closePool();
     process.exit(0);
