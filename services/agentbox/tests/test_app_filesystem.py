@@ -90,14 +90,22 @@ class TestEventEmission:
         filesystem._emitter = None
 
     @pytest.mark.asyncio
-    async def test_event_output_is_byte_count(self, workspace):
+    async def test_event_output_is_a_size_not_contents(self, workspace):
+        """Renamed from test_event_output_is_byte_count, and the units corrected.
+
+        It asserted the summary contained the word "bytes" for a figure that is
+        `len(content)` — CHARACTERS, since read() in text mode counts characters.
+        The summary now says "chars", which is what it has always been measuring.
+
+        The test's real intent is the second assertion — a size, never the file's
+        contents — and that is unchanged.
+        """
         emitter = MagicMock()
         filesystem._emitter = emitter
         await filesystem.read_file(str(workspace / "test.txt"))
         call = emitter.emit.call_args
         output = call.kwargs["output_summary"]
-        # Must be byte count only, not file contents
-        assert "bytes" in output
+        assert "chars" in output
         assert "hello world" not in output
         filesystem._emitter = None
 

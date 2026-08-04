@@ -461,23 +461,102 @@ def _run_direct_command(user_message: str) -> str:
     return _wait_and_capture(timeout=COMMAND_TIMEOUT)
 
 
+#: Marker the shell echoes so the real exit status comes back through the pane.
+#: There is no other way to get it: `tmux send-keys` returns as soon as the keys
+#: are delivered and knows nothing about what the command then did.
+_EXIT_SENTINEL = "__HILL90_EXIT:"
+
+
+def _extract_exit_code(output: str) -> tuple[int | None, str]:
+    """Pull the sentinel out of captured pane text.
+
+    Returns (exit_code, output_without_sentinel_lines). exit_code is None when the
+    sentinel never appeared, which means we genuinely do not know how the command
+    ended — not that it succeeded.
+    """
+    code: int | None = None
+    kept: list[str] = []
+    for line in output.splitlines():
+        marker = line.find(_EXIT_SENTINEL)
+        if marker != -1:
+            digits = line[marker + len(_EXIT_SENTINEL):].strip().split()
+            if digits and digits[0].isdigit():
+                code = int(digits[0])  # last one wins: the most recent command
+            continue
+        kept.append(line)
+    return code, "\n".join(kept).rstrip()
+
+
 def _run_visible_command(cmd: str) -> str:
     """Run a command in tmux (visible to terminal viewer) and return result as JSON.
 
     Used by the tool-use loop to make execute_command calls visible.
+
+    THIS USED TO RETURN `{"success": True, ..., "exit_code": 0}` WITH BOTH VALUES
+    HARDCODED. A command that failed, a binary that did not exist, and a `tmux
+    send-keys` that itself failed were all reported to the agent as success with
+    exit code 0. The pane text often contained the error, so a human reading the
+    output could tell — but every STRUCTURED field said success, and the reader
+    here is a tool-use loop branching on those fields. In an agent platform the
+    prose is decoration and the field is the interface.
+
+    `policy.py` derives `success` from the real return code on the non-visible
+    path. This is that path brought into line with its sibling, not a new idea.
+
+    WHEN THE STATUS CANNOT BE DETERMINED — the sentinel never came back, the
+    prompt was not detected, the capture timed out — this reports success=False
+    with `exit_status_known: false` and says why. That is deliberately the
+    conservative direction: an agent told "unknown" investigates, whereas one told
+    "success" builds on it. Reporting a success we did not observe is the defect
+    being fixed; reporting a failure we did not observe is at worst wasted work.
     """
     _ensure_tmux_session()
 
-    subprocess.run(
-        ["tmux", "send-keys", "-t", TMUX_SESSION, cmd, "Enter"],
+    # `; echo` rather than `&& echo`, so the sentinel is emitted for FAILING
+    # commands too — which are the ones this whole change exists for.
+    wrapped = f'{cmd}; echo "{_EXIT_SENTINEL}$?"'
+
+    sent = subprocess.run(
+        ["tmux", "send-keys", "-t", TMUX_SESSION, wrapped, "Enter"],
         timeout=5,
         capture_output=True,
     )
+    if sent.returncode != 0:
+        # The keys never reached the shell, so the command did not run at all.
+        # This was previously reported as success with exit code 0.
+        detail = (sent.stderr or b"").decode("utf-8", "replace").strip()[:200]
+        logger.warning("[terminal-visible] send-keys failed: %s", detail)
+        return json.dumps({
+            "success": False,
+            "output": "",
+            "exit_code": None,
+            "exit_status_known": False,
+            "error": f"Could not send the command to the terminal: {detail or 'tmux send-keys failed'}",
+        })
 
     logger.info("[terminal-visible] Command in tmux: %s", cmd[:100])
 
-    output = _wait_and_capture(timeout=COMMAND_TIMEOUT)
-    return json.dumps({"success": True, "output": output, "exit_code": 0})
+    raw = _wait_and_capture(timeout=COMMAND_TIMEOUT)
+    exit_code, output = _extract_exit_code(raw)
+
+    if exit_code is None:
+        return json.dumps({
+            "success": False,
+            "output": output,
+            "exit_code": None,
+            "exit_status_known": False,
+            "error": (
+                "The command's exit status could not be determined within "
+                f"{COMMAND_TIMEOUT}s. The output below may be incomplete."
+            ),
+        })
+
+    return json.dumps({
+        "success": exit_code == 0,
+        "output": output,
+        "exit_code": exit_code,
+        "exit_status_known": True,
+    })
 
 
 def _wait_and_capture(*, timeout: int) -> str:
