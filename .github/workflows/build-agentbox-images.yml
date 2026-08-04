@@ -1,0 +1,202 @@
+name: Build Agentbox Images (Prod)
+
+# Builds the images the API launches agents from, ON the VPS.
+#
+# WHY THIS EXISTS (#228). Nothing built them. `deploy.sh` runs
+# `docker compose build` against the compose file for the stack being deployed,
+# and `docker-compose.agentbox-images.yml` is in no stack list, so it was never
+# named. CI runs agentbox's pytest and ruff but builds nothing. The only builder
+# in the repository was `scripts/local.sh agentbox`, which builds into a local
+# developer's daemon and has no path to the VPS.
+#
+# The consequence was not "an image is missing" — it was that nothing said so.
+# On 2026-08-04 the host had no agentbox image at all and no agent could start,
+# and the only way anyone found out was by looking. With the image built but
+# stale the failure is quieter still: an agent runs yesterday's code, with no
+# error and no signal.
+#
+# Manual-only, matching deploy.yml. A merge must not build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          Run every guard against the real host and STOP before building.
+          Use this first — it is the only way to test the path without building.
+        type: boolean
+        default: false
+      include_browser:
+        description: >-
+          Also build hill90/agentbox-browser (Playwright — slow). Only needed if
+          a container profile selects it.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Two concurrent builds of the same tags on one host is exactly the collision
+# an image tag cannot survive. Shares no group with deploy: a deploy that
+# recreates a service while this builds is fine, they touch different things.
+concurrency:
+  group: build-agentbox-prod-hill90-app
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build agentbox images on the VPS
+    runs-on: ubuntu-latest
+    env:
+      VPS_APP_PATH: ${{ vars.VPS_APP_PATH || '/opt/hill90-app' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+
+      - name: Setup SOPS/age for secrets
+        env:
+          SOPS_VERSION: "3.9.4"
+        run: |
+          SOPS_URL="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64"
+          curl -fsSL -o /tmp/sops "$SOPS_URL"
+          if file /tmp/sops | grep -q "HTML"; then
+            echo "::error::SOPS download returned HTML instead of binary — check URL: $SOPS_URL"
+            exit 1
+          fi
+          chmod +x /tmp/sops
+          sudo mv /tmp/sops /usr/local/bin/sops
+          mkdir -p ~/.config/sops/age
+          echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
+          chmod 600 ~/.config/sops/age/keys.txt
+
+      - name: Get Tailscale IP from secrets
+        id: get-ip
+        run: |
+          TAILSCALE_IP=$(sops -d --extract '["TAILSCALE_IP"]' infra/secrets/prod.enc.env)
+          if [ -z "$TAILSCALE_IP" ]; then
+            echo "::error::TAILSCALE_IP is empty or absent in infra/secrets/prod.enc.env"
+            exit 1
+          fi
+          echo "::add-mask::$TAILSCALE_IP"
+          echo "tailscale_ip=$TAILSCALE_IP" >> $GITHUB_OUTPUT
+
+      - name: Verify SSH connectivity
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} 'echo "SSH connection successful"'
+
+      - name: Sync the host checkout and resolve the revision
+        id: rev
+        run: |
+          # The label must name the commit that produced the image, so the
+          # revision is read from the host AFTER the fetch, not from the runner.
+          # A label naming a commit the build did not use is worse than none:
+          # it looks authoritative and nobody re-checks it.
+          REV=$(ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && git fetch --quiet origin && git checkout --quiet origin/main && git rev-parse HEAD")
+          if [ -z "$REV" ]; then
+            echo "::error::Could not resolve a revision on the host. Refusing to build an image that cannot say what it is."
+            exit 1
+          fi
+          echo "revision=${REV}" >> $GITHUB_OUTPUT
+          echo "::notice::Building at ${REV}"
+
+      - name: DRY RUN — stop before building
+        if: inputs.dry_run
+        run: |
+          echo "DRY RUN COMPLETE — nothing was built and no image on the host changed."
+          echo "A live run would build at ${{ steps.rev.outputs.revision }}:"
+          echo "  hill90/knowledge:latest        (first — agentbox copies the akm CLI out of it)"
+          echo "  hill90/agentbox:latest"
+          echo "  hill90/agentbox-monitor:latest"
+          echo "  hill90/agentbox-browser:latest (only with include_browser)"
+
+      # Order is load-bearing. services/agentbox/Dockerfile copies the akm CLI
+      # out of hill90/knowledge, so a stale or missing knowledge image gives the
+      # agent a wrong or absent CLI — and that fails at agent RUNTIME, not here.
+      - name: Build hill90/knowledge
+        if: ${{ !inputs.dry_run }}
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && docker build --build-arg GIT_REVISION=${{ steps.rev.outputs.revision }} -t hill90/knowledge:latest services/knowledge"
+
+      - name: Build hill90/agentbox
+        if: ${{ !inputs.dry_run }}
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && docker build --build-arg GIT_REVISION=${{ steps.rev.outputs.revision }} -t hill90/agentbox:latest services/agentbox"
+
+      - name: Build hill90/agentbox-monitor
+        if: ${{ !inputs.dry_run }}
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && docker build --build-arg GIT_REVISION=${{ steps.rev.outputs.revision }} -t hill90/agentbox-monitor:latest -f services/agentbox/Dockerfile.monitor services/agentbox"
+
+      - name: Build hill90/agentbox-browser
+        if: ${{ !inputs.dry_run && inputs.include_browser }}
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            "cd ${VPS_APP_PATH} && docker build --build-arg GIT_REVISION=${{ steps.rev.outputs.revision }} -t hill90/agentbox-browser:latest -f services/agentbox/Dockerfile.browser services/agentbox"
+
+      # The build reporting success is not evidence that the label landed. A
+      # missing --build-arg produces a working image stamped `unstamped`, which
+      # is honest but not what was asked for; a typo in the label name produces
+      # an image with no answer at all. Read it back and compare.
+      - name: Verify the images exist and carry the revision
+        if: ${{ !inputs.dry_run }}
+        run: |
+          for img in hill90/knowledge hill90/agentbox hill90/agentbox-monitor; do
+            got=$(ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+              deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+              "docker inspect -f '{{index .Config.Labels \"com.hill90.revision\"}}' ${img}:latest" 2>/dev/null | tr -d '[:space:]')
+            if [ -z "$got" ]; then
+              echo "::error::${img}:latest carries no com.hill90.revision label. The image cannot say what commit it is."
+              exit 1
+            fi
+            if [ "$got" != "${{ steps.rev.outputs.revision }}" ]; then
+              echo "::error::${img}:latest is stamped ${got}, expected ${{ steps.rev.outputs.revision }}."
+              exit 1
+            fi
+            echo "✓ ${img}:latest @ ${got}"
+          done
+
+      # Standing up agents runs no deploy, so NOTHING checks the platform
+      # baseline automatically — that check lives in reusable-deploy-service.yml
+      # and only fires there. Building images adds no containers, so this run
+      # cannot change the count; it is here so the check is attached to the
+      # tenant action that precedes agents rather than left to be remembered.
+      # It must be run AGAIN once agents are actually running, which is the
+      # first tenant action that adds containers.
+      - name: Verify the Hill90 platform containers are present BY NAME
+        if: ${{ !inputs.dry_run }}
+        run: |
+          ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no \
+            deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
+            'docker ps --format "{{.Names}}"' \
+            | bash scripts/checks/check_platform_baseline.sh
+
+      - name: Summary
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "::notice::Built and verified at ${{ steps.rev.outputs.revision }}"
+          echo "Agents can now be started. Re-run the baseline check once they are"
+          echo "running — that is the first tenant action that ADDS containers, and"
+          echo "no deploy will run to check it for you."
