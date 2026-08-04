@@ -135,6 +135,46 @@ choosing the right tool.** `no-misused-promises` reported 191 sites in the same 
 middleware in `src/boot/async-errors.ts`. Reporting 197 would have counted a solved problem as
 an open one.
 
+## The instrument can contain the fault it was built to catch
+
+The section above says check the instrument. This one is narrower and worse: **an instrument
+written specifically to rule out a confusion can reproduce that confusion internally**, and it
+will not look wrong when it does.
+
+Measured on 2026-08-04, rotating `DB_PASSWORD` in [#282](https://github.com/jonhill90/hill90-app/pull/282). The
+question was whether any deployable stack consumes the value. A name grep was rejected on the
+grounds that a search pointed at the wrong tree returns the same zero as a search that is
+right — so each production compose file was rendered with the real store interpolated and the
+**value** was searched for in the rendered text, and a render that produced nothing was made to
+refuse to report a count at all. That guard was the whole point of the script.
+
+The count was then written as `n=$(render "$st" | grep -Fc -- "$v") || return 1`, and a stack
+with no hits became indistinguishable from a render that had died — the exact conflation the
+render guard existed to prevent, one line below it.
+
+**The tool was not the problem, and this is the part to get right.** `grep` distinguishes the two
+perfectly well: **1 for no match, 2 for an error.** What threw the distinction away was the
+calling code. `render` signalled its own failure as `return 1` — the same value `grep` uses for a
+clean no-match — the pipeline collapsed both into one status, and `|| return 1` mapped every
+non-zero to a single meaning. Three ordinary decisions, none wrong alone.
+
+The first run reported both positive controls as failures, which is the only reason it was
+noticed. **Had it failed in the other direction it would have read as a pass**, and a zero would
+have been reported for a key that was still in use.
+
+Fix: render and count are separate steps, the render is checked on its own, and the count is
+`grep -Fc … || true`.
+
+**The rule:** when you build an instrument to rule out a specific failure mode, check whether
+that failure mode exists inside the instrument. The common instance is not a tool that cannot
+tell two outcomes apart — it is **calling code that discards a distinction the tool was making**:
+a bare `|| return 1`, a `set -e` that treats every non-zero alike, a pipeline whose status carries
+only one stage. The fix differs accordingly. If the tool genuinely cannot distinguish them,
+replace the tool; if the caller flattened it, keep the tool and stop flattening — check exit
+status against the value that means *error*, or separate the steps so each is checked on its own.
+Either way: a positive control that fails loudly is what caught this, and a script whose controls
+always pass has told you nothing about itself.
+
 ## Look for the twin before you look for the next defect
 
 When you fix something, the next question is not *what else is broken*. It is **where else does
