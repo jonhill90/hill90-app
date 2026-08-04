@@ -208,4 +208,4 @@ async def _pty_reader(master_fd: int, websocket: WebSocket) -> None:
     except (asyncio.CancelledError, WebSocketDisconnect):
         pass
     except Exception as exc:
-        logger.debug("PTY reader stopped: %s", exc)
+        logger.warning("PTY reader stopped: %s", exc)
