@@ -31,6 +31,7 @@ const CLOSE_CREDENTIAL_EXPIRED = 4002;
 const CLOSE_ACCESS_REVOKED = 4004;
 
 let verdict: { sub: string; roles?: string[]; exp: number } | null = null;
+let terminals: { closeAllSessions: (code: number, reason: string, timeoutMs?: number) => Promise<number> };
 let server: http.Server;
 let port: number;
 /** Stands in for agentbox: accepts the relay connection and holds it open. */
@@ -48,7 +49,7 @@ beforeAll(async () => {
   upstreamUrl = `ws://127.0.0.1:${(upstreamServer.address() as { port: number }).port}/terminal/ws`;
 
   server = http.createServer();
-  attachTerminalProxy(
+  terminals = attachTerminalProxy(
     server,
     (async () => verdict) as never,
     { resolveUpstream: async () => upstreamUrl },
@@ -188,5 +189,57 @@ describe('4004 — access removed while the session is open', () => {
     ]);
     ws.close();
     expect(ended).toBe('still open');
+  }, 15000);
+});
+
+describe('1001 — shutdown says going away instead of vanishing (#318)', () => {
+  it('a live session is closed with 1001 and a reason, not severed', async () => {
+    const { opened, closed } = connect();
+    await opened;
+
+    const count = await terminals.closeAllSessions(1001, 'server shutting down');
+
+    expect(count).toBe(1);
+    const end = await closed;
+    // 1006 is what the client saw before: no code at all, indistinguishable from a
+    // network fault on a surface that distinguishes 4001/4002/4004 on purpose.
+    expect(end.code).toBe(1001);
+    expect(end.reason).toBe('server shutting down');
+  }, 15000);
+
+  it('the drain WAITS for the close rather than sleeping through it', async () => {
+    const { opened } = connect();
+    await opened;
+
+    const started = Date.now();
+    await terminals.closeAllSessions(1001, 'server shutting down');
+    const elapsed = Date.now() - started;
+
+    // The ceiling is 2000ms. A healthy socket must cost a fraction of it — if this
+    // ever approaches the bound, the implementation has started sleeping.
+    expect(elapsed).toBeLessThan(500);
+  }, 15000);
+
+  it('is bounded when a peer never answers, rather than hanging shutdown', async () => {
+    const { ws, opened } = connect();
+    await opened;
+    // Stop reading: the server's close frame is sent, the client never echoes it, and
+    // `ws` would otherwise wait out its own 30s close timeout.
+    (ws as unknown as { _socket: { pause: () => void } })._socket.pause();
+
+    const started = Date.now();
+    await terminals.closeAllSessions(1001, 'server shutting down', 300);
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeGreaterThanOrEqual(250);
+    expect(elapsed).toBeLessThan(1500);
+    ws.terminate();
+  }, 15000);
+
+  it('with no live sessions it is a no-op, not a wait', async () => {
+    const started = Date.now();
+    const count = await terminals.closeAllSessions(1001, 'server shutting down');
+    expect(count).toBe(0);
+    expect(Date.now() - started).toBeLessThan(100);
   }, 15000);
 });
