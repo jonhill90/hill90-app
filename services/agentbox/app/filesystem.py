@@ -14,6 +14,9 @@ from app.config import FilesystemConfig
 from app.events import EventEmitter
 from app.policy import PathPolicy
 
+#: Characters, not bytes — read() in text mode counts characters.
+READ_LIMIT_CHARS = 1_000_000
+
 _policy: PathPolicy | None = None
 _emitter: EventEmitter | None = None
 
@@ -53,14 +56,37 @@ async def read_file(path: str) -> str:
     t0 = time.monotonic()
     try:
         with open(path) as f:
-            content = f.read(1_000_000)  # 1MB limit
+            content = f.read(READ_LIMIT_CHARS)
+            # One character past the limit is the cheapest way to know whether
+            # there IS more. Comparing len(content) to the limit cannot tell a
+            # file of exactly the limit from one that was cut.
+            truncated = f.read(1) != ""
+        size_bytes = os.path.getsize(path)
         duration_ms = int((time.monotonic() - t0) * 1000)
         if _emitter:
             _emitter.emit(
                 type="file_read", tool="filesystem", input_summary=path,
-                output_summary=f"{len(content)} bytes", duration_ms=duration_ms, success=True,
+                output_summary=(
+                    f"{len(content)} chars"
+                    + (f" (TRUNCATED, file is {size_bytes} bytes)" if truncated else "")
+                ),
+                duration_ms=duration_ms, success=True,
             )
-        return json.dumps({"success": True, "content": content, "path": path})
+        return json.dumps({
+            "success": True,
+            "content": content,
+            "path": path,
+            # The whole point of this change. Without it a 5MB log came back as a
+            # complete read, and every conclusion drawn from it — "the error is
+            # not in this file" — was unsound with nothing to indicate why.
+            "truncated": truncated,
+            "chars_returned": len(content),
+            # Bytes, from stat. NOT comparable to chars_returned for non-ASCII
+            # content: read() in text mode counts CHARACTERS. The old comment
+            # here said "1MB limit" and meant characters, which is the same
+            # conflation one level up.
+            "size_bytes": size_bytes,
+        })
     except FileNotFoundError:
         duration_ms = int((time.monotonic() - t0) * 1000)
         if _emitter:
