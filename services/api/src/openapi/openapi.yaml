@@ -4206,10 +4206,32 @@ paths:
           format: uuid
 
     get:
-      summary: Get thread detail with messages
+      summary: Get thread detail with a page of messages
       description: |
-        Returns thread metadata, participants, and all messages.
+        Returns thread metadata, participants, and the MOST RECENT page of
+        messages — not the whole thread (#203).
+
+        `limit` (1-2000, default 500) sizes the page; `before_seq` walks
+        backwards from a known seq to fetch older messages. Paging is by
+        cursor rather than offset because the stale-message reconcile
+        reassigns `seq`, so an offset over this table skips and repeats rows.
+
+        The response carries `message_total`, a COUNT over the whole thread,
+        and `has_older`. `message_total` is NOT `messages.length`: a total
+        derived from the page agrees with itself and would report a truncated
+        thread as complete.
+
         Requires participant membership or admin role.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 500 }
+        - name: before_seq
+          in: query
+          required: false
+          description: Return messages older than this seq.
+          schema: { type: integer, minimum: 0 }
       security:
         - bearerAuth: []
       responses:

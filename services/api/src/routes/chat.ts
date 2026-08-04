@@ -26,6 +26,10 @@ import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bo
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { requireRole } from '../middleware/role';
 import { parsePageParams, DEFAULT_PAGE } from '../helpers/page-params';
+import {
+  SSE_BACKFILL_LIMIT, BACKFILL_TAIL_SQL, POLL_SQL, THREAD_MESSAGE_COUNT_SQL,
+  backfillNotice, backfillFrame,
+} from '../helpers/chat-backfill';
 import { isAdmin, getAgentElevatedScope } from '../helpers/elevated-scope';
 import { auditLog } from '../helpers/audit';
 import { dispatchChatWork } from '../services/chat-dispatch';
@@ -591,6 +595,26 @@ router.get('/threads/:id', requireRole('user'), async (req: Request, res: Respon
       return;
     }
 
+    const page = parsePageParams(req);
+    if ('error' in page) {
+      res.status(400).json({ error: page.error });
+      return;
+    }
+    const limit = page.limit ?? DEFAULT_PAGE;
+
+    // Cursor for older messages. Rejected rather than ignored: a caller that
+    // sends before_seq=abc and silently receives the newest page has been
+    // handed an answer to a different question.
+    let beforeSeq: number | undefined;
+    if (req.query.before_seq !== undefined) {
+      const n = Number(req.query.before_seq);
+      if (!Number.isInteger(n) || n < 0) {
+        res.status(400).json({ error: 'before_seq must be an integer >= 0' });
+        return;
+      }
+      beforeSeq = n;
+    }
+
     const pool = getPool();
 
     // Get thread
@@ -614,17 +638,52 @@ router.get('/threads/:id', requireRole('user'), async (req: Request, res: Respon
       [req.params.id]
     );
 
-    // Get messages (include reply_to, target_agents, chain columns for group threads)
-    const { rows: messages } = await pool.query(
-      `SELECT id, seq, author_id, author_type, role, content, status,
-              reply_to, target_agents,
-              chain_id, chain_hop, triggered_by,
-              model, input_tokens, output_tokens, duration_ms,
-              error_message, created_at
-       FROM chat_messages WHERE thread_id = $1
-       ORDER BY seq ASC`,
-      [req.params.id]
-    );
+    // Get messages — the NEWEST page, not the oldest (#203).
+    //
+    // The read used to be unbounded. A naive LIMIT on the previous
+    // `ORDER BY seq ASC` would have returned the OLDEST rows, so a user
+    // opening a long thread would see the start of the conversation and not
+    // the message just sent. Select newest-first and reverse — the shape this
+    // file already uses when building the agent context window.
+    //
+    // before_seq, not OFFSET: the stale reconcile below does
+    // `seq = nextval(...)`, deliberately, so the head of this table reorders.
+    // An offset over that hands one message to two pages and another to none.
+    // Fetch one MORE than asked for. Whether older messages exist cannot be
+    // derived from `messages.length < message_total` once `before_seq` is in
+    // play — the total counts the whole thread, not what remains below this
+    // page — and that comparison would claim "older messages exist" while
+    // sitting on the very first one. The probe row answers it exactly, with no
+    // second query.
+    const olderClause = beforeSeq === undefined ? '' : 'AND seq < $3';
+    const pageParams: any[] = [req.params.id, limit + 1];
+    if (beforeSeq !== undefined) pageParams.push(beforeSeq);
+
+    const [{ rows: pageRows }, { rows: countRows }] = await Promise.all([
+      pool.query(
+        `SELECT id, seq, author_id, author_type, role, content, status,
+                reply_to, target_agents,
+                chain_id, chain_hop, triggered_by,
+                model, input_tokens, output_tokens, duration_ms,
+                error_message, created_at
+         FROM chat_messages WHERE thread_id = $1 ${olderClause}
+         ORDER BY seq DESC
+         LIMIT $2`,
+        pageParams
+      ),
+      // COUNT(*) over the same thread, never messages.length: a total derived
+      // from the page agrees with itself and calls a truncated thread whole.
+      pool.query(
+        `SELECT COUNT(*) AS total FROM chat_messages WHERE thread_id = $1`,
+        [req.params.id]
+      ),
+    ]);
+
+    const hasOlder = pageRows.length > limit;
+    // Reversed for display: the response stays oldest-first, exactly the order
+    // every existing consumer already reads.
+    const messages = pageRows.slice(0, limit).reverse();
+    const messageTotal = Number(countRows[0].total);
 
     // Reconcile stale pending messages (cleanup path 3: thread load)
     const now = Date.now();
@@ -648,10 +707,17 @@ router.get('/threads/:id', requireRole('user'), async (req: Request, res: Respon
       }
     }
 
+    // The total goes in the BODY here, not a header. /entries needed a header
+    // because its body was a bare JSON array and an object would have broken
+    // `Array.isArray` consumers (#180); this body is already an object, so a
+    // new key breaks nobody. Same rule, different mechanism: add the truth
+    // through a channel an un-updated consumer already tolerates.
     res.json({
       ...threadRows[0],
       participants,
       messages,
+      message_total: messageTotal,
+      has_older: hasOlder,
     });
   } catch (err) {
     console.error('[chat] Get thread error:', err);
@@ -1137,21 +1203,37 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
       if (!isNaN(parsed)) cursor = parsed;
     }
 
+    // The FIRST poll is a backfill of the entire thread: with no
+    // Last-Event-ID the cursor is 0, so `seq > 0` matches every message ever
+    // sent. Every poll after it is bounded by arrival rate. So the bound
+    // belongs on the backfill specifically, not on the steady state (#203).
+    let isBackfill = true;
+
     const poll = async () => {
       if (res.writableEnded || res.destroyed) return;
 
       try {
-        const { rows } = await getPool().query(
-          `SELECT id, seq, author_id, author_type, role, content, status,
-                  reply_to, target_agents,
-                  chain_id, chain_hop, triggered_by,
-                  model, input_tokens, output_tokens, duration_ms,
-                  error_message, created_at
-           FROM chat_messages
-           WHERE thread_id = $1 AND seq > $2
-           ORDER BY seq ASC`,
-          [threadId, cursor]
-        );
+        // Newest-first WITH A LIMIT on the backfill, then reversed — a plain
+        // `ORDER BY seq ASC LIMIT n` would replay the OLDEST n and a reader
+        // reconnecting to a long thread would be shown the start of the
+        // conversation instead of what just arrived.
+        const { rows } = isBackfill
+          ? await getPool().query(BACKFILL_TAIL_SQL, [threadId, cursor, SSE_BACKFILL_LIMIT])
+          : await getPool().query(POLL_SQL, [threadId, cursor]);
+
+        if (isBackfill) {
+          isBackfill = false;
+
+          const { rows: countRows } = await getPool().query(
+            THREAD_MESSAGE_COUNT_SQL, [threadId]
+          );
+          const notice = backfillNotice(rows, Number(countRows[0].total));
+          // Announced BEFORE the messages, so a client knows what follows is a
+          // tail rather than a history.
+          if (!res.writableEnded && !res.destroyed) {
+            res.write(backfillFrame(notice));
+          }
+        }
 
         for (const row of rows) {
           if (res.writableEnded || res.destroyed) return;
