@@ -416,6 +416,49 @@ async def create_chunks(
     return len(chunks), embedded
 
 
+async def vector_coverage(
+    pool: asyncpg.Pool, *, owner: str | None = None, collection_id: str | None = None
+) -> dict[str, int]:
+    """How much of the searchable corpus can be reached by the vector arm.
+
+    ``search_type: "hybrid"`` says the QUERY embedded. It says nothing about
+    whether the CORPUS did, and a caller reads it as if it did (#210).
+    vector_search_chunks filters `embedding IS NOT NULL`, so chunks ingested
+    during an embedding outage are excluded from the vector arm permanently —
+    they still match on keywords, but can never be found by a paraphrase.
+
+    Scoped exactly like the search it describes: a coverage figure computed
+    over a different visibility scope would tell one owner about another's
+    corpus, which is the same leak a mis-scoped COUNT would be.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    idx = 1
+
+    if owner is not None:
+        conditions.append(f"(sc.created_by = ${idx} OR sc.visibility = 'shared')")
+        params.append(owner)
+        idx += 1
+    if collection_id is not None:
+        conditions.append(f"sc.id = ${idx}")
+        params.append(UUID(collection_id))
+        idx += 1
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    row = await pool.fetchrow(
+        f"""SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE sch.embedding IS NOT NULL) AS embedded
+            FROM shared_chunks sch
+            JOIN shared_documents sd ON sch.document_id = sd.id
+            JOIN shared_sources ss ON sd.source_id = ss.id
+            JOIN shared_collections sc ON ss.collection_id = sc.id
+            {where}""",
+        *params,
+    )
+    return {"chunks": int(row["total"]), "embedded_chunks": int(row["embedded"])}
+
+
 def embedding_status_for(total: int, embedded: int) -> str:
     """Map coverage onto the column's four states.
 
@@ -627,6 +670,78 @@ async def hybrid_search_chunks(
 # ---------------------------------------------------------------------------
 
 
+async def documents_needing_embeddings(
+    pool: asyncpg.Pool, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Documents with at least one chunk missing a vector.
+
+    Driven off the chunks rather than off embedding_status, deliberately: the
+    status column is a report, and a backfill that trusted the report would be
+    unable to repair a row whose status was wrong. The chunks are the fact.
+    """
+    rows = await pool.fetch(
+        """SELECT d.id, d.title, d.chunk_count,
+                  COUNT(*) FILTER (WHERE c.embedding IS NULL) AS missing
+           FROM shared_documents d
+           JOIN shared_chunks c ON c.document_id = d.id
+           GROUP BY d.id, d.title, d.chunk_count
+           HAVING COUNT(*) FILTER (WHERE c.embedding IS NULL) > 0
+           ORDER BY d.created_at ASC
+           LIMIT $1""",
+        limit,
+    )
+    return [_serialize(dict(r)) for r in rows]
+
+
+async def chunks_missing_embeddings(
+    pool: asyncpg.Pool, document_id: str
+) -> list[dict[str, Any]]:
+    """The un-embedded chunks of one document, oldest first."""
+    rows = await pool.fetch(
+        """SELECT id, chunk_index, content
+           FROM shared_chunks
+           WHERE document_id = $1 AND embedding IS NULL
+           ORDER BY chunk_index ASC""",
+        UUID(document_id),
+    )
+    return [_serialize(dict(r)) for r in rows]
+
+
+async def set_chunk_embeddings(
+    pool: asyncpg.Pool, pairs: list[tuple[str, list[float]]]
+) -> int:
+    """Attach vectors to chunks that had none. Returns how many were set."""
+    if not pairs:
+        return 0
+    import json
+
+    await pool.executemany(
+        "UPDATE shared_chunks SET embedding = $2::vector WHERE id = $1",
+        [(UUID(cid), json.dumps(vec)) for cid, vec in pairs],
+    )
+    return len(pairs)
+
+
+async def recompute_document_embedding_status(
+    pool: asyncpg.Pool, document_id: str
+) -> str:
+    """Recompute the status from the chunks and store it.
+
+    The same recomputation migration 013 runs. Deriving it rather than setting
+    it from what the backfill believes it did is what keeps the column a
+    measurement instead of a second opinion.
+    """
+    row = await pool.fetchrow(
+        """SELECT COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded
+           FROM shared_chunks WHERE document_id = $1""",
+        UUID(document_id),
+    )
+    status = embedding_status_for(int(row["total"]), int(row["embedded"]))
+    await set_document_embedding_status(pool, document_id, status)
+    return status
+
+
 async def record_retrieval(
     pool: asyncpg.Pool,
     *,
@@ -731,6 +846,19 @@ async def get_shared_stats(
     )
     by_type = {r["source_type"]: r["count"] for r in type_source_rows}
 
+    # Embedding coverage (#210). Without this, "how much of the corpus is
+    # semantically searchable" was unanswerable without a SQL prompt, so a
+    # source degraded by a transient outage stayed degraded silently and
+    # indefinitely. by_document_status is what the backfill works from.
+    coverage_row = await pool.fetchrow(
+        """SELECT COUNT(*) AS chunks,
+                  COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded_chunks
+           FROM shared_chunks"""
+    )
+    doc_status_rows = await pool.fetch(
+        "SELECT embedding_status, COUNT(*) AS count FROM shared_documents GROUP BY embedding_status"
+    )
+
     # Corpus totals (current state)
     corpus_row = await pool.fetchrow(
         """SELECT (SELECT COUNT(*) FROM shared_collections) AS total_collections,
@@ -793,6 +921,17 @@ async def get_shared_stats(
             "total_sources": corpus_row["total_sources"],
             "total_chunks": corpus_row["total_chunks"],
             "total_tokens": corpus_row["total_tokens"],
+        },
+        # How much of the corpus the vector arm can actually reach (#210).
+        # Reported unconditionally, including when it is complete, so its
+        # absence never has to be interpreted.
+        "embedding_coverage": {
+            "chunks": int(coverage_row["chunks"]),
+            "embedded_chunks": int(coverage_row["embedded_chunks"]),
+            "complete": int(coverage_row["embedded_chunks"]) >= int(coverage_row["chunks"]),
+            "by_document_status": {
+                r["embedding_status"]: r["count"] for r in doc_status_rows
+            },
         },
         "usage": {
             "top_collections": [

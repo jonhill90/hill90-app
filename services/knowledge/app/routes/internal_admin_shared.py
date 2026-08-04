@@ -195,6 +195,61 @@ async def create_source(body: SourceCreate, request: Request) -> dict[str, Any]:
     return result
 
 
+@router.post("/embeddings/backfill")
+async def backfill_embeddings(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500, description="Max documents per run"),
+) -> dict[str, Any]:
+    """Embed chunks that have none, and recompute the documents' status.
+
+    The converge half of #210. Ingest stays best-effort — a transient AI-service
+    outage should not discard keyword-searchable content — but "best-effort"
+    only means something honest if the gap can later be closed. This is the
+    shared-knowledge counterpart of the entry reconciler.
+
+    Bounded per run and safe to call repeatedly: it works from the CHUNKS, so a
+    run that partially succeeds simply leaves less for the next one.
+    """
+    _verify_service_token(request)
+    pool = request.app.state.pool
+
+    from app.services.embeddings import generate_embeddings
+
+    docs = await shared_store.documents_needing_embeddings(pool, limit=limit)
+
+    repaired = 0
+    embedded_chunks = 0
+    still_incomplete = 0
+
+    for doc in docs:
+        chunks = await shared_store.chunks_missing_embeddings(pool, doc["id"])
+        if not chunks:
+            continue
+
+        vectors = await generate_embeddings([c["content"] for c in chunks])
+        # Positional pairing, and a SHORT response is partially applied rather
+        # than discarded — the same correction made in create_chunks. Zipping
+        # stops at the shorter sequence, which is exactly the prefix that came
+        # back.
+        pairs = [
+            (c["id"], v) for c, v in zip(chunks, vectors or [])
+        ]
+        embedded_chunks += await shared_store.set_chunk_embeddings(pool, pairs)
+
+        status = await shared_store.recompute_document_embedding_status(pool, doc["id"])
+        if status == "embedded":
+            repaired += 1
+        else:
+            still_incomplete += 1
+
+    return {
+        "documents_examined": len(docs),
+        "documents_repaired": repaired,
+        "documents_still_incomplete": still_incomplete,
+        "chunks_embedded": embedded_chunks,
+    }
+
+
 @router.get("/sources")
 async def list_sources(
     request: Request,

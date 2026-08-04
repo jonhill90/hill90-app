@@ -76,6 +76,16 @@ async def search_shared(
         search_type = "fts"
     duration_ms = int((time.monotonic() - t0) * 1000)
 
+    # What the vector arm could actually reach, scoped exactly like the search.
+    #
+    # search_type says whether the QUERY embedded. On its own a caller reads
+    # that as "semantic search covered the corpus", and it does not: chunks
+    # ingested while the embedder was down are excluded from the vector arm by
+    # `embedding IS NOT NULL` and can only ever match on keywords (#210).
+    coverage = await shared_store.vector_coverage(
+        pool, owner=owner, collection_id=collection_id
+    )
+
     results = enrich_results_with_quality(results)
     quality_summary = compute_quality_summary(results)
 
@@ -103,6 +113,13 @@ async def search_shared(
         "count": len(results),
         "search_type": search_type,
         "score_type": "hybrid" if search_type == "hybrid" else "ts_rank",
+        # Reported even when it is complete, so its ABSENCE never has to be
+        # interpreted: a caller that sees no field cannot tell an old build
+        # from a fully-embedded corpus.
+        "vector_coverage": {
+            **coverage,
+            "complete": coverage["embedded_chunks"] >= coverage["chunks"],
+        },
         "quality_summary": quality_summary,
     }
 

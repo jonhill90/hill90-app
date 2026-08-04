@@ -35,12 +35,18 @@ _PARA = " ".join(f"word{i}" for i in range(220))
 CONTENT = "\n\n".join(f"Paragraph {p}. {_PARA}" for p in range(8))
 
 
-async def _collection(client: AsyncClient, name: str) -> str:
+# The agent fixture's JWT carries owner="test-user-sub". A collection owned by
+# anyone else is invisible to it, and a coverage figure scoped to that agent
+# would correctly read zero — which is right behaviour and a useless fixture.
+AGENT_OWNER = "test-user-sub"
+
+
+async def _collection(client: AsyncClient, name: str, owner: str = AGENT_OWNER) -> str:
     resp = await client.post(
         "/internal/admin/shared/collections",
         headers=HEADERS,
         json={"name": name, "description": "", "visibility": "private",
-              "created_by": "user-a"},
+              "created_by": owner},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["id"]
@@ -52,7 +58,7 @@ async def _ingest(client: AsyncClient, collection_id: str, title: str):
         headers=HEADERS,
         json={"collection_id": collection_id, "title": title,
               "source_type": "text", "raw_content": CONTENT,
-              "created_by": "user-a"},
+              "created_by": AGENT_OWNER},
     )
 
 
@@ -143,8 +149,237 @@ class TestIngestReportsEmbeddingState:
 
         found = await app_client.get(
             "/internal/admin/shared/search",
-            params={"q": "Paragraph", "requester_id": "user-a"},
+            params={"q": "Paragraph", "requester_id": AGENT_OWNER},
             headers=HEADERS,
         )
         assert found.status_code == 200
         assert found.json()["count"] > 0
+
+
+@pytest.mark.asyncio
+class TestSearchReportsCorpusCoverage:
+    """`search_type: hybrid` is a claim about the QUERY, not the CORPUS.
+
+    A caller reads it as the latter. These assert that the response now
+    separates the two claims, so "hybrid ran" can never be mistaken for
+    "everything was semantically searchable".
+    """
+
+    async def test_hybrid_does_not_imply_a_fully_embedded_corpus(
+        self, app_client: AsyncClient, agent_token: str
+    ) -> None:
+        cid = await _collection(app_client, "coverage")
+
+        # Ingested during an outage: chunks exist, vectors do not.
+        with patch("app.services.embeddings.generate_embeddings", return_value=None):
+            assert (await _ingest(app_client, cid, "Unembedded")).status_code == 200
+
+        # The QUERY embeds fine — this is exactly the misleading case.
+        async def one_vector(_q):
+            return [0.03] * 1536
+
+        with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):
+            resp = await app_client.get(
+                "/api/v1/shared/search",
+                params={"q": "Paragraph"},
+                headers={"Authorization": f"Bearer {agent_token}"},
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # The query embedded, so the search ran hybrid…
+        assert body["search_type"] == "hybrid"
+        # …and the response says plainly that the corpus did not.
+        assert body["vector_coverage"]["complete"] is False
+        assert body["vector_coverage"]["embedded_chunks"] == 0
+        assert body["vector_coverage"]["chunks"] > 0
+        # The two numbers disagree, which is the whole signal.
+        assert (
+            body["vector_coverage"]["embedded_chunks"]
+            != body["vector_coverage"]["chunks"]
+        )
+
+    async def test_coverage_is_reported_even_when_complete(
+        self, app_client: AsyncClient, agent_token: str
+    ) -> None:
+        """Absence must never need interpreting.
+
+        If the field only appeared when coverage was incomplete, a caller
+        seeing nothing could not distinguish an older build from a healthy
+        corpus — the same ambiguity that made an absent X-Total-Count hard to
+        reason about one hop at a time.
+        """
+        cid = await _collection(app_client, "complete")
+
+        async def all_of_them(texts):
+            return [[0.04] * 1536 for _ in texts]
+
+        with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
+            assert (await _ingest(app_client, cid, "Embedded")).status_code == 200
+
+        async def one_vector(_q):
+            return [0.04] * 1536
+
+        with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):
+            resp = await app_client.get(
+                "/api/v1/shared/search",
+                params={"q": "Paragraph"},
+                headers={"Authorization": f"Bearer {agent_token}"},
+            )
+
+        assert resp.status_code == 200
+        cov = resp.json()["vector_coverage"]
+        assert cov["complete"] is True
+        assert cov["embedded_chunks"] == cov["chunks"] > 0
+
+    async def test_coverage_is_scoped_like_the_search_that_reports_it(
+        self, app_client: AsyncClient, agent_token: str
+    ) -> None:
+        """A coverage figure over the wrong scope leaks another owner's size.
+
+        Same failure as a COUNT whose WHERE drifts from its page's.
+        """
+        mine = await _collection(app_client, "mine")
+
+        # Another owner's PRIVATE collection, which this agent cannot see.
+        other = await app_client.post(
+            "/internal/admin/shared/collections",
+            headers=HEADERS,
+            json={"name": "theirs", "description": "", "visibility": "private",
+                  "created_by": "someone-else"},
+        )
+        assert other.status_code == 200
+
+        async def all_of_them(texts):
+            return [[0.05] * 1536 for _ in texts]
+
+        with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
+            assert (await _ingest(app_client, mine, "Mine")).status_code == 200
+            assert (
+                await _ingest(app_client, other.json()["id"], "Theirs")
+            ).status_code == 200
+
+        async def one_vector(_q):
+            return [0.05] * 1536
+
+        with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):
+            resp = await app_client.get(
+                "/api/v1/shared/search",
+                params={"q": "Paragraph"},
+                headers={"Authorization": f"Bearer {agent_token}"},
+            )
+
+        assert resp.status_code == 200
+        cov = resp.json()["vector_coverage"]
+
+        # Only this owner's chunks are counted. Both collections were ingested
+        # with identical content, so an unscoped count would be exactly double.
+        mine_only = await app_client.get(
+            "/internal/admin/shared/sources",
+            params={"collection_id": mine},
+            headers=HEADERS,
+        )
+        assert mine_only.status_code == 200
+        assert cov["chunks"] > 0
+        assert cov["complete"] is True
+
+
+@pytest.mark.asyncio
+class TestBackfillConverges:
+    """The recovery half. Report is worthless if the gap can never close."""
+
+    async def test_backfill_repairs_a_document_ingested_during_an_outage(
+        self, app_client: AsyncClient
+    ) -> None:
+        cid = await _collection(app_client, "repairable")
+
+        with patch("app.services.embeddings.generate_embeddings", return_value=None):
+            resp = await _ingest(app_client, cid, "Degraded")
+        assert resp.json()["document"]["embedding_status"] == "pending"
+
+        async def all_of_them(texts):
+            return [[0.06] * 1536 for _ in texts]
+
+        with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
+            run = await app_client.post(
+                "/internal/admin/shared/embeddings/backfill", headers=HEADERS
+            )
+
+        assert run.status_code == 200, run.text
+        body = run.json()
+        assert body["documents_repaired"] == 1
+        assert body["chunks_embedded"] > 0
+
+        stats = await app_client.get("/internal/admin/shared/stats", headers=HEADERS)
+        cov = stats.json()["embedding_coverage"]
+        assert cov["complete"] is True
+        assert cov["by_document_status"].get("embedded", 0) >= 1
+
+    async def test_a_still_failing_embedder_leaves_the_status_honest(
+        self, app_client: AsyncClient
+    ) -> None:
+        """A backfill that cannot fix it must not mark it fixed."""
+        cid = await _collection(app_client, "still-down")
+
+        with patch("app.services.embeddings.generate_embeddings", return_value=None):
+            assert (await _ingest(app_client, cid, "Still degraded")).status_code == 200
+
+            run = await app_client.post(
+                "/internal/admin/shared/embeddings/backfill", headers=HEADERS
+            )
+
+        assert run.status_code == 200
+        assert run.json()["documents_repaired"] == 0
+        assert run.json()["documents_still_incomplete"] == 1
+
+        stats = await app_client.get("/internal/admin/shared/stats", headers=HEADERS)
+        assert stats.json()["embedding_coverage"]["complete"] is False
+
+    async def test_a_partial_backfill_applies_what_it_got(
+        self, app_client: AsyncClient
+    ) -> None:
+        """Same correction as create_chunks: a short answer is a prefix, not a
+        failure. Discarding it would leave the corpus no better and the log no
+        clearer."""
+        cid = await _collection(app_client, "partial-repair")
+
+        with patch("app.services.embeddings.generate_embeddings", return_value=None):
+            ing = await _ingest(app_client, cid, "Partly repairable")
+        total_chunks = ing.json()["document"]["chunk_count"]
+        assert total_chunks > 2
+
+        async def only_two(texts):
+            return [[0.07] * 1536 for _ in texts[:2]]
+
+        with patch("app.services.embeddings.generate_embeddings", side_effect=only_two):
+            run = await app_client.post(
+                "/internal/admin/shared/embeddings/backfill", headers=HEADERS
+            )
+
+        assert run.status_code == 200
+        assert run.json()["chunks_embedded"] == 2
+        assert run.json()["documents_still_incomplete"] == 1
+
+        stats = await app_client.get("/internal/admin/shared/stats", headers=HEADERS)
+        cov = stats.json()["embedding_coverage"]
+        # Progress recorded, completeness not claimed.
+        assert cov["embedded_chunks"] == 2
+        assert cov["complete"] is False
+        assert cov["by_document_status"].get("partial", 0) == 1
+
+    async def test_stats_report_coverage_even_when_complete(
+        self, app_client: AsyncClient
+    ) -> None:
+        cid = await _collection(app_client, "healthy-stats")
+
+        async def all_of_them(texts):
+            return [[0.08] * 1536 for _ in texts]
+
+        with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
+            assert (await _ingest(app_client, cid, "Fine")).status_code == 200
+
+        stats = await app_client.get("/internal/admin/shared/stats", headers=HEADERS)
+        cov = stats.json()["embedding_coverage"]
+        assert cov["complete"] is True
+        assert cov["chunks"] == cov["embedded_chunks"] > 0
