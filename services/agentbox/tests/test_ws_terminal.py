@@ -1,12 +1,15 @@
 """Tests for app.ws_terminal — WebSocket PTY relay."""
 
 import json
+import logging
+from unittest.mock import patch
+
 import pytest
 from starlette.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute
 
-from app.ws_terminal import ws_terminal_handler
+from app.ws_terminal import _pty_reader, ws_terminal_handler
 
 
 WORK_TOKEN = "test-token-123"
@@ -57,3 +60,24 @@ class TestWsTerminalResize:
         assert parsed["type"] == "resize"
         assert parsed["cols"] == 80
         assert parsed["rows"] == 24
+
+
+class TestPtyReaderUnexpectedFailureIsVisible:
+    """#347 Defect 1: _pty_reader's catch-all logged at DEBUG while
+    server.py runs the process at INFO (logging.basicConfig(level=logging.INFO)),
+    so an unexpected reader failure was caught — no crash — but never reached
+    any log output. Reproduces the real logger name and the real process log
+    level rather than a generic default.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_is_visible_at_process_log_level(self, caplog):
+        caplog.set_level(logging.INFO, logger="app.ws_terminal")
+
+        with patch("app.ws_terminal.select.select", side_effect=RuntimeError("boom")):
+            await _pty_reader(master_fd=0, websocket=None)
+
+        assert any("PTY reader stopped" in r.message for r in caplog.records), (
+            "the failure was logged below the process's configured level and "
+            "never reached output — see #347 Defect 1"
+        )
