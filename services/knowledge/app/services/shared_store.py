@@ -950,3 +950,96 @@ async def get_shared_stats(
         },
         "since": since,
     }
+
+async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
+    """Nodes, edges and totals for the shared-knowledge graph (#300).
+
+    MOVED HERE FROM THE API, which queried `shared_collections`,
+    `shared_sources` and `knowledge_entries` through its own pool — tables that
+    live in THIS service's database and do not exist in that one. The endpoint
+    answered 500 on every call and the page rendered "Failed to load graph".
+
+    The bounded lists and the COUNT(*) totals came with it unchanged. Each count
+    is over the same WHERE as the list it describes, and the agent figure is
+    COUNT(DISTINCT agent_id) because its list is grouped — a plain COUNT(*)
+    there would count entries rather than agents (#215, #188).
+    """
+    async with pool.acquire() as conn:
+        collections = await conn.fetch(
+            "SELECT id, name, visibility FROM shared_collections ORDER BY name LIMIT $1",
+            limit,
+        )
+        sources = await conn.fetch(
+            """SELECT ss.id, ss.title, ss.source_type, ss.collection_id,
+                      (SELECT count(*) FROM shared_chunks sc
+                        JOIN shared_documents sd ON sc.document_id = sd.id
+                       WHERE sd.source_id = ss.id) AS chunk_count
+                 FROM shared_sources ss
+                WHERE ss.status = 'active'
+             ORDER BY ss.title LIMIT $1""",
+            limit,
+        )
+        agent_entries = await conn.fetch(
+            """SELECT agent_id, count(*) AS entry_count, max(updated_at) AS last_updated
+                 FROM knowledge_entries WHERE status = 'active'
+             GROUP BY agent_id ORDER BY agent_id LIMIT $1""",
+            limit,
+        )
+        totals = await conn.fetchrow(
+            """SELECT
+                 (SELECT count(*) FROM shared_collections) AS collections,
+                 (SELECT count(*) FROM shared_sources WHERE status = 'active') AS sources,
+                 (SELECT count(DISTINCT agent_id) FROM knowledge_entries WHERE status = 'active')
+                   AS agents_with_knowledge"""
+        )
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
+    collection_ids = set()
+    for c in collections:
+        collection_ids.add(str(c["id"]))
+        nodes.append({
+            "id": f"col-{c['id']}", "type": "collection", "label": c["name"],
+            "meta": {"visibility": c["visibility"]},
+        })
+
+    # An edge is emitted only when its collection node is present. Truncating
+    # the collections but not the sources would otherwise point edges at nodes
+    # that do not exist, which is worse than a smaller graph: a renderer either
+    # drops them silently or lays out around a phantom.
+    dangling_edges = 0
+    for s in sources:
+        nodes.append({
+            "id": f"src-{s['id']}", "type": "source", "label": s["title"],
+            "meta": {"source_type": s["source_type"], "chunk_count": int(s["chunk_count"])},
+        })
+        if str(s["collection_id"]) in collection_ids:
+            edges.append({"source": f"col-{s['collection_id']}", "target": f"src-{s['id']}", "label": "contains"})
+        else:
+            dangling_edges += 1
+
+    for a in agent_entries:
+        nodes.append({
+            "id": f"agent-{a['agent_id']}", "type": "agent", "label": a["agent_id"],
+            "meta": {"entry_count": int(a["entry_count"])},
+        })
+
+    total = {
+        "collections": int(totals["collections"]),
+        "sources": int(totals["sources"]),
+        "agents_with_knowledge": int(totals["agents_with_knowledge"]),
+    }
+    shown = {
+        "collections": len(collections),
+        "sources": len(sources),
+        "agents_with_knowledge": len(agent_entries),
+    }
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "total": total,
+        "shown": shown,
+        "dangling_edges": dangling_edges,
+        "truncated": any(shown[k] < total[k] for k in total),
+    }

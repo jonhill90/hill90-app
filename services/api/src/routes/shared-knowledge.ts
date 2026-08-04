@@ -20,130 +20,32 @@ const router = Router();
 
 router.get('/graph', requireRole('user'), async (req: Request, res: Response) => {
   try {
-    const { getPool } = await import('../db/pool');
-    const pool = getPool();
-
     const page = parsePageParams(req);
     if ('error' in page) {
       res.status(400).json({ error: page.error });
       return;
     }
-    const limit = page.limit ?? DEFAULT_PAGE;
 
-    // Every list here is BOUNDED, and every stat below comes from COUNT(*)
-    // rather than from the array's length (#215).
+    // #300: PROXIED, not queried. This handler used to run four statements
+    // through `getPool()` against `shared_collections`, `shared_sources` and
+    // `knowledge_entries` — tables that live in the KNOWLEDGE service's
+    // database and do not exist in this one. Measured: five such tables in
+    // `hill90_akm`, zero in `hill90_api`. So the endpoint answered 500 on every
+    // call, and the page rendered "Failed to load graph" — a visibly broken
+    // feature rather than a silent one, and the only reason anyone could have
+    // known.
     //
-    // Those two changes are one change. `collections.length` was correct only
-    // because the query returned everything — a length that is correct only
-    // because nothing is bounded is a defect waiting for someone to bound it.
-    // Adding the LIMIT without replacing the stats would have silently capped
-    // a figure rendered to a user at SharedKnowledgeClient.tsx:155, which is
-    // exactly the regression this codebase already shipped once in #188.
-    const [
-      { rows: collections },
-      { rows: sources },
-      { rows: agentEntries },
-      { rows: countRows },
-    ] = await Promise.all([
-      pool.query(
-        `SELECT id, name, visibility FROM shared_collections ORDER BY name LIMIT $1`,
-        [limit],
-      ),
-      pool.query(
-        `SELECT ss.id, ss.title, ss.source_type, ss.collection_id,
-                (SELECT count(*) FROM shared_chunks sc
-                 JOIN shared_documents sd ON sc.document_id = sd.id
-                 WHERE sd.source_id = ss.id) AS chunk_count
-         FROM shared_sources ss WHERE ss.status = 'active' ORDER BY ss.title LIMIT $1`,
-        [limit],
-      ),
-      pool.query(
-        `SELECT agent_id, count(*) AS entry_count, max(updated_at) AS last_updated
-         FROM knowledge_entries WHERE status = 'active'
-         GROUP BY agent_id ORDER BY agent_id LIMIT $1`,
-        [limit],
-      ),
-      // Each COUNT is over the same WHERE as the list it describes. The agent
-      // figure is COUNT(DISTINCT agent_id) because its list is grouped — a
-      // plain COUNT(*) there would count entries, not agents.
-      pool.query(
-        `SELECT
-           (SELECT count(*) FROM shared_collections) AS collections,
-           (SELECT count(*) FROM shared_sources WHERE status = 'active') AS sources,
-           (SELECT count(DISTINCT agent_id) FROM knowledge_entries WHERE status = 'active')
-             AS agents_with_knowledge`,
-      ),
-    ]);
-
-    // Build graph
-    const nodes: Array<{ id: string; type: string; label: string; meta?: Record<string, unknown> }> = [];
-    const edges: Array<{ source: string; target: string; label?: string }> = [];
-
-    // Add collection nodes
-    const collectionIds = new Set<string>();
-    for (const c of collections) {
-      collectionIds.add(String(c.id));
-      nodes.push({ id: `col-${c.id}`, type: 'collection', label: c.name, meta: { visibility: c.visibility } });
-    }
-
-    // Add source nodes + edges to collections
-    //
-    // The edge is emitted only when its collection node is present. Truncating
-    // the collections but not the sources would otherwise produce edges
-    // pointing at nodes that do not exist, which is worse than a smaller
-    // graph: a renderer either drops them silently or lays out around a
-    // phantom.
-    let danglingEdges = 0;
-    for (const s of sources) {
-      nodes.push({ id: `src-${s.id}`, type: 'source', label: s.title, meta: { source_type: s.source_type, chunk_count: Number(s.chunk_count) } });
-      if (collectionIds.has(String(s.collection_id))) {
-        edges.push({ source: `col-${s.collection_id}`, target: `src-${s.id}`, label: 'contains' });
-      } else {
-        danglingEdges++;
-      }
-    }
-
-    // Add agent nodes + edges
-    for (const a of agentEntries) {
-      nodes.push({ id: `agent-${a.agent_id}`, type: 'agent', label: a.agent_id, meta: { entry_count: Number(a.entry_count) } });
-    }
-
-    const total = {
-      collections: Number(countRows[0].collections),
-      sources: Number(countRows[0].sources),
-      agents_with_knowledge: Number(countRows[0].agents_with_knowledge),
-    };
-    const shown = {
-      collections: collections.length,
-      sources: sources.length,
-      agents_with_knowledge: agentEntries.length,
-    };
-
-    res.json({
-      nodes,
-      edges,
-      // `stats` keeps its name and its meaning — the size of the corpus — and
-      // is now measured rather than inferred from the page.
-      stats: total,
-      // What this response actually contains, so a partial graph can say so
-      // instead of looking like a small corpus. Present even when nothing was
-      // truncated, so its absence never has to be interpreted.
-      shown,
-      truncated:
-        shown.collections < total.collections ||
-        shown.sources < total.sources ||
-        shown.agents_with_knowledge < total.agents_with_knowledge,
-      dangling_edges_omitted: danglingEdges,
-    });
-  } catch (err) {
+    // The bounded lists, the COUNT(*) totals and the dangling-edge rule moved
+    // WITH the queries rather than being reimplemented here over paginated
+    // responses: the count belongs next to the data it counts, and two copies
+    // of that logic is how the twin defects in this repository start.
+    const { status, data } = await skProxy.getGraph(page.limit ?? DEFAULT_PAGE);
+    res.status(status).json(data);
+  } catch (err: any) {
     console.error('[shared-knowledge] Graph error:', err);
-    res.status(500).json({ error: 'Failed to build knowledge graph' });
+    res.status(502).json({ error: 'Knowledge service unreachable' });
   }
 });
-
-// ---------------------------------------------------------------------------
-// Stats
-// ---------------------------------------------------------------------------
 
 router.get('/stats', requireRole('user'), async (req: Request, res: Response) => {
   try {
