@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ChatAgent } from './ChatLayout'
+import { statusDotClass, statusLabel, isUnknownStatus, UNVERIFIED_HINT } from '@/utils/agent-status'
 
 interface Props {
   agents: ChatAgent[]
@@ -133,12 +134,16 @@ export default function MentionInput({ agents, value, onChange, onSubmit, disabl
               data-testid="mention-option"
             >
               <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  agent.status === 'running' ? 'bg-brand-400' : 'bg-mountain-500'
-                }`}
+                className={`w-1.5 h-1.5 rounded-full ${statusDotClass(agent.status)}`}
+                title={isUnknownStatus(agent.status) ? UNVERIFIED_HINT : undefined}
+                data-testid="mention-status-dot"
+                data-status-label={statusLabel(agent.status)}
               />
               <span className="font-medium">@{agent.agent_id}</span>
               <span className="text-mountain-500 text-xs truncate">{agent.name}</span>
+              {isUnknownStatus(agent.status) && (
+                <span className="text-yellow-400 text-[10px] ml-auto flex-shrink-0">unverified</span>
+              )}
             </button>
           ))}
         </div>

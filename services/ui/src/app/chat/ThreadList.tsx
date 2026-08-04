@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { Users, Trash2 } from 'lucide-react'
 import type { ChatThread } from './ChatLayout'
 import AgentAvatar from '@/components/AgentAvatar'
+import { statusTone, isUnknownStatus, UNVERIFIED_HINT } from '@/utils/agent-status'
 
 const SEEN_KEY = 'hill90:thread-seen'
 
@@ -127,8 +128,22 @@ export default function ThreadList({ threads, loading, activeThreadId, onDelete 
                     <span className="text-sm font-medium text-gray-200 truncate">
                       {displayTitle}
                     </span>
-                    {!isGroup && thread.agent?.status === 'running' && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-brand-400 flex-shrink-0" />
+                    {/* Three renderings: present for running, a yellow pulse
+                        for a status the API could not verify, and absent only
+                        when the agent is actually known to be inactive (#251).
+                        Absence used to mean both of the last two. */}
+                    {!isGroup && statusTone(thread.agent?.status) === 'running' && (
+                      <span
+                        className="w-1.5 h-1.5 rounded-full bg-brand-400 flex-shrink-0"
+                        data-testid="thread-running-dot"
+                      />
+                    )}
+                    {!isGroup && isUnknownStatus(thread.agent?.status) && (
+                      <span
+                        className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse flex-shrink-0"
+                        title={UNVERIFIED_HINT}
+                        data-testid="thread-unverified-dot"
+                      />
                     )}
                     {unread && (
                       <span className="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0" data-testid="unread-dot" />
