@@ -14,6 +14,11 @@ var searchCmd = &cobra.Command{
 	Long:  "Full-text search across knowledge entries.",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Args are already validated, so anything from here is an operational
+		// failure. Without this cobra prints the whole usage block after the
+		// error, which buries the one line the operator needs.
+		cmd.SilenceUsage = true
+
 		c, err := client.NewFromEnv()
 		if err != nil {
 			return err
@@ -26,8 +31,7 @@ var searchCmd = &cobra.Command{
 
 		results, ok := result["results"].([]interface{})
 		if !ok {
-			fmt.Fprintln(os.Stdout, "no results")
-			return nil
+			return errUnexpectedShape("results", result)
 		}
 
 		for _, r := range results {

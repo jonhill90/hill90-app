@@ -16,6 +16,8 @@ var contextCmd = &cobra.Command{
 	Short: "Get context summary",
 	Long:  "Retrieve the deterministic context summary for this agent.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+
 		c, err := client.NewFromEnv()
 		if err != nil {
 			return err
@@ -35,8 +37,7 @@ var contextCmd = &cobra.Command{
 		// Pretty print sections
 		sections, ok := result["sections"].([]interface{})
 		if !ok {
-			fmt.Fprintln(os.Stdout, "(no context)")
-			return nil
+			return errUnexpectedShape("sections", result)
 		}
 
 		for _, s := range sections {
