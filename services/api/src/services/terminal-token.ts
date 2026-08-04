@@ -55,6 +55,34 @@ export async function verifyTerminalToken(
       return refuse('no exp claim — the proxy cannot end the session with the credential');
     }
 
+    // A TOKEN WITH NO SUBJECT IS NOT A PRINCIPAL (#313, following #306).
+    //
+    // This boundary must not be more permissive than the HTTP one #306 already
+    // closed — both are the same claim, that the caller is identifiable, and a
+    // terminal session with no identifiable owner is worse than a request with
+    // one: it persists and does things after this check has passed. Before this,
+    // `sub` fell back to '', which reached `isParticipant(threadId, '')` in
+    // terminal-proxy.ts — reliably false since no real participant row ever has
+    // an empty participant_id, so the caller was refused, but with a 403
+    // "not a participant" instead of a 401 naming the actual defect: the
+    // credential itself carried no identity. An ADMIN token with no `sub` was
+    // worse — both uses of `user.sub` in terminal-proxy.ts are skipped for
+    // admins, so it sailed through with no consequence at all.
+    //
+    // REFUSED HERE, AT VERIFY TIME — not downstream in terminal-proxy.ts. A
+    // sub-less token must never reach `wss.handleUpgrade`; refusing after the
+    // socket is already upgraded would be a different and worse thing than
+    // refusing before it.
+    //
+    // WHAT TODAY'S EXPOSURE ACTUALLY IS: production's hill90-ui carries the
+    // `basic` client scope (#278, #306), so no production token lacks `sub`.
+    // This path is reachable on a misconfigured or local realm only — the same
+    // bound #306 stated for the HTTP boundary. That bound is real, not a reason
+    // to leave this boundary looser than the one already closed.
+    if (typeof payload.sub !== 'string' || payload.sub.length === 0) {
+      return refuse('no sub claim — the caller cannot be identified');
+    }
+
     // rolesFrom() reads ONLY resource_access.<client>.roles. This used to read
     // realm_access.roles FIRST, which in the shared platform realm would honour a
     // platform admin's realm role `admin` here.
@@ -62,12 +90,7 @@ export async function verifyTerminalToken(
 
     // exp is passed through, not just checked. The proxy ends the session when the
     // credential does; without this it had no way to know when that was.
-    //
-    // NOTE, and it is deliberately left as it was: `sub` still falls back to ''.
-    // #306 makes the HTTP boundary refuse a token with no `sub`; whether this path
-    // should do the same is that issue's question, not this one's, and changing it
-    // here would split the decision across two pull requests.
-    return { sub: payload.sub || '', roles, exp: payload.exp };
+    return { sub: payload.sub, roles, exp: payload.exp };
   } catch (err) {
     const e = err as Error & { expiredAt?: Date };
     const detail = e && e.name ? `${e.name}: ${e.message}` : 'unknown error';
