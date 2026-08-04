@@ -112,6 +112,8 @@ function BrowserView({ threadId, active }: { threadId: string; active: boolean }
   const [popoverPos, setPopoverPos] = useState<{ x: number; y: number } | null>(null)
   const [description, setDescription] = useState('')
   const [sending, setSending] = useState(false)
+  /** Why the last describe-send failed, kept beside the text it could not send. */
+  const [describeError, setDescribeError] = useState<string | null>(null)
   const [browserFocused, setBrowserFocused] = useState(false)
   const imgRef = useRef<HTMLImageElement>(null)
   const browserRef = useRef<HTMLDivElement>(null)
@@ -350,13 +352,42 @@ function BrowserView({ threadId, active }: { threadId: string; active: boolean }
       el.outerHTML ? `**HTML:** \`${el.outerHTML.slice(0, 200)}\`` : null,
       `**Request:** ${desc}`,
     ].filter(Boolean).join('\n')
+    /*
+     * THE POPOVER CLOSES ONLY IF THE MESSAGE WAS ACTUALLY SENT.
+     *
+     * This used to `await fetch(...)` with no `res.ok` check inside a
+     * `catch { /* ignore *\/ }`, and then clear unconditionally. A 4xx, a 5xx or a
+     * dropped connection all looked exactly like success: the popover closed the
+     * way it does when the send works, and the typed description was ERASED — so
+     * the user believed their request had gone to the agent, nothing had, and the
+     * text was not even recoverable to retry.
+     *
+     * Nothing corrected it afterwards. A successful send shows up in the chat
+     * stream; a failed one leaves no trace at all, and an absent message in a busy
+     * thread is not something anyone reads as "my send failed".
+     *
+     * This is ChatView.handleSend's pattern — the same operation, done correctly
+     * a few files away: keep the user's text, say what went wrong, and let them
+     * try again. Matching it rather than inventing a third way of handling this.
+     */
+    setDescribeError(null)
     try {
-      await fetch(`/api/chat/${threadId}/messages`, {
+      const res = await fetch(`/api/chat/${threadId}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: msg }),
       })
-    } catch { /* ignore */ }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setDescribeError(data.error || data.detail || `Could not send (${res.status})`)
+        setSending(false)
+        return
+      }
+    } catch {
+      setDescribeError('Could not send — check the connection and try again')
+      setSending(false)
+      return
+    }
     setSending(false)
     setSelectedElement(null)
     setPopoverPos(null)
@@ -515,6 +546,16 @@ function BrowserView({ threadId, active }: { threadId: string; active: boolean }
                 placeholder="What should change here?"
                 className="w-full rounded border border-navy-600 bg-navy-900 px-2 py-1 text-xs text-white placeholder-mountain-500 focus:border-brand-500 focus:outline-none mb-2"
               />
+              {/* Beside the text it could not send, so the retry is one click away. */}
+              {describeError && (
+                <p
+                  className="text-xs text-red-400 mb-2"
+                  role="alert"
+                  data-testid="describe-error"
+                >
+                  {describeError}
+                </p>
+              )}
               <div className="flex items-center gap-1">
                 <button
                   onClick={handleSendDescription}
@@ -524,7 +565,7 @@ function BrowserView({ threadId, active }: { threadId: string; active: boolean }
                   {sending ? 'Sending...' : 'Send'}
                 </button>
                 <button
-                  onClick={() => { setSelectedElement(null); setPopoverPos(null) }}
+                  onClick={() => { setSelectedElement(null); setPopoverPos(null); setDescribeError(null) }}
                   className="px-2 py-1 text-xs text-mountain-400 hover:text-white cursor-pointer"
                 >
                   Cancel

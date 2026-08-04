@@ -14,6 +14,7 @@ export default function SettingsClient() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const fetchPrefs = useCallback(async () => {
     try {
@@ -28,9 +29,29 @@ export default function SettingsClient() {
 
   useEffect(() => { fetchPrefs() }, [fetchPrefs])
 
-  const savePrefs = async (updates: Partial<Preferences>) => {
+  /**
+   * Save, and PUT THE TOGGLE BACK if the server did not accept it.
+   *
+   * The caller flips the toggle optimistically before calling this, which is the
+   * right thing to do — a settings switch that waits for a round-trip feels
+   * broken. What was missing is the other half: on failure this did nothing at
+   * all, so the toggle kept showing the new value while the server kept the old
+   * one, and nothing ever corrected it. Preferences are fetched ONCE on mount and
+   * never re-polled, so the lie survived for the life of the page. For
+   * `email_notifications` that means believing you turned emails off while they
+   * keep arriving — the contradiction surfaces somewhere the UI cannot be blamed.
+   *
+   * `previous` is captured by the caller and handed in, because only the caller
+   * knows what the value was before it flipped it.
+   *
+   * This is ChatView.handleSend's pattern, not a new one: clear/flip optimistically,
+   * restore the old value and show an error if the request fails. Matching a
+   * convention the repository already agreed on beats introducing a third opinion.
+   */
+  const savePrefs = async (updates: Partial<Preferences>, previous: Partial<Preferences>) => {
     setSaving(true)
     setSaved(false)
+    setError(null)
     try {
       const res = await fetch('/api/profile/preferences', {
         method: 'PUT',
@@ -42,9 +63,17 @@ export default function SettingsClient() {
         setPrefs(p => ({ ...p, ...data }))
         setSaved(true)
         setTimeout(() => setSaved(false), 2000)
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setPrefs(p => ({ ...p, ...previous }))
+        setError(data.error || data.detail || `Could not save (${res.status})`)
       }
-    } catch { /* ignore */ }
-    finally { setSaving(false) }
+    } catch {
+      setPrefs(p => ({ ...p, ...previous }))
+      setError('Could not save — the change was not applied')
+    } finally {
+      setSaving(false)
+    }
   }
 
   if (loading) {
@@ -57,6 +86,18 @@ export default function SettingsClient() {
         <h1 className="text-2xl font-bold text-white">Settings</h1>
         {saved && <span className="flex items-center gap-1 text-sm text-brand-400"><Check className="w-4 h-4" /> Saved</span>}
       </div>
+
+      {/* A reverted toggle with no explanation is still a silent failure: the user
+          sees the switch snap back and cannot tell whether they mis-clicked. */}
+      {error && (
+        <div
+          className="rounded-lg border border-red-700 bg-red-900/20 p-3 mb-4"
+          role="alert"
+          data-testid="settings-error"
+        >
+          <p className="text-sm text-red-400">{error}</p>
+        </div>
+      )}
 
       <div className="space-y-6">
         {/* Theme */}
@@ -86,8 +127,9 @@ export default function SettingsClient() {
                 checked={prefs.in_app_notifications}
                 onChange={(e) => {
                   const val = e.target.checked
+                  const previous = { in_app_notifications: prefs.in_app_notifications }
                   setPrefs(p => ({ ...p, in_app_notifications: val }))
-                  savePrefs({ in_app_notifications: val })
+                  savePrefs({ in_app_notifications: val }, previous)
                 }}
                 className="h-4 w-4 rounded border-navy-600 bg-navy-900 text-brand-500 focus:ring-brand-500"
               />
@@ -102,8 +144,9 @@ export default function SettingsClient() {
                 checked={prefs.email_notifications}
                 onChange={(e) => {
                   const val = e.target.checked
+                  const previous = { email_notifications: prefs.email_notifications }
                   setPrefs(p => ({ ...p, email_notifications: val }))
-                  savePrefs({ email_notifications: val })
+                  savePrefs({ email_notifications: val }, previous)
                 }}
                 className="h-4 w-4 rounded border-navy-600 bg-navy-900 text-brand-500 focus:ring-brand-500"
               />
