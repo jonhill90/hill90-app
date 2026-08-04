@@ -135,6 +135,25 @@ describe('the WebSocket terminal verifier', () => {
     expect(warned.join('\n')).toMatch(/issuer/i);
   });
 
+  // #313: this boundary must not be more permissive than the HTTP one #306 fixed.
+  // Both are the same claim — that the caller is identifiable — and a terminal
+  // session with no identifiable owner is worse than a request with one, because
+  // it persists and does things after the check has passed.
+  it('refuses a token with no sub AND records the cause — the same claim #306 makes at the HTTP boundary', async () => {
+    const token = jwt.sign({}, privateKey, { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '1h' });
+    const principal = await verifyTerminalToken(token, { issuer: TEST_ISSUER, getSigningKey });
+    expect(principal).toBeNull();
+    expect(warned.join('\n')).toMatch(/terminal-proxy/);
+    expect(warned.join('\n')).toMatch(/sub/i);
+  });
+
+  it('refuses an empty-string sub too, not only a missing one', async () => {
+    const token = jwt.sign({ sub: '' }, privateKey, { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '1h' });
+    const principal = await verifyTerminalToken(token, { issuer: TEST_ISSUER, getSigningKey });
+    expect(principal).toBeNull();
+    expect(warned.join('\n')).toMatch(/sub/i);
+  });
+
   it('never writes the token into the record', async () => {
     const token = jwt.sign({ sub: 'u1' }, privateKey, { algorithm: 'RS256', issuer: 'https://elsewhere/realms/x', expiresIn: '1h' });
     await verifyTerminalToken(token, { issuer: TEST_ISSUER, getSigningKey });
