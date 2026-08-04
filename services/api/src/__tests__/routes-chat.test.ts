@@ -410,17 +410,143 @@ describe('Chat thread CRUD', () => {
         { participant_id: 'regular-user', participant_type: 'human', role: 'owner',
           joined_at: new Date(), left_at: null, agent_id: null, agent_name: null, agent_status: null },
       ]})
-      .mockResolvedValueOnce({ rows: [  // messages
+      .mockResolvedValueOnce({ rows: [  // messages page
         { id: 'msg-1', seq: 1, author_id: 'regular-user', author_type: 'human', role: 'user',
           content: 'Hello', status: 'complete', reply_to: null, target_agents: null,
           created_at: new Date().toISOString() },
-      ]});
+      ]})
+      // The page and its COUNT(*) now run together (#203).
+      .mockResolvedValueOnce({ rows: [{ total: '1' }] });
 
     const res = await request(app)
       .get('/chat/threads/thread-1')
       .set('Authorization', `Bearer ${userToken}`);
     expect(res.status).toBe(200);
     expect(res.body.messages).toHaveLength(1);
+  });
+
+  // ── #203: the thread body is bounded, and the truncation is not silent ──
+  //
+  // Two things must hold together, and a fixture that checks only one is
+  // passed by a different broken implementation:
+  //   * the total DISAGREES with the page (3 vs 2) — else `messages.length`
+  //     passes, and a total derived from the page always agrees with itself;
+  //   * the page is the NEWEST end — else a naive `LIMIT` on the existing
+  //     `ORDER BY seq ASC` passes while showing a user the start of a
+  //     conversation instead of the message just sent.
+
+  function threadPreamble() {
+    return mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1 }] })  // isParticipant
+      .mockResolvedValueOnce({                        // thread
+        rows: [{ id: 'thread-1', type: 'direct', title: 'Test', created_by: 'regular-user',
+                 created_at: new Date(), updated_at: new Date() }],
+      })
+      .mockResolvedValueOnce({ rows: [] });           // participants
+  }
+
+  function msg(seq: number) {
+    return { id: `msg-${seq}`, seq, author_id: 'regular-user', author_type: 'human',
+             role: 'user', content: `m${seq}`, status: 'complete', reply_to: null,
+             target_agents: null, created_at: new Date().toISOString() };
+  }
+
+  it('returns the NEWEST page and a total that DIFFERS from it', async () => {
+    // The route selects seq DESC then reverses, so the driver hands back
+    // newest-first exactly as Postgres would.
+    threadPreamble()
+      // limit=2, so the route asks for 3; the third row is the probe that
+      // proves older messages exist without a second query.
+      .mockResolvedValueOnce({ rows: [msg(3), msg(2), msg(1)] })
+      .mockResolvedValueOnce({ rows: [{ total: '3' }] });  // COUNT over the same WHERE
+
+    const res = await request(app)
+      .get('/chat/threads/thread-1?limit=2')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toHaveLength(2);
+    expect(res.body.message_total).toBe(3);
+    expect(res.body.has_older).toBe(true);
+
+    // Newest two, presented oldest-first for display. Seq 1 is absent: that is
+    // the point — the tail is what a reader needs, not the head.
+    expect(res.body.messages.map((m: any) => m.seq)).toEqual([2, 3]);
+  });
+
+  it('asks the database for the newest rows, not the oldest', async () => {
+    threadPreamble()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] });
+
+    await request(app)
+      .get('/chat/threads/thread-1?limit=10')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    const sql = mockQuery.mock.calls[3][0];
+    expect(sql).toContain('ORDER BY seq DESC');
+    expect(sql).toContain('LIMIT');
+  });
+
+  it('counts the same WHERE as the page', async () => {
+    threadPreamble()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] });
+
+    await request(app)
+      .get('/chat/threads/thread-1')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    const countSql = mockQuery.mock.calls[4][0];
+    expect(countSql).toContain('COUNT(*)');
+    expect(countSql).toContain('thread_id = $1');
+    expect(mockQuery.mock.calls[4][1]).toEqual(['thread-1']);
+  });
+
+  it('walks backwards with before_seq rather than an offset', async () => {
+    threadPreamble()
+      .mockResolvedValueOnce({ rows: [msg(1)] })
+      .mockResolvedValueOnce({ rows: [{ total: '3' }] });
+
+    const res = await request(app)
+      .get('/chat/threads/thread-1?limit=2&before_seq=2')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    const sql = mockQuery.mock.calls[3][0];
+    // seq is bumped by the stale reconcile (`seq = nextval(...)`), so the head
+    // of this table reorders. An OFFSET over that skips and repeats rows.
+    expect(sql).toContain('seq <');
+    expect(sql).not.toContain('OFFSET');
+    expect(res.body.has_older).toBe(false);  // 1 message at seq 1, nothing older
+  });
+
+  it('says has_older is false when the page IS the whole thread', async () => {
+    threadPreamble()
+      .mockResolvedValueOnce({ rows: [msg(2), msg(1)] })   // fewer than the probe asked for
+      .mockResolvedValueOnce({ rows: [{ total: '2' }] });
+
+    const res = await request(app)
+      .get('/chat/threads/thread-1')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.body.message_total).toBe(2);
+    expect(res.body.has_older).toBe(false);
+  });
+
+  it.each([
+    ['limit=0', 'limit must be between'],
+    ['limit=5000', 'limit must be between'],
+    ['before_seq=abc', 'before_seq must be an integer'],
+  ])('rejects %s rather than silently clamping', async (qs, message) => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 1 }] }); // isParticipant
+
+    const res = await request(app)
+      .get(`/chat/threads/thread-1?${qs}`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(message);
   });
 
   it('GET /chat/threads/:id returns 404 for non-participant', async () => {
@@ -1684,7 +1810,7 @@ describe('Chat SSE stream', () => {
   it('GET /chat/threads/:id/stream returns SSE headers and initial data', async () => {
     // isParticipant
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 1 }] });
-    // Initial poll
+    // Initial poll — now the bounded backfill (#203)
     mockQuery.mockResolvedValueOnce({
       rows: [{
         id: 'msg-1', seq: 5, author_id: 'user-1', author_type: 'human',
@@ -1694,6 +1820,10 @@ describe('Chat SSE stream', () => {
         error_message: null, created_at: new Date().toISOString(),
       }],
     });
+    // …and its COUNT(*), which the backfill notice reports. 9 against 1 sent:
+    // the two numbers must disagree, or an implementation reporting
+    // rows.length would satisfy this fixture.
+    mockQuery.mockResolvedValueOnce({ rows: [{ total: '9' }] });
 
     const res = await request(app)
       .get('/chat/threads/thread-1/stream')
@@ -1703,8 +1833,10 @@ describe('Chat SSE stream', () => {
         let data = '';
         res.on('data', (chunk: Buffer) => {
           data += chunk.toString();
-          // Abort after receiving first event
-          res.destroy();
+          // Wait for the message frame rather than the first chunk. The
+          // backfill notice is written first now, and whether the two land in
+          // one TCP chunk is not something a test should depend on.
+          if (data.includes('event: message')) res.destroy();
         });
         res.on('end', () => callback(null, data));
         res.on('error', () => callback(null, data));
@@ -1717,6 +1849,17 @@ describe('Chat SSE stream', () => {
     expect(res.body).toContain('event: message');
     expect(res.body).toContain('id: 5');
     expect(res.body).toContain('msg-1');
+
+    // The truncation notice arrives BEFORE the messages, so a client knows
+    // what follows is a tail rather than a history.
+    expect(res.body).toContain('event: backfill');
+    expect(res.body.indexOf('event: backfill')).toBeLessThan(res.body.indexOf('event: message'));
+    const notice = JSON.parse(
+      res.body.slice(res.body.indexOf('event: backfill')).split('data: ')[1].split('\n')[0]
+    );
+    expect(notice.sent).toBe(1);
+    expect(notice.total).toBe(9);       // COUNT(*), not rows.length
+    expect(notice.has_older).toBe(true);
   });
 });
 

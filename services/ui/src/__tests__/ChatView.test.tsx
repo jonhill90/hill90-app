@@ -104,6 +104,112 @@ describe('ChatView', () => {
     onThreadUpdated: vi.fn(),
   }
 
+  // ── #203: a truncated thread must say so ──────────────────────────────
+  //
+  // The stream used to replay every message ever sent. It now replays a tail,
+  // and the notice below is the only thing standing between that and a chat
+  // that silently drops its own history. Every fixture makes the two numbers
+  // DISAGREE — 2 shown, 40,000 in the thread — because a fixture where they
+  // match is passed by an implementation that renders messages.length.
+
+  function emit(es: MockEventSource, type: string, payload: unknown) {
+    for (const cb of es.listeners[type] || []) cb({ data: JSON.stringify(payload) })
+  }
+
+  function msg(seq: number) {
+    return {
+      id: `m${seq}`, seq, author_id: 'user-1', author_type: 'human', role: 'user',
+      content: `hello ${seq}`, status: 'complete', created_at: '2026-01-01T00:00:00Z',
+    }
+  }
+
+  it('says it is showing the last N of M when the stream truncated', async () => {
+    render(<ChatView {...defaultProps} />)
+    const es = MockEventSource.instances[0]
+
+    emit(es, 'backfill', { sent: 2, total: 40000, oldest_seq_sent: 39999, has_older: true })
+    emit(es, 'message', msg(39999))
+    emit(es, 'message', msg(40000))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('older-messages-notice')).toBeInTheDocument()
+    })
+    const notice = screen.getByTestId('older-messages-notice')
+    expect(notice).toHaveTextContent('Showing the last 2 of 40,000 messages')
+    // The count rendered is the page; the total is the thread. They differ.
+    expect(screen.getAllByTestId('chat-message')).toHaveLength(2)
+  })
+
+  it('shows NO notice when the replay was the whole thread', async () => {
+    render(<ChatView {...defaultProps} />)
+    const es = MockEventSource.instances[0]
+
+    emit(es, 'backfill', { sent: 2, total: 2, oldest_seq_sent: 1, has_older: false })
+    emit(es, 'message', msg(1))
+
+    await waitFor(() => expect(screen.getAllByTestId('chat-message')).toHaveLength(1))
+    expect(screen.queryByTestId('older-messages-notice')).not.toBeInTheDocument()
+  })
+
+  it('shows no notice at all when the server sent no backfill frame', async () => {
+    // An older API deployed in front of this UI sends no such event. Absence
+    // must read as "nothing to say", never as a truncation warning on a
+    // complete thread.
+    render(<ChatView {...defaultProps} />)
+    const es = MockEventSource.instances[0]
+    emit(es, 'message', msg(1))
+
+    await waitFor(() => expect(screen.getAllByTestId('chat-message')).toHaveLength(1))
+    expect(screen.queryByTestId('older-messages-notice')).not.toBeInTheDocument()
+  })
+
+  it('loads older messages by cursor and prepends them', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ messages: [msg(39997), msg(39998)], has_older: true }),
+    })
+    globalThis.fetch = fetchMock as any
+
+    render(<ChatView {...defaultProps} />)
+    const es = MockEventSource.instances[0]
+    emit(es, 'backfill', { sent: 1, total: 40000, oldest_seq_sent: 39999, has_older: true })
+    emit(es, 'message', msg(39999))
+
+    await waitFor(() => expect(screen.getByTestId('load-older')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('load-older'))
+
+    await waitFor(() => expect(screen.getAllByTestId('chat-message')).toHaveLength(3))
+
+    // before_seq, not offset: seq is reassigned by the stale reconcile, so an
+    // offset over this table skips and repeats.
+    const url = String(fetchMock.mock.calls[0][0])
+    expect(url).toContain('before_seq=39999')
+    expect(url).not.toContain('offset=')
+
+    // Prepended, so the conversation still reads oldest-first.
+    const rendered = screen.getAllByTestId('chat-message').map(n => n.textContent)
+    expect(rendered[0]).toBe('hello 39997')
+    expect(rendered[2]).toBe('hello 39999')
+  })
+
+  it('stops offering older messages once the server says there are none', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ messages: [], has_older: false }),
+    }) as any
+
+    render(<ChatView {...defaultProps} />)
+    const es = MockEventSource.instances[0]
+    emit(es, 'backfill', { sent: 1, total: 2, oldest_seq_sent: 2, has_older: true })
+
+    await waitFor(() => expect(screen.getByTestId('load-older')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('load-older'))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('older-messages-notice')).not.toBeInTheDocument()
+    })
+  })
+
   it('renders message input', () => {
     render(<ChatView {...defaultProps} />)
     expect(screen.getByPlaceholderText('Type a message...')).toBeInTheDocument()

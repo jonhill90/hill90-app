@@ -43,6 +43,15 @@ interface Props {
 
 export default function ChatView({ threadId, session, thread, onBack, onThreadUpdated }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
+  // What the stream told us it did NOT send. A chat that quietly drops its
+  // oldest messages looks like history that never happened (#203), so this is
+  // rendered rather than kept internal.
+  const [backfill, setBackfill] = useState<{
+    total: number
+    oldest_seq_sent: number | null
+    has_older: boolean
+  } | null>(null)
+  const [loadingOlder, setLoadingOlder] = useState(false)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -96,6 +105,19 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
       })
     })
 
+    // Sent once, before the replayed messages. An older UI has no listener for
+    // this type and EventSource simply drops it, which is why the server could
+    // add it without waiting for this build to deploy.
+    es.addEventListener('backfill', (e) => {
+      try {
+        const n = JSON.parse((e as MessageEvent).data)
+        setBackfill(n)
+      } catch {
+        // A malformed notice must not break the stream; the messages that
+        // follow are still good.
+      }
+    })
+
     es.addEventListener('heartbeat', () => {
       // Keep-alive — no action needed
     })
@@ -107,9 +129,48 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
     return () => {
       es.close()
       eventSourceRef.current = null
+      setBackfill(null)
       if (refocusTimer.current) clearTimeout(refocusTimer.current)
     }
   }, [threadId])
+
+  // Fetch the messages that precede what the stream replayed.
+  //
+  // Uses the REST thread endpoint's before_seq cursor rather than an offset:
+  // the stale reconcile reassigns seq (`seq = nextval(...)`), so the head of
+  // chat_messages reorders and an offset would skip and repeat rows.
+  const loadOlder = useCallback(async () => {
+    const oldest = backfill?.oldest_seq_sent
+    if (oldest == null || loadingOlder) return
+    setLoadingOlder(true)
+    try {
+      const res = await fetch(`/api/chat/${threadId}?before_seq=${oldest}`)
+      if (!res.ok) return
+      const data = await res.json()
+      const older: Message[] = Array.isArray(data?.messages) ? data.messages : []
+      if (older.length === 0) {
+        setBackfill(prev => (prev ? { ...prev, has_older: false } : prev))
+        return
+      }
+      setMessages(prev => {
+        const seen = new Set(prev.map(m => m.id))
+        return [...older.filter(m => !seen.has(m.id)), ...prev]
+      })
+      setBackfill(prev =>
+        prev
+          ? {
+              ...prev,
+              oldest_seq_sent: older[0]?.seq ?? prev.oldest_seq_sent,
+              has_older: Boolean(data?.has_older),
+            }
+          : prev,
+      )
+    } catch {
+      // Non-fatal: the live stream is unaffected.
+    } finally {
+      setLoadingOlder(false)
+    }
+  }, [backfill?.oldest_seq_sent, loadingOlder, threadId])
 
   // Search handler with debounce
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -374,6 +435,25 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+          {backfill?.has_older && (
+            <div
+              className="flex items-center justify-between gap-3 rounded-md border border-navy-700 bg-navy-900 px-3 py-2 text-xs text-mountain-400"
+              data-testid="older-messages-notice"
+            >
+              <span>
+                Showing the last {messages.length.toLocaleString()} of{' '}
+                {backfill.total.toLocaleString()} messages
+              </span>
+              <button
+                onClick={loadOlder}
+                disabled={loadingOlder}
+                className="rounded border border-navy-600 px-2 py-1 text-mountain-300 hover:text-white hover:border-navy-500 disabled:opacity-50 transition-colors cursor-pointer"
+                data-testid="load-older"
+              >
+                {loadingOlder ? 'Loading…' : 'Load older'}
+              </button>
+            </div>
+          )}
           {messages.length === 0 && (
             <div className="flex items-center justify-center h-full text-mountain-400 text-sm">
               Send a message to begin the conversation.
