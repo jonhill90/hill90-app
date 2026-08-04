@@ -306,7 +306,11 @@ router.post('/:id/run', requireRole('user'), async (req: Request, res: Response)
 
     // Insert the message
     const { rows: msgRows } = await pool.query(
-      `INSERT INTO chat_messages (thread_id, sender_id, sender_type, content, status)
+      // #292: was `sender_id, sender_type`, columns chat_messages does not have
+      // — the table uses author_id/author_type. Both workflow write paths would
+      // have failed on every run. Found by check_sql_identifiers.sh, never by a
+      // test, because the pool is mocked and a mocked query reaches no parser.
+      `INSERT INTO chat_messages (thread_id, author_id, author_type, content, status)
        VALUES ($1, $2, 'human', $3, 'delivered')
        RETURNING id`,
       [threadId, user.sub, wf.prompt]
@@ -565,7 +569,11 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
     );
 
     const { rows: msgRows } = await pool.query(
-      `INSERT INTO chat_messages (thread_id, sender_id, sender_type, content, status)
+      // #292: was `sender_id, sender_type`, columns chat_messages does not have
+      // — the table uses author_id/author_type. Both workflow write paths would
+      // have failed on every run. Found by check_sql_identifiers.sh, never by a
+      // test, because the pool is mocked and a mocked query reaches no parser.
+      `INSERT INTO chat_messages (thread_id, author_id, author_type, content, status)
        VALUES ($1, $2, 'human', $3, 'delivered') RETURNING id`,
       [threadId, wf.created_by, prompt]
     );

@@ -283,6 +283,78 @@ jobs:
             exit 1
           }
 
+  sql-identifiers:
+    name: sql identifiers (api)
+    runs-on: ubuntu-latest
+    # WHY A JOB AND NOT A STEP IN `api`. That job mocks the pool, which is why
+    # this class of defect was invisible to it: two endpoints answered 500 on
+    # every call since the day they were written, and 97 test files could not
+    # see it (#286, #290). This job exists to look at the SQL itself, so its
+    # red must mean "a statement does not parse" and nothing else.
+    #
+    # THE SCHEMA COMES FROM THE MIGRATIONS, not from a checked-in dump. A dump
+    # is a second source of truth that drifts silently — the same defect one
+    # level up — and it would go stale the first time someone adds a column
+    # without regenerating it. Applying `src/db/migrations/*.sql` in order means
+    # a new migration is covered the day it lands, with nothing to remember.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hill90_api_schema
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hill90_api_schema
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure a psql client
+        run: command -v psql >/dev/null || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+      - name: Build the schema from the migrations
+        # INFRASTRUCTURE FAILS HERE, not in the check. The service is
+        # health-gated and this step touches the database, so an unreachable or
+        # broken database turns this step red — and the check below therefore
+        # runs only when the database is proven up.
+        #
+        # `uuid-ossp` is created here because migration 001 uses
+        # uuid_generate_v4() and no migration creates the extension: in
+        # production the platform's Postgres bootstrap does it. That the schema
+        # is not self-contained is worth knowing, and this is the one place it
+        # is written down.
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+          for f in $(ls services/api/src/db/migrations/*.sql | sort); do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+      - name: Every static statement must parse against that schema
+        # EXIT CODES, and the one that needed a decision:
+        #   0  every checkable statement parsed          -> green
+        #   1  a statement does not parse                -> RED, the point of the job
+        #   2  CANNOT DETERMINE (no database reachable)  -> RED, deliberately
+        #
+        # The case for 2 passing: a database that is slow or briefly unavailable
+        # would redden unrelated pull requests, and a check that reddens for
+        # reasons the author cannot fix is a check someone disables.
+        #
+        # The case for 2 failing, which is what this does: a CANNOT DETERMINE
+        # that passes silently IS a check that has stopped running, and nobody
+        # finds out until the next #286 — which is exactly what happened to the
+        # two endpoints this job exists to catch. The repository already has the
+        # rule written down for the drift alarm: never silent, never green.
+        #
+        # WHAT MAKES IT SURVIVE rather than get disabled: the failure modes are
+        # SEPARATED. The database is health-gated by the runner and proven by
+        # the step above, so an infrastructure problem is red on "Build the
+        # schema", with a psql error, before this step runs at all. By the time
+        # the check executes, a 2 means something genuinely new — and that is
+        # worth a human. If this ever does start flapping, the fix is to make
+        # the database more reliable, not to make the check quieter.
+        run: bash scripts/checks/check_sql_identifiers.sh
+
   scripts:
     name: scripts (bats)
     runs-on: ubuntu-latest
