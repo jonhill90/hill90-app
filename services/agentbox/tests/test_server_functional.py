@@ -59,37 +59,63 @@ class TestWorkEndpointAuth:
         assert response.json()["error"] == "unauthorized"
 
     def test_work_valid_returns_accepted(self, tmp_path):
-        """FN3: POST /work with valid auth returns accepted ack."""
+        """FN3: POST /work with valid auth returns accepted ack.
+
+        Was `"type": "shell_cmd"` — not a real type (the real one is
+        "shell_command"), and it "passed" only because #222 finding 2's bug
+        silently stub-accepted anything unrecognised. That typo going
+        undetected is itself evidence for why the fix matters. Uses "chat"
+        here: a real accepted type with no shell-enablement gate, so this
+        stays a test about the generic ack shape rather than shell config."""
         client, _, _ = _make_client(tmp_path)
         response = client.post(
             "/work",
-            json={"type": "shell_cmd", "payload": {"command": "echo hi"}},
+            json={"type": "chat", "payload": {}},
             headers={"Authorization": "Bearer test-token-123"},
         )
         assert response.status_code == 200
         body = response.json()
         assert body["accepted"] is True
         assert "work_id" in body
-        assert body["type"] == "shell_cmd"
+        assert body["type"] == "chat"
 
 
 class TestWorkEndpointEvents:
-    def test_work_emits_events(self, tmp_path):
-        """FN4: POST /work with valid auth emits work_received + work_completed events."""
-        client, _, log_path = _make_client(tmp_path)
+    def test_work_emits_events(self, tmp_path, monkeypatch):
+        """FN4: POST /work with valid auth emits work_received + work_completed events.
+
+        Was `"type": "test_work"` (also not real, also only "worked" via the
+        #222 finding 2 stub). shell_command with a mocked executor is a real
+        accepted type that actually reaches work_completed — asynchronously,
+        on a background thread, hence the mock and the wait, matching
+        TestShellCommandFunctional's own SF2 pattern below."""
+        config = _make_config(tools={"shell": {"enabled": True}})
+
+        async def mock_execute(command, timeout=30, **kwargs):
+            return json.dumps({"success": True, "exit_code": 0, "stdout": "hi\n", "stderr": ""})
+        monkeypatch.setattr("app.runtime.shell.execute_command", mock_execute)
+
+        client, _, log_path = _make_client(tmp_path, config=config)
         client.post(
             "/work",
-            json={"type": "test_work", "payload": {}},
+            json={"type": "shell_command", "payload": {"command": "echo hi"}},
             headers={"Authorization": "Bearer test-token-123"},
         )
-        # Read events from JSONL
+        import time
+        time.sleep(0.5)
+
+        # Read events from JSONL. A real shell_command also emits
+        # command_start/command_output/command_complete under tool="shell" —
+        # unlike the old stub, which only ever emitted these two — so the
+        # tool="runtime" check is scoped to the two events that invariant
+        # actually applies to, not to every event in the log.
         events = [json.loads(line) for line in log_path.read_text().strip().split("\n")]
         event_types = [e["type"] for e in events]
         assert "work_received" in event_types
         assert "work_completed" in event_types
-        # Both should be runtime tool events
         for e in events:
-            assert e["tool"] == "runtime"
+            if e["type"] in ("work_received", "work_completed"):
+                assert e["tool"] == "runtime"
 
 
 class TestWorkEndpointValidation:
@@ -145,7 +171,16 @@ class TestToolsConfigBackwardCompat:
         assert response.status_code == 200
 
     def test_tools_config_does_not_affect_endpoints(self, tmp_path):
-        """FN9: Tools config flags have no effect on /health or /work behavior."""
+        """FN9: Tools config flags have no effect on /health or /work behavior
+        for a work type they have nothing to do with.
+
+        `type: "test"` is deliberately not a real work type — the point is
+        that shell/filesystem config shouldn't leak into handling of a type
+        those tools have no say over. #222 finding 2 made an unrecognised
+        type 400 rather than a silent 200 stub; that strengthens this test
+        rather than breaking its premise — both configs must still produce
+        the IDENTICAL response, 400 now instead of 200, because tool config
+        still has no business affecting how an unrelated type is rejected."""
         # Create two apps — one with tools enabled, one disabled
         config_enabled = _make_config(
             tools={
@@ -167,13 +202,14 @@ class TestToolsConfigBackwardCompat:
         r2 = client_disabled.get("/health")
         assert r1.json() == r2.json()
 
-        # Both should accept work identically
+        # Both should reject this unrelated, unrecognised type IDENTICALLY —
+        # tool config must not leak into it either direction.
         work_payload = {"type": "test", "payload": {}}
         headers = {"Authorization": "Bearer test-token-123"}
         r3 = client_enabled.post("/work", json=work_payload, headers=headers)
         r4 = client_disabled.post("/work", json=work_payload, headers=headers)
-        assert r3.status_code == r4.status_code == 200
-        assert r3.json()["accepted"] == r4.json()["accepted"] is True
+        assert r3.status_code == r4.status_code == 400
+        assert r3.json() == r4.json()
 
 
 class TestShellCommandFunctional:
