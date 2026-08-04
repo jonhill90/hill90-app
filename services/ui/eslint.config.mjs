@@ -96,4 +96,17 @@ export default [
       '@typescript-eslint/no-unsafe-function-type': 'off',
     },
   },
+
+  // --------------------------------------------------------------------------
+  // scripts/ — plain Node run directly in CI (`node scripts/...`), not built or
+  // imported by the app. `require()` here is deliberate, not an idiom slipping
+  // in: verify-native-deps.js is specifically testing CJS require-time
+  // resolution, which is how the native bindings it checks actually fail.
+  // --------------------------------------------------------------------------
+  {
+    files: ['scripts/**/*.js'],
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
 ];
