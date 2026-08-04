@@ -95,7 +95,27 @@ components:
           description: Controls how much freedom the agent has when executing commands.
         status:
           type: string
-          enum: [stopped, running, error]
+          enum: [stopped, running, error, unknown]
+          description: >-
+            `unknown` means reconciliation could not verify this agent against a
+            real container — the API declines to report the last value the
+            database recorded as though it were current (#238). It is not a
+            state an agent is ever put INTO; it is the API declining to answer.
+        status_verified:
+          type: boolean
+          description: >-
+            False when `status` is `unknown`. Carried separately so a consumer
+            can keep the distinction without string-matching on the status.
+        container_state:
+          type: string
+          nullable: true
+          enum: [running, created, restarting, paused, exited, dead, absent, null]
+          description: >-
+            What the reconciler last SAW, as distinct from what the agent is
+            recorded as (#239). `absent` means the container was not there at
+            all — a 404 from the daemon, i.e. deleted rather than stopped —
+            which is a different fact from `exited`. Null means the reconciler
+            could not tell, and is NOT a synonym for `absent`.
         container_id:
           type: string
           nullable: true
