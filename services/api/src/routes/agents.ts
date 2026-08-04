@@ -179,9 +179,27 @@ async function upsertAutoAgentModelsPolicy(
   return inserted.rows[0].id;
 }
 
-async function resolveAgentModels(policyId: string | null): Promise<string[]> {
+async function resolveAgentModels(
+  policyId: string | null,
+  // Same parameter as upsertAutoAgentModelsPolicy above, for a DIFFERENT reason,
+  // and the difference is worth knowing before anyone "simplifies" it away.
+  //
+  // That one WRITES: reaching for the pool would commit outside the caller's
+  // transaction and the rollback would stop covering it. This one only READS, so
+  // it cannot break a rollback. What it breaks is visibility — a pool connection
+  // is a different session and cannot see the caller's uncommitted rows, so it
+  // would return `[]` for a policy the transaction had just inserted, and the
+  // caller would report an agent with no models rather than fail.
+  //
+  // That was not reachable when this parameter was added (#283): both in-transaction
+  // callers were in the branch where model_policy_id came from the request and the
+  // row therefore predates BEGIN. It becomes reachable the moment anyone reads back
+  // a policy created inside the same transaction — which the branch directly above
+  // each call site does create. One branch away, and silent when it arrives.
+  exec: Queryable = getPool()
+): Promise<string[]> {
   if (!policyId) return [];
-  const { rows } = await getPool().query(
+  const { rows } = await exec.query(
     `SELECT allowed_models FROM model_policies WHERE id = $1`,
     [policyId]
   );
@@ -510,7 +528,7 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
         agent.models = [];
       }
     } else {
-      agent.models = await resolveAgentModels(agent.model_policy_id);
+      agent.models = await resolveAgentModels(agent.model_policy_id, tx);
     }
 
     // Insert skill assignments into agent_skills
@@ -765,7 +783,7 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
       agent.model_policy_id = autoPolicyId;
       agent.models = modelNames;
     } else {
-      agent.models = await resolveAgentModels(agent.model_policy_id);
+      agent.models = await resolveAgentModels(agent.model_policy_id, tx);
     }
 
     for (const skillId of validatedSkillIds) {
