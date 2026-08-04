@@ -265,12 +265,25 @@ async def list_entries(
     return [dict(r) for r in rows], total
 
 
+SEARCH_PAGE_LIMIT = 20
+
+
 async def search_entries(
     pool: asyncpg.Pool,
     claims: AgentClaims,
     query: str,
-) -> list[dict[str, Any]]:
-    """Full-text search within the agent's namespace."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Full-text search within the agent's namespace.
+
+    Returns ``(rows, total_matches)`` — the page, and HOW MANY MATCHED.
+
+    The second value is a ``COUNT(*)`` over the same predicate as the page,
+    never ``len(rows)``. `internal_admin.py` was fixed this way in #209 and this
+    twin two files away was not, in the same session that wrote the
+    look-for-the-twin rule into CONTRIBUTING (#234). A total derived from the
+    page it describes agrees with itself, which is precisely what makes the
+    class invisible: twenty rows and the word twenty, and nothing to notice.
+    """
     rows = await pool.fetch(
         """SELECT id, path, title, entry_type, tags,
                   ts_rank(search_vector, websearch_to_tsquery('english', $2)) AS score,
@@ -282,8 +295,18 @@ async def search_entries(
              AND status = 'active'
              AND search_vector @@ websearch_to_tsquery('english', $2)
            ORDER BY score DESC
-           LIMIT 20""",
+           LIMIT $3""",
+        claims.sub,
+        query,
+        SEARCH_PAGE_LIMIT,
+    )
+    total_matches = await pool.fetchval(
+        """SELECT COUNT(*)
+           FROM knowledge_entries
+           WHERE agent_id = $1
+             AND status = 'active'
+             AND search_vector @@ websearch_to_tsquery('english', $2)""",
         claims.sub,
         query,
     )
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows], int(total_matches or 0)
