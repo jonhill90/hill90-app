@@ -2503,9 +2503,19 @@ router.get('/:id/stats', requireRole('user'), async (req: Request, res: Response
         [agent.id],
       ),
       getPool().query(
+        // #213: the total, AND what it does not know. `total_uptime_seconds`
+        // keeps its meaning; the two companions say how much of it rests on a
+        // close the reconciler guessed, and how many sessions are still
+        // accruing. Neither was expressible before, so a figure that was wrong
+        // — in either direction — looked exactly like a quiet agent.
         `SELECT COALESCE(SUM(
            EXTRACT(EPOCH FROM (COALESCE(stopped_at, NOW()) - started_at))
-         ), 0) AS total_uptime_seconds
+         ), 0) AS total_uptime_seconds,
+         COALESCE(SUM(
+           CASE WHEN stopped_at_estimated
+                THEN EXTRACT(EPOCH FROM (stopped_at - started_at)) ELSE 0 END
+         ), 0) AS estimated_uptime_seconds,
+         COUNT(*) FILTER (WHERE stopped_at IS NULL) AS open_sessions
          FROM agent_sessions WHERE agent_id = $1`,
         [agent.id],
       ),
@@ -2543,6 +2553,14 @@ router.get('/:id/stats', requireRole('user'), async (req: Request, res: Response
       knowledge_entries: knowledgeEntries,
       chat_messages: Number(chat.total_messages),
       total_uptime_seconds: Math.floor(Number(sess.total_uptime_seconds)),
+      // #213: `uptime_complete` is false when any of the total rests on a
+      // guessed close, or when a session is still open and therefore still
+      // growing. False does not mean the number is wrong — it means the service
+      // cannot say that it is right.
+      uptime_estimated_seconds: Math.floor(Number(sess.estimated_uptime_seconds || 0)),
+      open_sessions: Number(sess.open_sessions || 0),
+      uptime_complete: Number(sess.estimated_uptime_seconds || 0) === 0
+        && Number(sess.open_sessions || 0) === 0,
       skills_assigned: Number(skill.skill_count),
       first_started: agent.created_at,
     });
@@ -2643,7 +2661,13 @@ router.get('/:id/artifacts', requireRole('user'), async (req: Request, res: Resp
         [agent.id],
       ),
       getPool().query(
-        `SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(stopped_at, NOW()) - started_at))), 0) AS total_uptime_seconds
+        // #213, the twin of the /stats sum. Same query, same defect, same fix —
+        // a total corrected on one endpoint and not the other is the drift
+        // behind #141, #153 and #182.
+        `SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(stopped_at, NOW()) - started_at))), 0) AS total_uptime_seconds,
+         COALESCE(SUM(CASE WHEN stopped_at_estimated
+                           THEN EXTRACT(EPOCH FROM (stopped_at - started_at)) ELSE 0 END), 0) AS estimated_uptime_seconds,
+         COUNT(*) FILTER (WHERE stopped_at IS NULL) AS open_sessions
          FROM agent_sessions WHERE agent_id = $1`,
         [agent.id],
       ),
