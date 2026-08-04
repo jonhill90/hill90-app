@@ -21,6 +21,7 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { getPool } from '../db/pool';
 import { armCredentialDeadline, endStreamForExpiredCredential } from '../helpers/stream-deadline';
+import { createBoundedSseWriter, SSE_DEFAULTS } from '../services/sse-writer';
 import { stillAuthorised, endStreamForRevokedAccess } from '../helpers/participation-watch';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
@@ -1352,8 +1353,42 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
     // belongs on the backfill specifically, not on the steady state (#203).
     let isBackfill = true;
 
+    // Every SSE frame here went through a raw res.write(): the return value
+    // discarded, no 'drain' listener, no writableLength check (#204). Node
+    // buffers past a full socket without limit, so a client that stops
+    // reading — a throttled tab, a slept laptop — had nothing bounding what
+    // accumulated in this process for it. sse-writer.ts exists for exactly
+    // this and agents.ts already adopted it; this route had not.
+    //
+    // The producer here is not a pausable stream, it is this poll's own
+    // 1-second timer, so `source` pauses the NEXT tick rather than an
+    // in-flight read. That is sufficient: a tick that finds itself paused
+    // returns before querying, so no row is fetched only to be dropped.
+    let pollPaused = false;
+    const source = {
+      pause() { pollPaused = true; },
+      resume() { pollPaused = false; },
+    };
+    const sse = createBoundedSseWriter(res as never, {
+      hardCapBytes: SSE_DEFAULTS.hardCapBytes,
+      onOverflow: (queued) => {
+        console.error(
+          `[chat] SSE stream aborted: ${queued} bytes queued for a client that is not reading`,
+        );
+        cleanup();
+        res.write(
+          `event: error\ndata: ${JSON.stringify({
+            error: 'Client not reading',
+            detail: 'The event stream was stopped because its buffer limit was exceeded.',
+          })}\n\n`,
+        );
+        res.end();
+      },
+    });
+    sse.setSource(source);
+
     const poll = async () => {
-      if (res.writableEnded || res.destroyed) return;
+      if (res.writableEnded || res.destroyed || pollPaused) return;
 
       try {
         // Newest-first WITH A LIMIT on the backfill, then reversed — a plain
@@ -1374,13 +1409,13 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
           // Announced BEFORE the messages, so a client knows what follows is a
           // tail rather than a history.
           if (!res.writableEnded && !res.destroyed) {
-            res.write(backfillFrame(notice));
+            sse.write(backfillFrame(notice));
           }
         }
 
         for (const row of rows) {
           if (res.writableEnded || res.destroyed) return;
-          res.write(`id: ${row.seq}\nevent: message\ndata: ${JSON.stringify(row)}\n\n`);
+          sse.write(`id: ${row.seq}\nevent: message\ndata: ${JSON.stringify(row)}\n\n`);
           cursor = row.seq;
         }
       } catch (err) {
@@ -1430,7 +1465,7 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
     // exempt exactly as they are at the initial check.
     heartbeat = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
-      res.write(': heartbeat\n\n');
+      sse.write(': heartbeat\n\n');
 
       if (admin) return;
       void (async () => {
@@ -1618,6 +1653,34 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     };
     req.on('close', cleanup);
 
+    // Same defect as the DB-backed thread stream (#204): every frame here went
+    // through a raw res.write(), discarding the return value, with no
+    // 'drain' listener or writableLength check. Unlike that route, the
+    // producers here ARE pausable streams — one `tail -f` per running agent —
+    // so backpressure pauses all of them as a group rather than a poll timer.
+    // A write failing because one agent is chattier than another still means
+    // the CLIENT is behind on everything already queued for it.
+    const sse = createBoundedSseWriter(res as never, {
+      hardCapBytes: SSE_DEFAULTS.hardCapBytes,
+      onOverflow: (queued) => {
+        console.error(
+          `[chat-events] SSE aborted: ${queued} bytes queued for a client that is not reading`,
+        );
+        cleanup();
+        res.write(
+          `event: error\ndata: ${JSON.stringify({
+            error: 'Client not reading',
+            detail: 'The event stream was stopped because its buffer limit was exceeded.',
+          })}\n\n`,
+        );
+        res.end();
+      },
+    });
+    sse.setSource({
+      pause() { for (const s of streams) (s as any).pause?.(); },
+      resume() { for (const s of streams) (s as any).resume?.(); },
+    });
+
     for (const agent of runningAgents) {
       // The client is already gone: stop, rather than opening the rest of the
       // thread's streams so that cleanup can immediately destroy them.
@@ -1646,7 +1709,7 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
             // Correlation filter: match on top-level correlation_id or metadata.message_id
             const cid = event.correlation_id || event.metadata?.message_id;
             if (cid && threadMessageIds.has(cid)) {
-              res.write(`data: ${JSON.stringify(event)}\n\n`);
+              sse.write(`data: ${JSON.stringify(event)}\n\n`);
             }
           }
         });
@@ -1659,7 +1722,7 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
               const event = JSON.parse(remaining);
               const cid = event.correlation_id || event.metadata?.message_id;
               if (cid && threadMessageIds.has(cid)) {
-                res.write(`data: ${JSON.stringify(event)}\n\n`);
+                sse.write(`data: ${JSON.stringify(event)}\n\n`);
               }
             } catch { /* skip */ }
           }
@@ -1716,7 +1779,7 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     // exempt exactly as they are at the initial check.
     heartbeat = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
-      res.write(': heartbeat\n\n');
+      sse.write(': heartbeat\n\n');
 
       if (admin) return;
       void (async () => {
