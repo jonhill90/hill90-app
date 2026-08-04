@@ -18,15 +18,6 @@ No provider API key is needed to bring the stack up and browse it. Chat and
 embeddings need a real `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in `.env.local`.
 See [Running locally](#running-locally) for the full picture.
 
-This is the application extracted from
-[jonhill90/Hill90](https://github.com/jonhill90/Hill90), carrying its own git
-history — 542 commits reaching back to 2026-01-11. It was separated from that
-repo so it could be developed independently, without dragging the VPS
-infrastructure along. See
-[docs/decisions/infra-app-separation.md](docs/decisions/infra-app-separation.md)
-for the original decision and [docs/extraction/](docs/extraction/) for exactly
-how the split was performed and verified.
-
 ## What it is
 
 An AI agent platform: agents run in sandboxed containers, reach models through a
@@ -54,7 +45,7 @@ Architecture, in the depth it was actually written:
 - [docs/architecture/trust-boundaries.md](docs/architecture/trust-boundaries.md)
 - [docs/architecture/ui-components.md](docs/architecture/ui-components.md)
 - [docs/architecture/overview.md](docs/architecture/overview.md) — whole-system
-  view; retains infrastructure context that now lives in Hill90
+  view, including the infrastructure this app runs on
 - The published pages live in
   [jonhill90/hill90-docs](https://github.com/jonhill90/hill90-docs) and are served at
   [docs.hill90.com/ai-app](https://docs.hill90.com/ai-app/overview). This repo no longer
@@ -405,12 +396,6 @@ Worth knowing what this replaced: before that date the app's volume had **never
 been backed up by anything**, and Hill90's own SQL dump had been failing silently
 for days — the job reported success while producing only a volume tar.
 
-## History
-
-[`docs/extraction/PROVENANCE.md`](docs/extraction/PROVENANCE.md) records what was
-extracted and what has since been fixed — worth reading before changing the
-compose or auth wiring, since several of those problems were subtle.
-
 ## Repository layout
 
 ```
@@ -424,14 +409,11 @@ scripts/            local stack driver, tenant deploy script, database
                     provisioners
 tests/e2e/          Playwright suites
 docs/               architecture, decisions, app runbooks
-docs/extraction/    provenance, verification output, Hill90 commit map
-PRD.md / SPEC.md    why and how this extraction was done
 ```
 
-`scripts/provision-akm-db.sh` and `scripts/provision-litellm-db.sh` were unusable
-as extracted — both sourced a `scripts/_common.sh` that had never been extracted,
-so under `set -e` they died at line 7, and that masked three further bugs. All
-four are fixed: `_common.sh` now exists, both scripts resolve
+`scripts/provision-akm-db.sh` and `scripts/provision-litellm-db.sh` both source
+`scripts/_common.sh`, which was missing — under `set -e` they died at line 7, and
+that masked three further bugs. All four are fixed: `_common.sh` now exists, both scripts resolve
 `${PG_CONTAINER:-${CONTAINER_PREFIX:-}app-postgres}` rather than Hill90's
 `postgres`, and they run one `psql` invocation per target database. The local
 stack still does not use them — `platform/data/postgres/init.sh` runs as a

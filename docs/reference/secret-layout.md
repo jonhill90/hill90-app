@@ -4,9 +4,7 @@ What each secret this application needs is for, and how the vault KV paths are
 arranged.
 
 Read alongside [`infra/secrets/prod.enc.env.example`](../../infra/secrets/prod.enc.env.example),
-which lists the keys, and
-[`docs/extraction/PROVENANCE.md`](../extraction/PROVENANCE.md), which records what came
-across from Hill90 and what did not.
+which lists the keys.
 
 ## The application's own secrets
 
