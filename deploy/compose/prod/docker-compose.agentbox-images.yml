@@ -11,12 +11,20 @@ services:
     build:
       context: ../../../services/agentbox
       dockerfile: Dockerfile
+      args:
+        # Stamps com.hill90.revision onto the IMAGE. Agent containers are made
+        # by docker.ts rather than compose, so they get no revision label from
+        # deploy.sh — this is the only thing that can answer what commit an
+        # agent is running (#228).
+        GIT_REVISION: ${DEPLOY_REVISION:-unstamped}
     image: hill90/agentbox:latest
 
   agentbox-browser:
     build:
       context: ../../../services/agentbox
       dockerfile: Dockerfile.browser
+      args:
+        GIT_REVISION: ${DEPLOY_REVISION:-unstamped}
     image: hill90/agentbox-browser:latest
     depends_on:
       - agentbox
@@ -25,4 +33,6 @@ services:
     build:
       context: ../../../services/agentbox
       dockerfile: Dockerfile.monitor
+      args:
+        GIT_REVISION: ${DEPLOY_REVISION:-unstamped}
     image: hill90/agentbox-monitor:latest
