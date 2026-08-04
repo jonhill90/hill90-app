@@ -177,13 +177,28 @@ router.get('/search', requireRole('user'), async (req: Request, res: Response) =
       return;
     }
 
-    // User: search each owned agent and merge results
+    // User: search each owned agent and merge results.
+    //
+    // The merged total is the SUM OF EACH AGENT'S REAL TOTAL, not the size of the
+    // merged array — and certainly not the size of the slice below. Each upstream
+    // response is itself capped at 20, so summing `data.results.length` would cap
+    // the merged figure at 20 per agent: a number that grows with agent count and
+    // has nothing to do with how many entries matched.
     const allResults: Array<Record<string, unknown>> = [];
+    let totalMatches = 0;
     for (const aid of allowed) {
       const result = await akmProxy.searchEntries(q, aid);
       if (result.status === 200) {
-        const data = result.data as { results: Array<Record<string, unknown>> };
+        const data = result.data as {
+          results: Array<Record<string, unknown>>;
+          total_matches?: number;
+        };
         allResults.push(...data.results);
+        // Fall back to the page length only if an older knowledge service is
+        // deployed that does not send a total. That undercounts rather than
+        // overcounts, and it is visible as `truncated` being wrong, not as a
+        // number that silently looks fine.
+        totalMatches += Number(data.total_matches ?? data.results.length);
       }
     }
 
@@ -194,7 +209,11 @@ router.get('/search', requireRole('user'), async (req: Request, res: Response) =
     res.json({
       query: q,
       results: limited,
+      // How many rows are in THIS response.
       count: limited.length,
+      // How many matched. Differs from `count` exactly when the page was cut.
+      total_matches: totalMatches,
+      truncated: totalMatches > limited.length,
       search_type: 'fts',
       score_type: 'ts_rank',
     });

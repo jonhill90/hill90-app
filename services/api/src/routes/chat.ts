@@ -1831,7 +1831,33 @@ router.get('/threads/:id/search', requireRole('user'), async (req: Request, res:
       [threadId, q]
     );
 
-    res.json({ results: rows, query: q, total: rows.length });
+    /*
+     * `total` was `rows.length` under the LIMIT 50 above — a field literally named
+     * total, reporting the size of a page. Nothing renders it today, and that is
+     * exactly why it is fixed here rather than left: an identical-shape defect
+     * left alone because it is small is how it becomes someone's dashboard figure
+     * later. We watched that happen once already (#197, via #180 and #188).
+     *
+     * Same predicate as the page, so the count cannot describe a different set.
+     */
+    const { rows: countRows } = await getPool().query(
+      `SELECT COUNT(*) AS total
+         FROM chat_messages
+        WHERE thread_id = $1
+          AND status IN ('complete', 'thinking')
+          AND content != ''
+          AND to_tsvector('english', content) @@ plainto_tsquery('english', $2)`,
+      [threadId, q]
+    );
+    const total = Number(countRows[0].total);
+
+    res.json({
+      results: rows,
+      query: q,
+      // How many matched, not how many fit.
+      total,
+      truncated: total > rows.length,
+    });
   } catch (err) {
     console.error('[chat] Search error:', err);
     res.status(500).json({ error: 'Search failed' });

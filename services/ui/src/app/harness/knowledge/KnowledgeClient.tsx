@@ -87,6 +87,8 @@ export default function KnowledgeClient() {
   const [typeFilter, setTypeFilter] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  /** Matches found, not rows returned — the api caps the page at 20 (#197 sweep). */
+  const [searchTotal, setSearchTotal] = useState<number | null>(null)
   const [isSearching, setIsSearching] = useState(false)
   const [loading, setLoading] = useState(true)
   const [entriesLoading, setEntriesLoading] = useState(false)
@@ -164,6 +166,8 @@ export default function KnowledgeClient() {
     if (!searchQuery.trim()) {
       setIsSearching(false)
       setSearchResults([])
+    setSearchTotal(null)
+      setSearchTotal(null)
       return
     }
     setIsSearching(true)
@@ -174,6 +178,8 @@ export default function KnowledgeClient() {
       if (res.ok) {
         const data = await res.json()
         setSearchResults(data.results || [])
+        const t = Number(data.total_matches)
+        setSearchTotal(Number.isFinite(t) ? t : (data.results || []).length)
       }
     } catch (err) {
       console.error('Failed to search knowledge:', err)
@@ -219,6 +225,7 @@ export default function KnowledgeClient() {
     setSearchQuery('')
     setIsSearching(false)
     setSearchResults([])
+    setSearchTotal(null)
   }
 
   if (loading) {
@@ -275,7 +282,10 @@ export default function KnowledgeClient() {
       {isSearching ? (
         <div>
           <p className="text-sm text-mountain-400 mb-4">
-            {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for &ldquo;{searchQuery}&rdquo;
+            {searchTotal !== null && searchTotal > searchResults.length
+              ? `Showing ${searchResults.length} of ${searchTotal} results`
+              : `${searchTotal ?? searchResults.length} result${(searchTotal ?? searchResults.length) !== 1 ? 's' : ''}`}{' '}
+            for &ldquo;{searchQuery}&rdquo;
           </p>
           {searchResults.length === 0 ? (
             <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 text-center">
