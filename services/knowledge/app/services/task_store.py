@@ -47,8 +47,18 @@ async def list_tasks(
     pool: asyncpg.Pool,
     agent_id: str | None = None,
     status: str | None = None,
-) -> list[dict[str, Any]]:
-    """List tasks, optionally filtered by agent_id and/or status."""
+    limit: int = 500,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """List one page of tasks, optionally filtered by agent_id and/or status.
+
+    Returns ``(rows, total)`` where ``total`` is a ``COUNT(*)`` over the SAME
+    ``WHERE`` as the page — never ``len(rows)``. A total derived from the page
+    agrees with itself and reports truncation as completeness (#184).
+
+    With no ``agent_id`` this returns every task for every agent, which is why
+    the bound matters: the admin route makes that filter optional.
+    """
     conditions = []
     params: list[Any] = []
     idx = 1
@@ -65,12 +75,23 @@ async def list_tasks(
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
+    # The id tiebreak is load-bearing: neither sort_order nor updated_at is
+    # unique, so paging over them alone hands one task to two pages and no page
+    # to another — the same silent wrong answer as truncation, arriving through
+    # pagination.
     rows = await pool.fetch(
         f"""SELECT * FROM agent_tasks {where}
-            ORDER BY sort_order ASC, updated_at DESC""",
+            ORDER BY sort_order ASC, updated_at DESC, id DESC
+            LIMIT ${idx} OFFSET ${idx + 1}""",
+        *params,
+        limit,
+        offset,
+    )
+    total = await pool.fetchval(
+        f"SELECT COUNT(*) FROM agent_tasks {where}",
         *params,
     )
-    return [_serialize(dict(r)) for r in rows]
+    return [_serialize(dict(r)) for r in rows], total
 
 
 async def get_task(pool: asyncpg.Pool, task_id: str) -> dict[str, Any] | None:

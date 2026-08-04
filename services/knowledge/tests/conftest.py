@@ -133,7 +133,16 @@ async def db_pool(test_settings: Settings) -> AsyncGenerator[asyncpg.Pool, None]
         await conn.execute("DELETE FROM shared_ingest_jobs")
         await conn.execute("DELETE FROM shared_sources")
         await conn.execute("DELETE FROM shared_collections")
-        # AKM tables
+        # AKM tables.
+        #
+        # agent_tasks and agent_memories were BOTH missing here, so rows
+        # accumulated across every test in a session. It surfaced as a task
+        # count of 19 where the test had seeded 3 — an order-dependent
+        # assertion that would have passed alone and failed in the suite.
+        # Compared against `SELECT tablename FROM pg_tables` rather than
+        # patching only the table that happened to bite.
+        await conn.execute("DELETE FROM agent_tasks")
+        await conn.execute("DELETE FROM agent_memories")
         await conn.execute("DELETE FROM quarantine_entries")
         await conn.execute("DELETE FROM agent_tokens")
         await conn.execute("DELETE FROM revoked_tokens")

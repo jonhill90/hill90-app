@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from app.services import task_store
@@ -59,14 +59,27 @@ async def create_task(body: CreateTaskRequest, request: Request) -> dict[str, An
 @router.get("")
 async def list_tasks(
     request: Request,
+    response: Response,
     status: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=2000, description="Max tasks to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip before the page"),
 ) -> list[dict[str, Any]]:
+    """List one page of the calling agent's tasks.
+
+    The body stays a bare JSON array and the total travels in
+    ``X-Total-Count``, matching /api/v1/entries — a body object would break any
+    consumer that treats this as a list, and those deploy independently (#184).
+    """
     claims = getattr(request.state, "agent_claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="authentication required")
 
     pool = request.app.state.pool
-    return await task_store.list_tasks(pool, agent_id=claims.sub, status=status)
+    tasks, total = await task_store.list_tasks(
+        pool, agent_id=claims.sub, status=status, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return tasks
 
 
 @router.get("/{task_id}")
