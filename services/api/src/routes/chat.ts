@@ -21,6 +21,7 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { getPool } from '../db/pool';
 import { armCredentialDeadline, endStreamForExpiredCredential } from '../helpers/stream-deadline';
+import { stillAuthorised, endStreamForRevokedAccess } from '../helpers/participation-watch';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { requireRole } from '../middleware/role';
@@ -1159,9 +1160,24 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
     interval = setInterval(poll, 1000);
 
     // Keep-alive heartbeat (every 30s)
+    // The participation re-check rides THIS tick rather than arming a second timer
+    // (issue #196). Access was checked once before the stream opened, so removing a
+    // participant left their events flowing until the token expired. Admins are
+    // exempt exactly as they are at the initial check.
     heartbeat = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
       res.write(': heartbeat\n\n');
+
+      if (admin) return;
+      void (async () => {
+        const allowed = await stillAuthorised(
+          () => isParticipant(threadId, user.sub, admin),
+          'chat-stream',
+        );
+        if (allowed || res.writableEnded || res.destroyed) return;
+        endStreamForRevokedAccess(res, 'chat-stream');
+        cleanup();
+      })();
     }, 30000);
 
     // A close that landed between the guard above and here still gets cleaned up.
@@ -1401,9 +1417,24 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     }, 5000);
 
     // Keep-alive heartbeat
+    // The participation re-check rides THIS tick rather than arming a second timer
+    // (issue #196). Access was checked once before the stream opened, so removing a
+    // participant left their events flowing until the token expired. Admins are
+    // exempt exactly as they are at the initial check.
     heartbeat = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
       res.write(': heartbeat\n\n');
+
+      if (admin) return;
+      void (async () => {
+        const allowed = await stillAuthorised(
+          () => isParticipant(threadId, user.sub, admin),
+          'chat-events',
+        );
+        if (allowed || res.writableEnded || res.destroyed) return;
+        endStreamForRevokedAccess(res, 'chat-events');
+        cleanup();
+      })();
     }, 30000);
 
     // A close that landed between the guard above and here still gets cleaned up.

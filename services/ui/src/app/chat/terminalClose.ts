@@ -10,6 +10,11 @@
  *        (services/agentbox/app/ws_terminal.py).
  * 4002 — the credential was accepted and has since run out. The api terminal
  *        proxy ends a session when its token does.
+ * 4004 — the credential is still valid and the ACCESS behind it is gone: the
+ *        viewer was removed from the thread (app#196). Reconnecting cannot help,
+ *        and without this entry it would be attempted, because every unrecognised
+ *        code auto-reconnects — a removed user would retry in a loop against an
+ *        upgrade that now refuses them, and be told nothing.
  *
  * They are separate codes on purpose: a client cannot behave differently about
  * two conditions that arrive as the same number.
@@ -17,20 +22,31 @@
 
 export const CLOSE_UNAUTHORIZED = 4001;
 export const CLOSE_CREDENTIAL_EXPIRED = 4002;
+export const CLOSE_ACCESS_REVOKED = 4004;
+
+/**
+ * The codes that END a session rather than interrupt one. Listed once so a new
+ * code cannot be added to the notice branch and forgotten in the reconnect
+ * branch — the two used to repeat the same condition, and a code present in one
+ * and missing from the other reconnects forever while explaining itself.
+ */
+const TERMINAL_CLOSES = [CLOSE_UNAUTHORIZED, CLOSE_CREDENTIAL_EXPIRED, CLOSE_ACCESS_REVOKED];
 
 /**
  * Lines to write into the terminal for a close the user should see, or null
  * when the close needs no notice (a normal hang-up, or one that will reconnect).
  */
 export function terminalCloseNotice(code: number, reason?: string): string[] | null {
-  if (code !== CLOSE_UNAUTHORIZED && code !== CLOSE_CREDENTIAL_EXPIRED) return null;
+  if (!TERMINAL_CLOSES.includes(code)) return null;
 
   const why =
     reason && reason.trim().length > 0
       ? reason.trim()
       : code === CLOSE_CREDENTIAL_EXPIRED
         ? 'credential expired'
-        : 'not authorized';
+        : code === CLOSE_ACCESS_REVOKED
+          ? 'access revoked'
+          : 'not authorized';
 
   return [
     `\r\n\x1b[33m[terminal closed: ${why}]\x1b[0m\r\n`,
@@ -40,5 +56,5 @@ export function terminalCloseNotice(code: number, reason?: string): string[] | n
 
 /** True when the client should attempt its reconnect sequence. */
 export function shouldReconnect(code: number): boolean {
-  return code !== CLOSE_UNAUTHORIZED && code !== CLOSE_CREDENTIAL_EXPIRED && code !== 1000;
+  return !TERMINAL_CLOSES.includes(code) && code !== 1000;
 }
