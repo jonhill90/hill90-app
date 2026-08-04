@@ -1,0 +1,17 @@
+-- What the reconciler actually saw, kept in a queryable form.
+--
+-- `inspectContainer` separates absence from ill-health correctly — a 404 is
+-- `null`, anything else rethrows — and reconciliation preserved that difference
+-- for exactly one expression:
+--
+--     state ? `Container ${state.status}` : 'Container not found'
+--
+-- ...before collapsing both into `status = 'stopped'`. The distinction survived
+-- only as free text in `error_message`, which nothing queries. So "was this
+-- agent stopped, or did its container vanish?" was answerable for the duration
+-- of one ternary and unrecoverable thereafter (#239).
+--
+-- Values: the docker container status verbatim ('running', 'exited', 'created',
+-- 'paused', 'restarting', 'dead'), or 'absent' when the daemon returned 404.
+-- NULL means the reconciler could not tell — it is not a synonym for 'absent'.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS container_state VARCHAR(20);

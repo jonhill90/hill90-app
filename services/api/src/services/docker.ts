@@ -560,11 +560,18 @@ export async function removeAgentVolumes(agentId: string): Promise<void> {
   }
 }
 
+/** The container did not exist — a 404, which is an ANSWER, not a failure. */
+export const CONTAINER_ABSENT = 'absent';
+
 export interface ReconcileResult {
   /** Agents whose recorded status was examined. */
   checked: number;
-  /** Agents demoted to `stopped` because their container was not running. */
+  /** Rows corrected in either direction. */
   reconciled: number;
+  /** `stopped`/`error` rows whose container was actually running. */
+  promoted: number;
+  /** `running` rows whose container was not. */
+  demoted: number;
   /**
    * `agent_id`s whose container could not be inspected at all. Their recorded
    * status was left untouched, so it is now unverified — see
@@ -574,12 +581,54 @@ export interface ReconcileResult {
   unverified: string[];
 }
 
+/** A row as reconciliation needs to see it. */
+export interface ReconcilableAgent {
+  id: string;
+  agent_id: string;
+  status: string;
+  container_id: string | null;
+  container_state: string | null;
+}
+
+/**
+ * A change reconciliation wants written. `containerId` and `errorMessage` are
+ * omitted when this pass has no opinion on them, so a row is never blanked by a
+ * write that was only about something else.
+ */
+export interface AgentStatusPatch {
+  id: string;
+  agentId: string;
+  previousStatus: string;
+  status: string;
+  /** What the daemon said: a docker status, `absent`, or null for "cannot tell". */
+  containerState: string | null;
+  containerId?: string | null;
+  errorMessage?: string | null;
+}
+
+/**
+ * Reconcile recorded agent status against the containers that actually exist.
+ *
+ * BOTH DIRECTIONS, which it did not used to do (#239). It selected rows already
+ * marked `running` and the only write it could make was to `stopped`, so an
+ * agent recorded `stopped` whose container was running was invisible to it by
+ * construction — no code path would ever look at that row. A start that created
+ * the container and died before its status update landed there permanently.
+ *
+ * ABSENCE IS KEPT, not flattened. `inspectContainer` separates a 404 from a
+ * fault correctly; this used to preserve that for exactly one expression
+ * (`state ? ... : 'Container not found'`) and then collapse both into
+ * `stopped`, leaving the difference in prose nothing queries. `containerState`
+ * carries it out in a queryable form instead.
+ */
 export async function reconcileAgentStatuses(
-  getRunningAgents: () => Promise<Array<{ id: string; agent_id: string }>>,
-  updateStatus: (id: string, status: string, containerId: string | null, error: string | null) => Promise<void>
+  getAgents: () => Promise<ReconcilableAgent[]>,
+  applyPatch: (patch: AgentStatusPatch) => Promise<void>
 ): Promise<ReconcileResult> {
-  const agents = await getRunningAgents();
-  const result: ReconcileResult = { checked: agents.length, reconciled: 0, unverified: [] };
+  const agents = await getAgents();
+  const result: ReconcileResult = {
+    checked: agents.length, reconciled: 0, promoted: 0, demoted: 0, unverified: [],
+  };
 
   for (const agent of agents) {
     // Per-agent, so one unreachable container does not abandon the rest of the
@@ -590,13 +639,51 @@ export async function reconcileAgentStatuses(
     } catch (err) {
       console.error(`[reconcile] Agent ${agent.agent_id} could not be inspected; status left UNVERIFIED:`, err);
       result.unverified.push(agent.agent_id);
+      // Do not leave a stale observation standing as though it were current.
+      // NULL means "could not tell", which is not the same as `absent`.
+      if (agent.container_state !== null) {
+        await applyPatch({
+          id: agent.id, agentId: agent.agent_id,
+          previousStatus: agent.status, status: agent.status,
+          containerState: null,
+        });
+      }
       continue;
     }
 
-    if (!state || state.status !== 'running') {
-      console.log(`[reconcile] Agent ${agent.agent_id} marked running but container is ${state?.status || 'missing'}`);
-      await updateStatus(agent.id, 'stopped', null, state ? `Container ${state.status}` : 'Container not found');
+    const containerState = state ? state.status : CONTAINER_ABSENT;
+    const containerIsRunning = state?.status === 'running';
+
+    if (containerIsRunning && agent.status !== 'running') {
+      // The direction that did not exist. Nothing else in the codebase looks
+      // for this row, so if this pass does not correct it, nothing will.
+      console.log(`[reconcile] Agent ${agent.agent_id} recorded ${agent.status} but its container IS running — promoting`);
+      await applyPatch({
+        id: agent.id, agentId: agent.agent_id,
+        previousStatus: agent.status, status: 'running',
+        containerState, containerId: state!.containerId, errorMessage: null,
+      });
+      result.promoted++;
       result.reconciled++;
+    } else if (!containerIsRunning && agent.status === 'running') {
+      console.log(`[reconcile] Agent ${agent.agent_id} marked running but container is ${containerState}`);
+      await applyPatch({
+        id: agent.id, agentId: agent.agent_id,
+        previousStatus: agent.status, status: 'stopped',
+        containerState, containerId: null,
+        errorMessage: state ? `Container ${state.status}` : 'Container not found',
+      });
+      result.demoted++;
+      result.reconciled++;
+    } else if (agent.container_state !== containerState) {
+      // Status already agrees; record WHAT WAS SEEN so that `stopped` because
+      // the container exited stays distinguishable from `stopped` because it is
+      // gone. No status write, so no churn on a steady state.
+      await applyPatch({
+        id: agent.id, agentId: agent.agent_id,
+        previousStatus: agent.status, status: agent.status,
+        containerState,
+      });
     }
   }
 
