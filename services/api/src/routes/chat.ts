@@ -51,6 +51,14 @@ const MAX_CHAIN_HOPS = parseInt(process.env.MAX_CHAIN_HOPS || '5', 10);
 const MAX_CHAIN_DURATION_MS = parseInt(process.env.MAX_CHAIN_DURATION_MS || '60000', 10);
 const DEFAULT_CHAT_MODEL = process.env.DEFAULT_CHAT_MODEL || 'claude-sonnet-4-20250514';
 
+// Cadence of the incremental correlation-set refresh on /threads/:id/events
+// (#216). Read per call, same pattern as inferencePollMs() in routes/agents.ts —
+// tests set it small; production leaves it unset and gets 5000.
+function chatEventsRefreshMs(): number {
+  const raw = parseInt(process.env.CHAT_EVENTS_REFRESH_MS || '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Helpers
 // ───────────────────────────────────────────────────────────────────
@@ -1699,7 +1707,7 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
           if (seq > lastSeenSeq) lastSeenSeq = seq;
         }
       } catch { /* ignore */ }
-    }, 5000);
+    }, chatEventsRefreshMs());
 
     // Keep-alive heartbeat
     // The participation re-check rides THIS tick rather than arming a second timer
