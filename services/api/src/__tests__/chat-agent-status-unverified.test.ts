@@ -69,19 +69,23 @@ const adminToken = jwt.sign(
 /**
  * A DISTINCT thread and agent per test, which is the point rather than tidiness.
  *
- * Three CI runs failed here with `Expected "stopped", Received "unknown"` while
- * every local run passed. The instrumentation settled it: `expectServed`
- * passed, so the route was handed `stopped` exactly once — and `reportedStatus`
- * returns anything that is not `running` unchanged, so that run cannot have
- * produced `unknown`. The body being read therefore belonged to a different
- * request. The one immediately before it, `a pass that fails outright…`,
- * returns exactly `{ id: THREAD_ID, agent: { status: 'unknown' } }`.
+ * Originally added on the theory that the repeating CI failure was a crossed
+ * body from the neighbouring test: every test shared one THREAD_ID, and the
+ * test before the failing one returns exactly
+ * `{ id: THREAD_ID, agent: { status: 'unknown' } }` — the observed value. With
+ * shared ids that was indistinguishable from the test's own response.
  *
- * The id guard could not see that, because every test used the SAME thread id,
- * so a crossed response was indistinguishable from its own. Per-test ids close
- * that: a stale or crossed body now fails on identity, which is what the guard
- * was for. See `docs/decisions/api-suite-flakiness.md` — "is the response
- * ours?" only answers anything if the fixtures can tell each other apart.
+ * **That theory is REFUTED, and these ids are what refuted it.** On the next
+ * run the id assertion PASSED against a per-test id, so the body did belong to
+ * this test. They stay because an identity check on an identifier that cannot
+ * distinguish anything is not a check — see
+ * `docs/decisions/api-suite-flakiness.md`, where "is the response ours?" is the
+ * central question. They are no longer evidence for a crossing.
+ *
+ * What survives is a contradiction, unresolved as of this commit: the stub
+ * served `stopped` exactly once, the body carries this test's own id, and the
+ * status came back `unknown`, which `reportedStatus` cannot produce from
+ * `stopped`. `dumpResponse` below exists to read that instead of inferring it.
  */
 let AGENT_UUID = '';
 let THREAD_ID = '';
@@ -199,6 +203,72 @@ function threadFrom(res: request.Response) {
   return res.body[0];
 }
 
+/**
+ * Everything needed to tell the candidate causes apart, printed on failure.
+ *
+ * This assertion has now failed four times in CI and zero times locally across
+ * 15 runs and every worker configuration, so the body has never once been in a
+ * debugger. Four rounds were spent narrowing by elimination when a single dump
+ * would have decided it. That is the actual defect being fixed here.
+ *
+ * `x-test-app-id` is `jest.identityguard.js`'s stamp — `${pid}:${workerId}` of
+ * whichever worker wrote the response. Reading it directly matters because
+ * "the guard stayed silent" is an INFERENCE that the stamp was right, and this
+ * record documents two holes found in that guard after it was working, with its
+ * third arm still uncontrolled. A guard that has lost an arm reports clean.
+ *
+ * What the three outcomes mean (see docs/decisions/api-suite-flakiness.md):
+ *
+ *   stamp ABSENT      → not this suite at all; a foreign responder on a
+ *                       colliding ephemeral port. The LogiPluginService class.
+ *   stamp DIFFERENT   → a sibling jest worker answered. The mechanism the
+ *                       investigation has demonstrated capable but never
+ *                       observed occurring naturally.
+ *   stamp OURS, body  → the falsifier the record names for the sibling-worker
+ *   wrong               hypothesis: "a correct stamp with a wrong body". Would
+ *                       be the first instance, and would move the whole
+ *                       investigation — so it must be read, never inferred.
+ */
+function dumpResponse(res: request.Response): string {
+  const stamp = res.headers?.['x-test-app-id'];
+  const ours = `${process.pid}:${process.env.JEST_WORKER_ID || '0'}`;
+  const verdict =
+    stamp === undefined ? 'ABSENT — foreign responder, not this suite'
+    : stamp === ours ? 'OURS — this worker wrote it'
+    : `DIFFERENT — a sibling worker wrote it (ours is ${ours})`;
+  const raw = typeof res.text === 'string' ? res.text.slice(0, 2000) : '<no raw text>';
+  return [
+    '',
+    '--- response diagnostics (#251, docs/decisions/api-suite-flakiness.md) ---',
+    `  identity stamp   : ${stamp ?? '<absent>'}`,
+    `  stamp verdict    : ${verdict}`,
+    `  http status      : ${res.status}`,
+    `  content-type     : ${res.headers?.['content-type'] ?? '<none>'}`,
+    `  expected thread  : ${THREAD_ID}`,
+    `  expected agent   : ${AGENT_SLUG} (${AGENT_UUID})`,
+    `  statuses served  : ${JSON.stringify(servedParticipantStatuses)}`,
+    `  parsed body      : ${JSON.stringify(res.body)}`,
+    `  raw text         : ${raw}`,
+    '--------------------------------------------------------------------------',
+  ].join('\n');
+}
+
+/**
+ * Assert the agent status, and make the failure readable in one pass.
+ *
+ * Wraps rather than replaces the assertions so jest still prints its own diff;
+ * the dump is appended to the message. Covers `threadFrom`'s checks too, since
+ * a wrong id and a wrong status need the same evidence to tell apart.
+ */
+function expectAgentStatus(res: request.Response, expected: string) {
+  try {
+    expect(threadFrom(res).agent.status).toBe(expected);
+  } catch (err: any) {
+    err.message = `${err.message}\n${dumpResponse(res)}`;
+    throw err;
+  }
+}
+
 /** Drive one reconcile pass over a single running agent. */
 async function reconcileWith(inspect: () => any, rejects: boolean) {
   mockQuery.mockResolvedValueOnce({ rows: [{ id: AGENT_UUID, agent_id: AGENT_SLUG }] });
@@ -231,8 +301,8 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
 
     // The database still says `running`. The API must not repeat that as fact.
     expectServed('running');
+    expectAgentStatus(res, 'unknown');
     const t = threadFrom(res);
-    expect(t.agent.status).toBe('unknown');
     expect(t.agent.status_verified).toBe(false);
     expect(t.agents[0].status).toBe('unknown');
   });
@@ -246,8 +316,8 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .set('Authorization', `Bearer ${adminToken}`);
 
     expectServed('running');
+    expectAgentStatus(res, 'running');
     const t = threadFrom(res);
-    expect(t.agent.status).toBe('running');
     expect(t.agent.status_verified).toBe(true);
     expect(t.agents[0].status).toBe('running');
   });
@@ -264,7 +334,7 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .set('Authorization', `Bearer ${adminToken}`);
 
     expectServed('running');
-    expect(threadFrom(res).agent.status).toBe('unknown');
+    expectAgentStatus(res, 'unknown');
   });
 
   it('a stopped row stays stopped — #239 is a different defect, not this one', async () => {
@@ -279,7 +349,7 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .set('Authorization', `Bearer ${adminToken}`);
 
     expectServed('stopped');
-    expect(threadFrom(res).agent.status).toBe('stopped');
+    expectAgentStatus(res, 'stopped');
   });
 
   it('a thread with no agent participant is untouched, not crashed', async () => {
