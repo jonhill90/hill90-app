@@ -1,5 +1,6 @@
 import { auth } from '@/auth'
 import { NextRequest, NextResponse } from 'next/server'
+import { nonJsonUpstreamResponse } from '@/utils/api-proxy'
 import {
   readBodyLimited,
   bodyTooLargeResponse,
@@ -106,14 +107,12 @@ async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ pa
       // A non-empty body that is not JSON IS a fault, and must still surface — this
       // guard must not become "ignore all parse failures". Name what came back
       // instead of letting a parser's complaint stand in for the cause.
-      console.error(
-        `[profile-proxy] upstream returned non-JSON (HTTP ${res.status}):`,
-        text.slice(0, 200),
-      )
-      return NextResponse.json(
-        { error: 'API request failed', upstream_status: res.status },
-        { status: 502 },
-      )
+      //
+      // #223: this site already logged and already named `upstream_status`, and
+      // still answered 502 for every one of them — so an upstream 404 arrived
+      // here as a 502 as well. The shared helper forwards the real status when
+      // the upstream gave one, and keeps 502 for a 2xx body that will not parse.
+      return nonJsonUpstreamResponse('profile-proxy', res.status, text)
     }
     return NextResponse.json(data, { status: res.status })
   } catch (err) {
