@@ -170,7 +170,8 @@ jobs:
           revs=$(ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
             deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
             'for c in app-api app-ui app-ai app-knowledge app-mcp \
-                      hill90/agentbox hill90/agentbox-monitor hill90/knowledge; do
+                      hill90/agentbox hill90/agentbox-monitor hill90/knowledge \
+                      $(docker ps --filter label=managed-by=hill90-api --format "{{.Names}}"); do
                if docker inspect "$c" >/dev/null 2>&1; then
                  printf "%s=%s\n" "$c" "$(docker inspect "$c" --format "{{index .Config.Labels \"com.hill90.revision\"}}" 2>/dev/null | tr -d "[:space:]")"
                fi
@@ -185,6 +186,50 @@ jobs:
           else
             echo "$revs"
           fi
+
+      # AGENT CONTAINERS ARE COMPARED SEPARATELY, and deliberately do not gate.
+      #
+      # #228: an agent started from image X keeps running X after the image is
+      # rebuilt to Y. Until this, the alarm compared the IMAGE to origin/main,
+      # found Y, and reported agreement — green about code it could not see.
+      # The containers now carry `com.hill90.revision` (docker.ts), so the two
+      # can finally be compared.
+      #
+      # WHY A WARNING AND NOT exit 1. The remedy is different: a stale agent
+      # needs RESTARTING, not deploying, and check_deploy_drift.sh's exit 1
+      # means "deployable code merged and not running". Collapsing them would
+      # lose the distinction that script exists to make — its own comment says
+      # so about 1 and 3. It would also redden the alarm for every long-lived
+      # agent after any agentbox rebuild, and nobody has answered how long agent
+      # containers live, which is the question #228 leaves open. An alarm that
+      # reddens for something the reader cannot act on is one that gets muted.
+      #
+      # SO THIS IS THE HONEST HALF-STEP: the fact exists, it is compared, and it
+      # is named on the run summary. It does not fail the build, and #228 stays
+      # open for that decision.
+      - name: Agents running older code than the image
+        if: inputs.deployed_sha_override == ''
+        run: |
+          set -uo pipefail
+          revs='${{ steps.revs.outputs.revisions }}'
+          image_rev=$(printf '%s\n' "$revs" | awk -F= '$1=="hill90/agentbox"{print $2}')
+          if [ -z "$image_rev" ]; then
+            echo "::warning::No revision for hill90/agentbox — cannot say whether any agent is behind it."
+            exit 0
+          fi
+          stale=0
+          while IFS='=' read -r name rev; do
+            case "$name" in agentbox-*) ;; *) continue ;; esac
+            if [ -z "$rev" ]; then
+              echo "::warning::Agent container $name carries no revision — cannot say whether it is current or behind."
+              stale=$((stale+1))
+            elif [ "$rev" != "$image_rev" ]; then
+              echo "::warning::Agent container $name runs $rev, image is $image_rev — restart it to pick up the newer image."
+              stale=$((stale+1))
+            fi
+          done <<< "$revs"
+          [ "$stale" -eq 0 ] && echo "Every running agent matches hill90/agentbox ($image_rev)."
+          exit 0
 
       - name: Compare deployed against main
         env:

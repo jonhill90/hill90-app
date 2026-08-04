@@ -142,13 +142,38 @@ export async function createAndStartContainer(opts: CreateAgentContainerOpts): P
     hostConfig.ShmSize = parseMemLimit(opts.metadata.shm_size);
   }
 
+  // #228: carry the image's revision onto the CONTAINER.
+  //
+  // The images have been stamped since #228's first half, and deploy-drift
+  // compares them against origin/main four-hourly. An agent started from image
+  // X keeps running X after the image is rebuilt to Y — so the alarm finds Y,
+  // reports agreement, and is GREEN about code it cannot see. That is worse
+  // than silence, and this is the fact it was missing.
+  //
+  // Absent rather than guessed: an image with no stamp (a hand-built one)
+  // leaves the label off, because `check_deploy_drift.sh` already has an
+  // honest state for a container that cannot say what it runs — exit 3,
+  // RUNNING CODE UNKNOWN — and a made-up value would turn that into a false
+  // comparison. A failure to read it never blocks the start: launching an
+  // agent is the user's action, the stamp is bookkeeping.
+  const imageRef = opts.image || 'hill90/agentbox:latest';
+  let imageRevision: string | undefined;
+  try {
+    const imageInfo: any = await docker.getImage(imageRef).inspect();
+    const stamp = imageInfo?.Config?.Labels?.['com.hill90.revision'];
+    if (typeof stamp === 'string' && stamp.trim() !== '') imageRevision = stamp.trim();
+  } catch (err) {
+    console.warn(`[docker] Could not read ${imageRef}'s revision label; the agent container will carry none:`, err);
+  }
+
   const container = await docker.createContainer({
-    Image: opts.image || 'hill90/agentbox:latest',
+    Image: imageRef,
     name: containerName,
     Env: envVars,
     Labels: {
       [MANAGED_LABEL]: MANAGED_VALUE,
       'traefik.enable': 'false',
+      ...(imageRevision ? { 'com.hill90.revision': imageRevision } : {}),
     },
     HostConfig: hostConfig,
   });
