@@ -206,3 +206,27 @@ def test_last_sentinel_wins_when_the_pane_has_history():
     # plausible number for the wrong command, which is the hardest kind to notice.
     assert result["exit_code"] == 2
     assert result["success"] is False
+
+
+def test_chars_and_bytes_are_reported_separately_for_multibyte_content(fs_tmp):
+    """Pins the claim the comment in filesystem.py rests on.
+
+    It says `read()` in text mode counts CHARACTERS, so `chars_returned` and
+    `size_bytes` are not comparable for non-ASCII content. Every other fixture in
+    this file is ASCII, where the two are equal — so none of them could tell
+    whether the claim is right, and the field could silently start reporting bytes
+    without any test noticing.
+
+    'é' is one character and two bytes in UTF-8, which makes the difference
+    observable.
+    """
+    multibyte = fs_tmp / "accents.txt"
+    multibyte.write_text("é" * 100, encoding="utf-8")
+
+    result = json.loads(_run(filesystem.read_file(str(multibyte))))
+
+    assert result["chars_returned"] == 100      # characters, from read()
+    assert result["size_bytes"] == 200          # bytes, from stat
+    assert result["truncated"] is False
+    # The point of the pin: these must NOT be the same number.
+    assert result["chars_returned"] != result["size_bytes"]
