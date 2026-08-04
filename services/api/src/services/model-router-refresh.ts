@@ -69,6 +69,24 @@ export async function modelRouterRefreshHandler(req: Request, res: Response): Pr
   );
 
   if (rows.length === 0) {
+    // Name the agent and what did NOT happen to it. A failed refresh used to
+    // leave nothing on this side at all — no row, no counter, no line — so a
+    // failure was distinguishable from a success only by the absence of a log
+    // entry that is never written (#255). The success case has logged since it
+    // was written, below.
+    //
+    // The consequence is the part worth reading, not the status code: this
+    // agent's model-router token was not renewed, it will expire on its own
+    // schedule, and its model calls fail closed after that.
+    //
+    // `sub` comes from an unverified token BY DESIGN — the bearer may be
+    // expired, which is what refresh is for — so this is the identity the
+    // caller claimed, and it says so rather than presenting it as established.
+    console.warn(
+      `[model-router-refresh] Token NOT renewed for agent "${sub}": no running agent matches that ` +
+      'identity and refresh secret. Its current token will expire and its model calls will then ' +
+      'fail. (Identity claimed by the caller, not verified.)'
+    );
     res.status(401).json({ error: 'invalid refresh secret' });
     return;
   }
