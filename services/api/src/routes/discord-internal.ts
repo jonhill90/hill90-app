@@ -77,55 +77,88 @@ router.post('/message', async (req: Request, res: Response) => {
       }
     }
 
-    // Create thread if none exists
-    if (!threadId) {
-      const { rows: newThread } = await getPool().query(
-        `INSERT INTO chat_threads (title, created_by)
-         VALUES ($1, $2) RETURNING id`,
-        [`Discord: ${channel_id}`, userId],
-      );
-      threadId = newThread[0].id;
+    /*
+     * SIX WRITES, ONE RELAY — so they run in one transaction.
+     *
+     * They were six independent statements. A failure anywhere after the first
+     * answered the bot 500 "Failed to relay message" while leaving behind some
+     * subset: a thread with no participants, a binding pointing at it, a user
+     * message with no assistant placeholder, or a placeholder stuck 'pending'
+     * that nothing will ever fill because the dispatch never happened.
+     *
+     * This path is worse than its sibling in chat.ts for two reasons. There is no
+     * idempotency key, so the bot's retry creates a SECOND thread rather than
+     * resuming the first — the half-write is not merely left behind, it is
+     * duplicated. And the 'pending' placeholder is the one residue that looks
+     * alive: it is indistinguishable from a reply that is still being written.
+     * Neither self-identifying nor usefully detectable — the bottom rung of the
+     * ranking in workflows.ts.
+     *
+     * Same shape as provider-connections.ts:296 and chat.ts's thread create.
+     */
+    const client = await getPool().connect();
+    let messageId: string;
+    let assistantMessageId: string;
+    try {
+      await client.query('BEGIN');
 
-      // Update binding with thread ID
-      await getPool().query(
-        'UPDATE discord_channel_bindings SET thread_id = $1 WHERE channel_id = $2',
-        [threadId, channel_id],
+      // Create thread if none exists
+      if (!threadId) {
+        const { rows: newThread } = await client.query(
+          `INSERT INTO chat_threads (title, created_by)
+           VALUES ($1, $2) RETURNING id`,
+          [`Discord: ${channel_id}`, userId],
+        );
+        threadId = newThread[0].id;
+
+        // Update binding with thread ID
+        await client.query(
+          'UPDATE discord_channel_bindings SET thread_id = $1 WHERE channel_id = $2',
+          [threadId, channel_id],
+        );
+
+        // Add participants
+        await client.query(
+          `INSERT INTO chat_participants (thread_id, participant_type, participant_id)
+           VALUES ($1, 'user', $2), ($1, 'agent', $3)
+           ON CONFLICT DO NOTHING`,
+          [threadId, userId, binding.agent_id],
+        );
+      }
+
+      // Insert user message
+      const { rows: msgs } = await client.query(
+        `INSERT INTO chat_messages (thread_id, author_type, author_id, content, status, seq)
+         VALUES ($1, 'user', $2, $3, 'delivered', nextval('chat_messages_seq'))
+         RETURNING id`,
+        [threadId, userId, content],
       );
 
-      // Add participants
-      await getPool().query(
-        `INSERT INTO chat_participants (thread_id, participant_type, participant_id)
-         VALUES ($1, 'user', $2), ($1, 'agent', $3)
-         ON CONFLICT DO NOTHING`,
-        [threadId, userId, binding.agent_id],
+      messageId = msgs[0].id;
+
+      // Insert pending assistant message (agent will fill via callback)
+      const { rows: assistantMsgs } = await client.query(
+        `INSERT INTO chat_messages (thread_id, author_type, author_id, content, status, seq)
+         VALUES ($1, 'agent', $2, '', 'pending', nextval('chat_messages_seq'))
+         RETURNING id`,
+        [threadId, binding.agent_id],
       );
+
+      assistantMessageId = assistantMsgs[0].id;
+
+      // Update thread timestamp
+      await client.query(
+        'UPDATE chat_threads SET updated_at = NOW() WHERE id = $1',
+        [threadId],
+      );
+
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => { /* the connection may already be gone */ });
+      throw txErr;
+    } finally {
+      client.release();
     }
-
-    // Insert user message
-    const { rows: msgs } = await getPool().query(
-      `INSERT INTO chat_messages (thread_id, author_type, author_id, content, status, seq)
-       VALUES ($1, 'user', $2, $3, 'delivered', nextval('chat_messages_seq'))
-       RETURNING id`,
-      [threadId, userId, content],
-    );
-
-    const messageId = msgs[0].id;
-
-    // Insert pending assistant message (agent will fill via callback)
-    const { rows: assistantMsgs } = await getPool().query(
-      `INSERT INTO chat_messages (thread_id, author_type, author_id, content, status, seq)
-       VALUES ($1, 'agent', $2, '', 'pending', nextval('chat_messages_seq'))
-       RETURNING id`,
-      [threadId, binding.agent_id],
-    );
-
-    const assistantMessageId = assistantMsgs[0].id;
-
-    // Update thread timestamp
-    await getPool().query(
-      'UPDATE chat_threads SET updated_at = NOW() WHERE id = $1',
-      [threadId],
-    );
 
     res.json({
       thread_id: threadId,

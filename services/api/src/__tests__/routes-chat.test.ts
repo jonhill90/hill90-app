@@ -15,7 +15,26 @@ const TEST_ISSUER = 'https://auth.hill90.com/realms/hill90';
 // Mock pg pool
 const mockQuery = jest.fn();
 jest.mock('../db/pool', () => ({
-  getPool: () => ({ query: mockQuery }),
+  // `connect` is backed by the SAME mockQuery as the pool, so the transactional
+  // paths (thread create) and the non-transactional ones are asserted through one
+  // mock — every existing expectation keeps testing what it tested before.
+  // BEGIN/COMMIT/ROLLBACK fall through to the default implementation.
+  getPool: () => ({
+    query: mockQuery,
+    connect: async () => ({
+      // BEGIN/COMMIT/ROLLBACK are answered WITHOUT consuming the mock queue.
+      // These tests queue responses in order with mockResolvedValueOnce, so
+      // letting transaction control take a slot would shift every subsequent
+      // expectation by two and fail them for a reason that has nothing to do
+      // with what they assert. Data statements still go to mockQuery, so each
+      // test exercises the same sequence it always did.
+      query: (sql: unknown, params?: unknown) =>
+        typeof sql === 'string' && /^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(sql)
+          ? Promise.resolve({ rows: [], rowCount: 0 })
+          : mockQuery(sql, params),
+      release: () => {},
+    }),
+  }),
 }));
 
 // Mock docker service (needed because agents.ts is imported transitively)
