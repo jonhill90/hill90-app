@@ -46,11 +46,19 @@ export async function modelRouterRefreshHandler(req: Request, res: Response): Pr
   try {
     // Decode JWT payload without verification (token may be expired)
     const parts = token.split('.');
-    if (parts.length !== 3) throw new Error('malformed JWT');
+    if (parts.length !== 3) throw new Error('malformed JWT: expected three segments');
     const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
     sub = payload.sub;
-    if (!sub) throw new Error('missing sub claim');
-  } catch {
+    if (!sub) throw new Error('no sub claim in the token payload');
+  } catch (err) {
+    // A REFUSAL SAYS WHY. This was `catch { … 'invalid token' }` with no binding and
+    // no log, so three distinguishable faults — not a JWT, an unparseable payload, a
+    // payload with no subject — produced one opaque 401 and no record of which.
+    // That is the defect middleware/auth.ts fixed on 2026-08-03 (#114), surviving
+    // here because the fix went to one file. The token is never logged; the message
+    // carries the cause and no credential material.
+    const detail = err instanceof Error ? err.message : 'unknown error';
+    console.warn(`[model-router-refresh] token rejected — ${detail}`);
     res.status(401).json({ error: 'invalid token' });
     return;
   }
