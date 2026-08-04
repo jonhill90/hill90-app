@@ -9,10 +9,8 @@
 The app is a **tenant** of Hill90, not a peer. `deploy/compose/prod/*.yml`
 declare `hill90_edge` and `hill90_internal` as `external: true`; Hill90's
 `docker-compose.infra.yml` creates them. Nothing in this repo starts until
-Hill90's infra is up. See [infra-app-separation](infra-app-separation.md) and
-the extraction record's deploy-path section (since removed —
-its durable content is in [PROVENANCE.md](../extraction/PROVENANCE.md) and
-[secret-layout.md](../reference/secret-layout.md)).
+Hill90's infra is up. Secret paths and their purposes are in
+[secret-layout.md](../reference/secret-layout.md).
 
 The goal is: app running locally, then on the VPS, then documented. This record
 captures the verification pass that preceded any change, because several
@@ -1433,10 +1431,8 @@ class as the incident, pointing the other way.
 **`discord-bot` and `agentbox-images` are disowned by the tooling.** Neither has an
 entry in `stack_containers`, `stack_secrets`, `stack_summary`, `DEPLOY_ORDER` or the
 dispatcher allowlist, so neither is deployable through `deploy.sh` at all. That is
-consistent with the extraction record — neither has ever been in an automated deploy,
-now recorded in docs/extraction/PROVENANCE.md —
-but it means the secrets table does not cover them by design rather than by
-oversight.
+neither has ever been in an automated deploy, so the secrets table does not cover
+them by design rather than by oversight.
 
 **`scripts/local.sh` remains a second, ungoverned path.** It passes
 `--env-file .env.local` to compose directly and never sources `_common.sh`, so it

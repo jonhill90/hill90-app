@@ -79,15 +79,6 @@ those two moved to GitHub — `AI-258` is now
   `TARGETARCH`. The reason it must not be hardcoded is documented in the Dockerfile
   itself.
 
-## History
-
-Commits before 2026-07-26 were rewritten by `git filter-repo` during extraction
-and have different SHAs than their Hill90 originals.
-[`docs/extraction/commit-map.txt`](docs/extraction/commit-map.txt) maps old to
-new. Commits from before `refactor: restructure to ops-first monorepo layout
-(#124)` reference paths under `src/services/`, which is where this code lived
-until then.
-
 ## Read the Copilot review before merging — and verify it
 
 Every PR here gets a GitHub Copilot code review (`dynamic/agents/copilot-pull-request-reviewer`).
