@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.services import shared_store
 from app.services.quality import compute_quality_summary, enrich_results_with_quality
@@ -108,8 +108,19 @@ async def search_shared(
 
 
 @router.get("/collections")
-async def list_collections(request: Request) -> list[dict[str, Any]]:
-    """List shared knowledge collections visible to the agent's owner."""
+async def list_collections(
+    request: Request,
+    response: Response,
+    limit: int = Query(500, ge=1, le=2000, description="Max collections to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip before the page"),
+) -> list[dict[str, Any]]:
+    """List one page of shared collections visible to the agent's owner.
+
+    The last unbounded read on the agent surface (#207). The body stays a bare
+    JSON array and the total travels in ``X-Total-Count``, matching
+    /api/v1/entries and /api/v1/tasks — a body object would break any consumer
+    treating this as a list, and they deploy independently.
+    """
     claims = _get_claims(request)
     pool = request.app.state.pool
 
@@ -120,4 +131,8 @@ async def list_collections(request: Request) -> list[dict[str, Any]]:
             detail="agent JWT missing owner claim",
         )
 
-    return await shared_store.list_collections(pool, owner=owner)
+    collections, total = await shared_store.list_collections(
+        pool, owner=owner, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return collections
