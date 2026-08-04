@@ -253,12 +253,25 @@ async def backfill_embeddings(
 @router.get("/sources")
 async def list_sources(
     request: Request,
+    response: Response,
     collection_id: str = Query(..., description="Collection to list sources from"),
+    limit: int = Query(200, ge=1, le=1000, description="Max sources to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip before the page"),
 ) -> list[dict[str, Any]]:
+    """One page of a collection's sources.
+
+    The total travels in ``X-Total-Count`` and the body stays a bare array, for
+    the reason `list_entries` records: a consumer on an older build does
+    ``Array.isArray(data) ? data : []``, so a body object here renders an EMPTY
+    list — the silent truncation this bound exists to prevent, caused by the fix
+    for it (#180).
+    """
     _verify_service_token(request)
     _validate_uuid(collection_id, "collection_id")
     pool = request.app.state.pool
-    return await shared_store.list_sources(pool, collection_id)
+    sources, total = await shared_store.list_sources(pool, collection_id, limit=limit, offset=offset)
+    response.headers["X-Total-Count"] = str(total)
+    return sources
 
 
 @router.get("/sources/{source_id}")

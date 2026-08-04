@@ -3,6 +3,8 @@
  * internal admin endpoints. Authenticated with AKM_INTERNAL_SERVICE_TOKEN.
  */
 
+import { totalFrom } from '../helpers/upstream-total';
+
 const AKM_SERVICE_URL = process.env.AKM_SERVICE_URL || 'http://knowledge:8002';
 const AKM_INTERNAL_SERVICE_TOKEN = process.env.AKM_INTERNAL_SERVICE_TOKEN;
 
@@ -67,16 +69,6 @@ export interface ProxyResponse {
  * knowledge build without the `LIMIT`, so the array IS every row and its
  * length IS the total. The fallback holds exactly in the case it applies to.
  */
-function totalFrom(resp: Response, data: unknown): number | null {
-  const fallback = Array.isArray(data) ? data.length : null;
-  const header = resp.headers?.get?.('X-Total-Count');
-  if (header === null || header === undefined || header === '') return fallback;
-
-  const parsed = Number(header);
-  // A non-numeric header must not become NaN on a dashboard.
-  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
-  return parsed;
-}
 
 async function proxyGet(path: string, params?: Record<string, string>): Promise<ProxyResponse> {
   if (!AKM_INTERNAL_SERVICE_TOKEN) {

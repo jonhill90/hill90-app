@@ -4,12 +4,16 @@
  * Authenticated with AKM_INTERNAL_SERVICE_TOKEN (same token as AKM proxy).
  */
 
+import { totalFrom } from '../helpers/upstream-total';
+
 const AKM_SERVICE_URL = process.env.AKM_SERVICE_URL || 'http://knowledge:8002';
 const AKM_INTERNAL_SERVICE_TOKEN = process.env.AKM_INTERNAL_SERVICE_TOKEN;
 
 export interface ProxyResponse {
   status: number;
   data: unknown;
+  /** From X-Total-Count when the upstream sends it (#180). */
+  total?: number | null;
 }
 
 async function proxyRequest(
@@ -55,7 +59,7 @@ async function proxyRequest(
   } catch {
     return { status: 502, data: { error: 'Knowledge service returned non-JSON response' } };
   }
-  return { status: resp.status, data };
+  return { status: resp.status, data, total: totalFrom(resp, data) };
 }
 
 // Graph
