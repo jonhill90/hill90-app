@@ -16,8 +16,9 @@
  */
 
 import { getPool } from '../db/pool';
-import { reconcileAgentStatuses, ReconcileResult } from './docker';
+import { reconcileAgentStatuses, ReconcileResult, CONTAINER_ABSENT } from './docker';
 import { recordReconcilePass, recordReconcileFailure, UNKNOWN_STATUS } from './agent-status-verification';
+import { notify } from './notifications';
 
 const DEFAULT_INTERVAL_MS = 60_000;
 
@@ -37,7 +38,7 @@ export async function runReconcilePass(): Promise<ReconcileResult | null> {
         // Unbounded by design: it is the whole table or it is not reconciliation,
         // and there is no caller-controlled multiplier here.
         const { rows } = await getPool().query(
-          'SELECT id, agent_id, status, container_id, container_state FROM agents'
+          'SELECT id, agent_id, status, container_id, container_state, created_by FROM agents'
         );
         return rows;
       },
@@ -69,6 +70,27 @@ export async function runReconcilePass(): Promise<ReconcileResult | null> {
           );
         } catch (err) {
           console.error(`[reconcile] Status history insert failed for ${patch.agentId}:`, err);
+        }
+
+        // An `exited` container is an agent that stopped. An `absent` one is a
+        // container that someone or something DELETED out from under the API,
+        // and only the second is a case a human should hear about. That is the
+        // distinction, and it is why this is worth surfacing rather than merely
+        // storing: #239 kept the difference in `container_state` instead of
+        // flattening both into `stopped`, and a distinction that is computed
+        // and then read by nobody is the same waste one layer up.
+        //
+        // Fires once per transition — the early return above means this line is
+        // only reached when the status actually changed, and the next pass finds
+        // the row agreeing and writes nothing. Asserted, not argued:
+        // `vanished-container-escalation.test.ts` runs the second pass.
+        if (patch.status === 'stopped' && patch.containerState === CONTAINER_ABSENT) {
+          notify(
+            patch.createdBy,
+            `Agent "${patch.agentId}" is no longer running: its container was deleted, not stopped.`,
+            'agent_error',
+            { agent_id: patch.id, agent_slug: patch.agentId, container_state: CONTAINER_ABSENT },
+          );
         }
       }
     );

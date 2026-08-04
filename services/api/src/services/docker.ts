@@ -588,6 +588,8 @@ export interface ReconcilableAgent {
   status: string;
   container_id: string | null;
   container_state: string | null;
+  /** Carried so a demotion can be escalated to the agent's owner. */
+  created_by: string;
 }
 
 /**
@@ -598,6 +600,7 @@ export interface ReconcilableAgent {
 export interface AgentStatusPatch {
   id: string;
   agentId: string;
+  createdBy: string;
   previousStatus: string;
   status: string;
   /** What the daemon said: a docker status, `absent`, or null for "cannot tell". */
@@ -643,7 +646,7 @@ export async function reconcileAgentStatuses(
       // NULL means "could not tell", which is not the same as `absent`.
       if (agent.container_state !== null) {
         await applyPatch({
-          id: agent.id, agentId: agent.agent_id,
+          id: agent.id, agentId: agent.agent_id, createdBy: agent.created_by,
           previousStatus: agent.status, status: agent.status,
           containerState: null,
         });
@@ -659,7 +662,7 @@ export async function reconcileAgentStatuses(
       // for this row, so if this pass does not correct it, nothing will.
       console.log(`[reconcile] Agent ${agent.agent_id} recorded ${agent.status} but its container IS running — promoting`);
       await applyPatch({
-        id: agent.id, agentId: agent.agent_id,
+        id: agent.id, agentId: agent.agent_id, createdBy: agent.created_by,
         previousStatus: agent.status, status: 'running',
         containerState, containerId: state!.containerId, errorMessage: null,
       });
@@ -668,7 +671,7 @@ export async function reconcileAgentStatuses(
     } else if (!containerIsRunning && agent.status === 'running') {
       console.log(`[reconcile] Agent ${agent.agent_id} marked running but container is ${containerState}`);
       await applyPatch({
-        id: agent.id, agentId: agent.agent_id,
+        id: agent.id, agentId: agent.agent_id, createdBy: agent.created_by,
         previousStatus: agent.status, status: 'stopped',
         containerState, containerId: null,
         errorMessage: state ? `Container ${state.status}` : 'Container not found',
@@ -680,7 +683,7 @@ export async function reconcileAgentStatuses(
       // the container exited stays distinguishable from `stopped` because it is
       // gone. No status write, so no churn on a steady state.
       await applyPatch({
-        id: agent.id, agentId: agent.agent_id,
+        id: agent.id, agentId: agent.agent_id, createdBy: agent.created_by,
         previousStatus: agent.status, status: agent.status,
         containerState,
       });
