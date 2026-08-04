@@ -19,9 +19,8 @@
  * anything. That is the same rule as the drift check's exit codes 1 and 2: a
  * finding and an absence of evidence must not collapse into one another.
  *
- * NOT COVERED, deliberately: a `stopped` row whose container is really running.
- * That is #239 — unverified by construction rather than by failure — and the
- * reconciler examines only `running` rows, so nothing here would see it.
+ * NOT COVERED HERE: a `stopped` row whose container is really running. That is
+ * #239, and it has its own file — `agent-reconcile-both-directions.test.ts`.
  */
 import request from 'supertest';
 import * as crypto from 'crypto';
@@ -80,9 +79,16 @@ function proxyUnreachable() {
   return err;
 }
 
-/** The reconciler's SELECT of rows recorded as running. */
-function selectRunning(rows: Array<{ id: string; agent_id: string }>) {
-  mockQuery.mockResolvedValueOnce({ rows });
+/**
+ * The reconciler's SELECT. Since #239 it reads every agent row, not only the
+ * ones recorded `running`, so the fixture carries the columns it now reads.
+ */
+function selectAgents(rows: Array<{ id: string; agent_id: string; status?: string }>) {
+  mockQuery.mockResolvedValueOnce({
+    rows: rows.map((r) => ({
+      status: 'running', container_id: 'container-id-123', container_state: 'running', ...r,
+    })),
+  });
 }
 
 beforeEach(() => {
@@ -98,7 +104,7 @@ afterEach(() => {
 
 describe('reconciliation records what it could not verify', () => {
   it('POSITIVE CONTROL: a throwing docker dependency leaves the agent unverified', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockRejectedValue(proxyUnreachable());
 
     const result = await runReconcilePass();
@@ -110,13 +116,18 @@ describe('reconciliation records what it could not verify', () => {
     // the database holds.
     expect(reportedStatus('test-agent', 'running')).toBe('unknown');
 
-    // And it did not write a status it has no evidence for.
+    // And it did not write a status it has no evidence for. It DOES clear the
+    // last observation (#239's `container_state`), because a stale sighting
+    // must not stand as though it were current — but the status is written
+    // back unchanged.
     const updates = mockQuery.mock.calls.filter((c) => String(c[0]).includes('UPDATE agents'));
-    expect(updates).toHaveLength(0);
+    expect(updates).toHaveLength(1);
+    expect(updates[0][1][0]).toBe('running');   // status: unchanged
+    expect(updates[0][1][1]).toBeNull();        // container_state: cannot tell
   });
 
   it('TWIN: the same fixture on a working dependency reports running', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockResolvedValue(runningContainer());
 
     const result = await runReconcilePass();
@@ -127,7 +138,7 @@ describe('reconciliation records what it could not verify', () => {
   });
 
   it('a 404 is an ANSWER, not an absence of evidence: the agent is demoted, not unknown', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'gone-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'gone-agent' }]);
     const notFound: any = new Error('no such container');
     notFound.statusCode = 404;
     mockContainerInspect.mockRejectedValue(notFound);
@@ -141,7 +152,7 @@ describe('reconciliation records what it could not verify', () => {
   });
 
   it('one unreachable container does not abandon the rest of the pass', async () => {
-    selectRunning([
+    selectAgents([
       { id: 'uuid-1', agent_id: 'broken-agent' },
       { id: 'uuid-2', agent_id: 'fine-agent' },
     ]);
@@ -168,14 +179,14 @@ describe('reconciliation records what it could not verify', () => {
   });
 
   it('a later successful pass clears an agent that an earlier one could not check', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockRejectedValueOnce(proxyUnreachable());
     await runReconcilePass();
     expect(reportedStatus('test-agent', 'running')).toBe('unknown');
 
     // This is what the scheduled re-run buys: a transient fault self-corrects
     // instead of persisting until the next restart.
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockResolvedValueOnce(runningContainer());
     await runReconcilePass();
 
@@ -197,7 +208,7 @@ describe('the API reports the unverified status, not the recorded one', () => {
   }
 
   it('POSITIVE CONTROL: GET /agents reports unknown after a failed pass', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockRejectedValue(proxyUnreachable());
     await runReconcilePass();
 
@@ -212,7 +223,7 @@ describe('the API reports the unverified status, not the recorded one', () => {
   });
 
   it('TWIN: GET /agents reports running after a successful pass', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockResolvedValue(runningContainer());
     await runReconcilePass();
 
@@ -227,7 +238,7 @@ describe('the API reports the unverified status, not the recorded one', () => {
   });
 
   it('POSITIVE CONTROL: GET /agents/:id reports unknown after a failed pass', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockRejectedValue(proxyUnreachable());
     await runReconcilePass();
 
@@ -244,7 +255,7 @@ describe('the API reports the unverified status, not the recorded one', () => {
   });
 
   it('TWIN: GET /agents/:id reports running after a successful pass', async () => {
-    selectRunning([{ id: 'uuid-1', agent_id: 'test-agent' }]);
+    selectAgents([{ id: 'uuid-1', agent_id: 'test-agent' }]);
     mockContainerInspect.mockResolvedValue(runningContainer());
     await runReconcilePass();
 
@@ -260,7 +271,13 @@ describe('the API reports the unverified status, not the recorded one', () => {
     expect(res.body.status_verified).toBe(true);
   });
 
-  it('a stopped row is reported as stopped even when nothing was verified — #239 is a different defect', async () => {
+  it('a stopped row is ALSO reported unknown when nothing was verified — this changed with #239', async () => {
+    // This asserted `stopped` until #239. The reason was not that a stopped row
+    // is more trustworthy: it was that the reconciler examined only `running`
+    // rows, so a stopped row was unverified by construction and would have read
+    // `unknown` forever. #239 made the pass read every row and correct in both
+    // directions, so a stopped row is now a claim the reconciler backs — and an
+    // unchecked one is exactly as unbacked as an unchecked running one.
     mockQuery.mockRejectedValueOnce(new Error('database is not accepting connections'));
     await runReconcilePass();
 
@@ -269,6 +286,7 @@ describe('the API reports the unverified status, not the recorded one', () => {
       .get('/agents')
       .set('Authorization', `Bearer ${adminToken}`);
 
-    expect(res.body[0].status).toBe('stopped');
+    expect(res.body[0].status).toBe('unknown');
+    expect(res.body[0].status_verified).toBe(false);
   });
 });

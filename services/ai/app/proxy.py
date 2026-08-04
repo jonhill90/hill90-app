@@ -151,6 +151,39 @@ def _extract_usage_from_event(event_text: str) -> dict[str, Any] | None:
     return None
 
 
+def stream_error_event(exc: BaseException) -> bytes:
+    """The terminal SSE event for a stream that broke before it finished (#259).
+
+    WHY THIS EXISTS. Once the 200 and the SSE headers are on the wire there is no
+    status code left to change, so the only thing that can carry a failure is the
+    shape of the ending. A generator that returns normally produces a response
+    body that terminates normally: the caller sees a well-formed stream that
+    simply stops — no `[DONE]`, no chunk carrying `finish_reason`, and nothing
+    saying anything went wrong. That is indistinguishable from a short answer.
+
+    MARK IT, DO NOT DISCARD IT, exactly as #263 does for the non-streaming path:
+    the tokens already delivered are real and the consumer has already begun
+    acting on them. What must not happen is the stream ending as though there
+    were no more to come.
+
+    DELIBERATELY NOT `data: [DONE]`. That sentinel is the upstream's statement
+    that the answer is whole, and this is the opposite statement.
+
+    The detail is the transport error's type and message, truncated. The request
+    body — including any BYOK key — is scrubbed by the caller before this point,
+    and httpx transport errors carry the connection failure, not headers.
+    """
+    detail = f"{exc.__class__.__name__}: {exc}"[:200]
+    payload = {
+        "error": {
+            "message": f"upstream stream ended before completion: {detail}",
+            "type": "upstream_stream_error",
+            "code": "stream_incomplete",
+        }
+    }
+    return f"data: {json_mod.dumps(payload)}\n\n".encode()
+
+
 @dataclass
 class StreamOpenResult:
     """Result of opening a streaming connection to LiteLLM.

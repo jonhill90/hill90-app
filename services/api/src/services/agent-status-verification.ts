@@ -13,17 +13,16 @@
  * distinguishes ACTIONABLE DRIFT (1) from CANNOT DETERMINE (2): an answer, and
  * an absence of evidence, are not the same result and must not be collapsed.
  *
- * Scope, deliberately: only a `running` row can be reported unknown. That is
- * the only claim the reconciler backs — it selects rows already marked
- * `running` and the only write it can make is to `stopped`. A `stopped` row is
- * unverified by construction rather than by failure, which is #239, a different
- * defect, and is not addressed here.
+ * Scope: EVERY recorded status can be reported unknown. This said "only a
+ * `running` row" while the reconciler examined only rows marked `running` — a
+ * `stopped` row was then unverified by construction rather than by failure, so
+ * calling it unverified would have meant calling it that forever. #239 made the
+ * pass read every row and correct in both directions, so a `stopped` row is now
+ * a claim the reconciler backs, and an unchecked one is exactly as unbacked as
+ * an unchecked `running` row.
  */
 
 export const UNKNOWN_STATUS = 'unknown';
-
-/** The status the reconciler examines, and therefore the only one it vouches for. */
-const VERIFIABLE_STATUS = 'running';
 
 /**
  * Verified unless we know otherwise. The process does not serve before the
@@ -73,11 +72,10 @@ export function isStatusVerified(agentId: string): boolean {
 
 /**
  * What the API is entitled to say about this agent. Returns `unknown` in place
- * of a `running` row that nothing has checked — never the last value the
+ * of any recorded status that nothing has checked — never the last value the
  * database happens to hold.
  */
 export function reportedStatus(agentId: string, recordedStatus: string): string {
-  if (recordedStatus !== VERIFIABLE_STATUS) return recordedStatus;
   return isStatusVerified(agentId) ? recordedStatus : UNKNOWN_STATUS;
 }
 
