@@ -141,10 +141,19 @@ function BrowserView({ threadId, active }: { threadId: string; active: boolean }
    * thread you are on now. So a value carried over from A navigates B's browser.
    * This is the same shape as app#181.
    *
-   * A `key={threadId}` on the render would fix both in one line. It is not taken
-   * deliberately: it would also discard `viewMode` and `filter` on every thread
-   * switch, which is a UX change smuggled in as a bug fix, and a fix that quietly
-   * changes behaviour is how the next person learns not to trust our fixes.
+   * A `key={threadId}` on the render below would fix both in one line. It is not
+   * taken deliberately: it would discard state the USER chose rather than state
+   * the thread supplied — `takeControl` and `describeMode` here, and `filter`,
+   * `events` and `autoScroll` if the key went on SessionPane instead. That is a
+   * UX change smuggled in as a bug fix, and a fix that quietly changes behaviour
+   * is how the next person learns not to trust our fixes.
+   *
+   * This comment used to name `viewMode` as the thing that would be lost. It is
+   * not: ChatView owns the tab and passes it as `initialTab`, which seeds viewMode
+   * and is re-applied by an effect, so any remount restores it. The decision is
+   * unchanged; the reason given for it was wrong. Corrected when a test written to
+   * hold the decision down failed to reproduce the loss it claimed —
+   * SessionPane-state-survives-thread-switch.test.tsx now holds what is real.
    */
 
   /** The thread whose response is allowed to write state. Read at response time. */
