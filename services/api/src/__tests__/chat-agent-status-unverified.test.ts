@@ -85,6 +85,18 @@ function proxyUnreachable() {
 }
 
 /**
+ * What the stub actually handed the route for the participants query, in order.
+ *
+ * This exists because a CI failure reported `Received: "unknown"` where the
+ * fixture said `stopped`, and that symptom has two very different causes which
+ * the assertion could not separate: the stub was not the active implementation,
+ * or the route mapped a correct row wrongly. `reportedStatus` returns `unknown`
+ * only when handed `running`, so recording what was served decides it. A test
+ * that reports a symptom it cannot locate costs more than it saves.
+ */
+let servedParticipantStatuses: string[] = [];
+
+/**
  * Route the pool by SQL shape rather than by call order. GET /chat/threads
  * issues its page and its COUNT through Promise.all, and an order-dependent
  * mock would pin an implementation detail instead of the behaviour.
@@ -114,6 +126,7 @@ function stubChatQueries(recordedStatus = 'running') {
       };
     }
     if (text.includes('FROM chat_participants')) {
+      servedParticipantStatuses.push(recordedStatus);
       return {
         rows: [{
           thread_id: THREAD_ID,
@@ -129,6 +142,15 @@ function stubChatQueries(recordedStatus = 'running') {
     }
     return { rows: [] };
   });
+}
+
+/**
+ * Assert the route was fed exactly what this test intended before judging what
+ * it produced. Separates "the fixture did not apply" from "the mapping is
+ * wrong" — see `servedParticipantStatuses`.
+ */
+function expectServed(recordedStatus: string) {
+  expect(servedParticipantStatuses).toEqual([recordedStatus]);
 }
 
 /**
@@ -161,6 +183,7 @@ async function reconcileWith(inspect: () => any, rejects: boolean) {
 beforeEach(() => {
   mockQuery.mockReset();
   mockContainerInspect.mockReset();
+  servedParticipantStatuses = [];
   resetStatusVerification();
   process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
 });
@@ -179,6 +202,7 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .set('Authorization', `Bearer ${adminToken}`);
 
     // The database still says `running`. The API must not repeat that as fact.
+    expectServed('running');
     const t = threadFrom(res);
     expect(t.agent.status).toBe('unknown');
     expect(t.agent.status_verified).toBe(false);
@@ -193,6 +217,7 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
+    expectServed('running');
     const t = threadFrom(res);
     expect(t.agent.status).toBe('running');
     expect(t.agent.status_verified).toBe(true);
@@ -210,6 +235,7 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
+    expectServed('running');
     expect(threadFrom(res).agent.status).toBe('unknown');
   });
 
@@ -224,6 +250,7 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
+    expectServed('stopped');
     expect(threadFrom(res).agent.status).toBe('stopped');
   });
 
