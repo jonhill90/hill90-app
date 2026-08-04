@@ -182,6 +182,11 @@ this exact code live**. Ask it before you move on, every time, and read the answ
 reasoning about it — the twin is usually a copy that was never edited, so it is found by
 searching for the shape, not by thinking about the design.
 
+**A fix applied at one call site leaves its twins untouched, and the lesson is then recorded
+only in code a person writing a different file never opens** — [#114](https://github.com/jonhill90/hill90-app/pull/114) fixed a silent
+401 in `middleware/auth.ts` and the same shape survived four months in two other files until
+[#308](https://github.com/jonhill90/hill90-app/pull/308). When you fix a shape, search for the shape.
+
 This is not a maxim. It is what **2026-08-03** actually looked like — six times in one day:
 
 | Fixed | The twin, found afterwards | How far apart |
