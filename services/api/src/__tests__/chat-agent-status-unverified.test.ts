@@ -88,8 +88,15 @@ function proxyUnreachable() {
  * Route the pool by SQL shape rather than by call order. GET /chat/threads
  * issues its page and its COUNT through Promise.all, and an order-dependent
  * mock would pin an implementation detail instead of the behaviour.
+ *
+ * `recordedStatus` is what the DATABASE holds, and it is a parameter rather
+ * than something a caller patches on afterwards. An earlier version of this
+ * file built the stopped case by capturing `getMockImplementation()` and
+ * wrapping it; that made one test's fixture depend on another's leftovers for
+ * no benefit, and when it failed in CI the wrapper was one of two candidate
+ * causes that could not be told apart. A parameter has no such failure mode.
  */
-function stubChatQueries() {
+function stubChatQueries(recordedStatus = 'running') {
   mockQuery.mockImplementation(async (sql: string) => {
     const text = String(sql);
     if (text.includes('COUNT(*) AS total')) return { rows: [{ total: '1' }] };
@@ -116,12 +123,31 @@ function stubChatQueries() {
           left_at: null,
           agent_id: 'test-agent',
           agent_name: 'TestBot',
-          agent_status: 'running',   // what the DATABASE holds
+          agent_status: recordedStatus,
         }],
       };
     }
     return { rows: [] };
   });
+}
+
+/**
+ * Assert the response is the one THIS test set up before reading anything out
+ * of it.
+ *
+ * This suite runs under `jest.identityguard.js`, but the api suite has a long
+ * history of answers arriving from somewhere else — a sibling worker, or a
+ * foreign daemon on the port supertest bound (see
+ * `docs/decisions/api-suite-flakiness.md`). A body that is merely *shaped*
+ * right can satisfy a status assertion while belonging to another test; this
+ * pins the thread id so that case fails as a wrong id rather than as a
+ * confusing wrong status.
+ */
+function threadFrom(res: request.Response) {
+  expect(res.status).toBe(200);
+  expect(Array.isArray(res.body)).toBe(true);
+  expect(res.body[0]?.id).toBe(THREAD_ID);
+  return res.body[0];
 }
 
 /** Drive one reconcile pass over a single running agent. */
@@ -152,11 +178,11 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
-    expect(res.status).toBe(200);
     // The database still says `running`. The API must not repeat that as fact.
-    expect(res.body[0].agent.status).toBe('unknown');
-    expect(res.body[0].agent.status_verified).toBe(false);
-    expect(res.body[0].agents[0].status).toBe('unknown');
+    const t = threadFrom(res);
+    expect(t.agent.status).toBe('unknown');
+    expect(t.agent.status_verified).toBe(false);
+    expect(t.agents[0].status).toBe('unknown');
   });
 
   it('TWIN: the same fixture on a working dependency reports running', async () => {
@@ -167,10 +193,10 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body[0].agent.status).toBe('running');
-    expect(res.body[0].agent.status_verified).toBe(true);
-    expect(res.body[0].agents[0].status).toBe('running');
+    const t = threadFrom(res);
+    expect(t.agent.status).toBe('running');
+    expect(t.agent.status_verified).toBe(true);
+    expect(t.agents[0].status).toBe('running');
   });
 
   it('a pass that fails outright leaves the thread payload unknown as well', async () => {
@@ -184,45 +210,38 @@ describe('GET /chat/threads carries the third state to the chat surfaces', () =>
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
-    expect(res.body[0].agent.status).toBe('unknown');
+    expect(threadFrom(res).agent.status).toBe('unknown');
   });
 
   it('a stopped row stays stopped — #239 is a different defect, not this one', async () => {
     mockQuery.mockRejectedValueOnce(new Error('database is not accepting connections'));
     await runReconcilePass();
-
-    stubChatQueries();
-    const base = mockQuery.getMockImplementation()!;
-    mockQuery.mockImplementation(async (sql: string) => {
-      const out = await base(sql);
-      if (String(sql).includes('FROM chat_participants')) {
-        return { rows: out.rows.map((r: any) => ({ ...r, agent_status: 'stopped' })) };
-      }
-      return out;
-    });
+    // Nothing is verified, and the row still must not be reported as unknown:
+    // only a `running` claim is one this reconciler backs.
+    stubChatQueries('stopped');
 
     const res = await request(app)
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
-    expect(res.body[0].agent.status).toBe('stopped');
+    expect(threadFrom(res).agent.status).toBe('stopped');
   });
 
   it('a thread with no agent participant is untouched, not crashed', async () => {
     await reconcileWith(proxyUnreachable, true);
     stubChatQueries();
-    const base = mockQuery.getMockImplementation()!;
+    const withParticipants = mockQuery.getMockImplementation()!;
     mockQuery.mockImplementation(async (sql: string) =>
-      String(sql).includes('FROM chat_participants') ? { rows: [] } : base(sql)
+      String(sql).includes('FROM chat_participants') ? { rows: [] } : withParticipants(sql)
     );
 
     const res = await request(app)
       .get('/chat/threads')
       .set('Authorization', `Bearer ${adminToken}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body[0].agent).toBeUndefined();
-    expect(res.body[0].agents).toEqual([]);
+    const t = threadFrom(res);
+    expect(t.agent).toBeUndefined();
+    expect(t.agents).toEqual([]);
   });
 });
 
