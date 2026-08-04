@@ -125,3 +125,37 @@ func TestErrUnexpectedShapeOnEmptyBody(t *testing.T) {
 		t.Errorf("an empty body should say so plainly, got: %s", err)
 	}
 }
+
+// Pins the claim in shape.go's header: "A non-2xx cannot reach here:
+// client/akm.go checks the status and returns an error carrying the code and the
+// body."
+//
+// Every other test in this file serves 200, so none of them could tell whether
+// that is true. If the client ever stopped checking the status, an error body
+// would reach errUnexpectedShape and be reported as "server response not
+// understood" — which is a worse message than the status and body the client
+// already has, and would send someone debugging in the wrong direction.
+func TestNonTwoXXIsAClientErrorNotAShapeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"detail":"upstream exploded"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("AKM_SERVICE_URL", srv.URL)
+	t.Setenv("AKM_TOKEN", "test-token")
+
+	err := searchCmd.RunE(searchCmd, []string{"anything"})
+	if err == nil {
+		t.Fatal("a 500 must be an error")
+	}
+	// The status and the body, not a complaint about the shape.
+	for _, want := range []string{"500", "upstream exploded"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should carry the status and body; missing %q in: %s", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "not understood") {
+		t.Errorf("a non-2xx reached the shape check, which shape.go says cannot happen: %s", err)
+	}
+}
