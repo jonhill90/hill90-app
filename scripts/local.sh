@@ -637,11 +637,16 @@ cmd_agentbox() {
   # agentbox is not a compose service — the API creates one container per agent
   # from these images (services/api/src/services/docker.ts:78-146). The base
   # image copies the akm CLI out of hill90/knowledge, so that must exist first.
-  echo "Building agentbox images (slow: installs Node, Playwright, oh-my-zsh)..."
-  docker build -t hill90/knowledge:latest "$ROOT/services/knowledge"
-  docker build -t hill90/agentbox:latest  "$ROOT/services/agentbox"
-  docker build -t hill90/agentbox-monitor:latest -f "$ROOT/services/agentbox/Dockerfile.monitor" "$ROOT/services/agentbox"
+  # Stamp the commit onto every image. Agent containers are created by the API
+  # (docker.ts), not by compose, so they never get deploy.sh's revision label —
+  # without this, nothing can say what commit an agent is running (#228).
+  local rev; rev="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unstamped)"
+  echo "Building agentbox images at ${rev:0:12} (slow: installs Node, Playwright, oh-my-zsh)..."
+  docker build --build-arg "GIT_REVISION=$rev" -t hill90/knowledge:latest "$ROOT/services/knowledge"
+  docker build --build-arg "GIT_REVISION=$rev" -t hill90/agentbox:latest  "$ROOT/services/agentbox"
+  docker build --build-arg "GIT_REVISION=$rev" -t hill90/agentbox-monitor:latest -f "$ROOT/services/agentbox/Dockerfile.monitor" "$ROOT/services/agentbox"
   echo "Done. hill90/agentbox:latest is what the API launches by default."
+  echo "Verify: docker inspect -f '{{index .Config.Labels \"com.hill90.revision\"}}' hill90/agentbox:latest"
 }
 
 # Sourcing this file must not run a command. Without this, a test that sources it to

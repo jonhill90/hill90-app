@@ -56,3 +56,17 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"
 
 CMD ["opentelemetry-instrument", "uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8002"]
+
+# What commit produced this image (#228).
+#
+# Agent containers are created by services/api/src/services/docker.ts, not by
+# compose, so they never receive the `com.hill90.revision` container label that
+# deploy.sh stamps on every other container on the host. Until this existed,
+# nothing could answer "what commit is this agent running" — and because the
+# image is built by hand, that question has no other source.
+#
+# Defaults to `unstamped` rather than failing: a build that forgets the arg
+# should still work and should SAY it is unknown, not claim a revision it does
+# not have.
+ARG GIT_REVISION=unstamped
+LABEL com.hill90.revision=$GIT_REVISION
