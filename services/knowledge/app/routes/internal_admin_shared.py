@@ -372,3 +372,14 @@ async def get_stats(
     _verify_service_token(request)
     pool = request.app.state.pool
     return await shared_store.get_shared_stats(pool, since=since)
+
+@router.get("/graph")
+async def knowledge_graph(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    """The shared-knowledge graph, from the service that owns the tables (#300)."""
+    _verify_service_token(request)
+    pool = request.app.state.pool
+    return await shared_store.knowledge_graph(pool, limit)
+

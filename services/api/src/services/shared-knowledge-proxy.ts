@@ -58,6 +58,12 @@ async function proxyRequest(
   return { status: resp.status, data };
 }
 
+// Graph
+
+export async function getGraph(limit: number): Promise<ProxyResponse> {
+  return proxyRequest('GET', '/internal/admin/shared/graph', { limit: String(limit) });
+}
+
 // Collections
 
 export async function listCollections(owner?: string): Promise<ProxyResponse> {
