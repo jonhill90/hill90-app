@@ -18,7 +18,13 @@ const mockCreateAndStartContainer = jest.fn().mockResolvedValue('container-id-12
 const mockStopAndRemoveContainer = jest.fn().mockResolvedValue(undefined);
 const mockEnsureRequiredToolsInstalled = jest.fn().mockResolvedValue(undefined);
 jest.mock('../db/pool', () => ({
-  getPool: () => ({ query: mockQuery }),
+  getPool: () => ({ query: mockQuery, connect: async () => ({ query: mockQuery, release: () => {} }) }),
+  // #212: the create and import paths now run their write sequence in one
+  // transaction. Mirrored here rather than imported, and BEGIN/COMMIT/ROLLBACK
+  // are deliberately NOT routed through mockQuery — these suites queue responses in
+  // order, and three extra statements would consume them. The helper's own
+  // behaviour is pinned in with-transaction.test.ts.
+  withTransaction: async (fn: (c: unknown) => Promise<unknown>) => fn({ query: mockQuery }),
 }));
 
 // Mock docker service

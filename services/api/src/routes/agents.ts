@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import { getPool } from '../db/pool';
+import { getPool, withTransaction, Queryable } from '../db/pool';
 import { armCredentialDeadline, endStreamForExpiredCredential } from '../helpers/stream-deadline';
 import { requireRole } from '../middleware/role';
 import { scopeToOwner } from '../helpers/scope';
@@ -143,16 +143,21 @@ async function upsertAutoAgentModelsPolicy(
   agentSlug: string,
   ownerSub: string,
   updatedBy: string,
-  modelNames: string[]
+  modelNames: string[],
+  // #212: defaults to the pool for callers that are not in a transaction. A
+  // helper that reached for getPool() unconditionally would commit its own
+  // writes outside its caller's transaction, and the rollback would silently
+  // stop covering them.
+  exec: Queryable = getPool()
 ): Promise<string> {
   const name = `agent-models-${agentDbId}`;
   const description = `[auto-agent-models] ${agentSlug}`;
-  const existing = await getPool().query(
+  const existing = await exec.query(
     `SELECT id FROM model_policies WHERE name = $1 AND created_by = $2`,
     [name, ownerSub]
   );
   if (existing.rows.length > 0) {
-    await getPool().query(
+    await exec.query(
       `UPDATE model_policies
        SET description = $1,
            allowed_models = $2,
@@ -165,7 +170,7 @@ async function upsertAutoAgentModelsPolicy(
     return existing.rows[0].id;
   }
 
-  const inserted = await getPool().query(
+  const inserted = await exec.query(
     `INSERT INTO model_policies (name, description, allowed_models, model_aliases, updated_by, created_by)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id`,
@@ -447,7 +452,18 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       validatedSkillIds = skill_ids;
     }
 
-    const { rows } = await getPool().query(
+    // #212: ONE transaction over the whole write sequence. These statements used
+    // to run on the pool, each committing on its own, so a failure at the policy
+    // upsert or a skill insert answered 500 with the agent row already saved —
+    // the caller told the create failed while the agent sat in the list, and a
+    // retry answering 409 told the same user it had already happened.
+    //
+    // This path is database-only — no container, no files, no tokens — which is
+    // why it can be made GENUINELY atomic rather than merely self-cleaning. The
+    // validation reads above stay outside: they are reads, and they return
+    // before anything is written.
+    const createdAgent = await withTransaction(async (tx) => {
+    const { rows } = await tx.query(
       `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, autonomy_level, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                COALESCE($10::uuid, (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1)),
@@ -472,46 +488,49 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       ]
     );
 
-    const createdAgent = rows[0];
+    const agent = rows[0];
 
     if (normalizedModelNames !== undefined) {
       if (normalizedModelNames.length > 0) {
         const autoPolicyId = await upsertAutoAgentModelsPolicy(
-          createdAgent.id,
-          createdAgent.agent_id,
+          agent.id,
+          agent.agent_id,
           user.sub,
           user.sub,
-          normalizedModelNames
+          normalizedModelNames,
+          tx
         );
-        await getPool().query(
+        await tx.query(
           `UPDATE agents SET model_policy_id = $1, updated_at = NOW() WHERE id = $2`,
-          [autoPolicyId, createdAgent.id]
+          [autoPolicyId, agent.id]
         );
-        createdAgent.model_policy_id = autoPolicyId;
-        createdAgent.models = normalizedModelNames;
+        agent.model_policy_id = autoPolicyId;
+        agent.models = normalizedModelNames;
       } else {
-        createdAgent.models = [];
+        agent.models = [];
       }
     } else {
-      createdAgent.models = await resolveAgentModels(createdAgent.model_policy_id);
+      agent.models = await resolveAgentModels(agent.model_policy_id);
     }
 
     // Insert skill assignments into agent_skills
     for (const skillId of validatedSkillIds) {
-      await getPool().query(
+      await tx.query(
         'INSERT INTO agent_skills (agent_id, skill_id, assigned_by) VALUES ($1, $2, $3)',
-        [createdAgent.id, skillId, user.sub]
+        [agent.id, skillId, user.sub]
       );
     }
 
     // Fetch the skills array for response
-    const { rows: skillRows2 } = await getPool().query(
+    const { rows: skillRows2 } = await tx.query(
       `SELECT s.id, s.name, s.scope FROM agent_skills asks
        JOIN skills s ON s.id = asks.skill_id
        WHERE asks.agent_id = $1`,
-      [createdAgent.id]
+      [agent.id]
     );
-    createdAgent.skills = skillRows2;
+    agent.skills = skillRows2;
+    return agent;
+    });
 
     res.status(201).json(createdAgent);
   } catch (err: any) {
@@ -700,7 +719,11 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
       }
     }
 
-    const { rows } = await getPool().query(
+    // #212, the twin of the create path: same four statements, same defect, so
+    // the same one transaction. A fix applied to one and not the other is the
+    // drift behind #141, #153 and #182.
+    const createdAgent = await withTransaction(async (tx) => {
+    const { rows } = await tx.query(
       `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, autonomy_level, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1),
@@ -724,40 +747,43 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
       ]
     );
 
-    const createdAgent = rows[0];
+    const agent = rows[0];
 
     if (modelNames.length > 0) {
       const autoPolicyId = await upsertAutoAgentModelsPolicy(
-        createdAgent.id,
-        createdAgent.agent_id,
+        agent.id,
+        agent.agent_id,
         user.sub,
         user.sub,
-        modelNames
+        modelNames,
+        tx
       );
-      await getPool().query(
+      await tx.query(
         `UPDATE agents SET model_policy_id = $1, updated_at = NOW() WHERE id = $2`,
-        [autoPolicyId, createdAgent.id]
+        [autoPolicyId, agent.id]
       );
-      createdAgent.model_policy_id = autoPolicyId;
-      createdAgent.models = modelNames;
+      agent.model_policy_id = autoPolicyId;
+      agent.models = modelNames;
     } else {
-      createdAgent.models = await resolveAgentModels(createdAgent.model_policy_id);
+      agent.models = await resolveAgentModels(agent.model_policy_id);
     }
 
     for (const skillId of validatedSkillIds) {
-      await getPool().query(
+      await tx.query(
         'INSERT INTO agent_skills (agent_id, skill_id, assigned_by) VALUES ($1, $2, $3)',
-        [createdAgent.id, skillId, user.sub]
+        [agent.id, skillId, user.sub]
       );
     }
 
-    const { rows: skillRows2 } = await getPool().query(
+    const { rows: skillRows2 } = await tx.query(
       `SELECT s.id, s.name, s.scope FROM agent_skills asks
        JOIN skills s ON s.id = asks.skill_id
        WHERE asks.agent_id = $1`,
-      [createdAgent.id]
+      [agent.id]
     );
-    createdAgent.skills = skillRows2;
+    agent.skills = skillRows2;
+    return agent;
+    });
 
     res.status(201).json(createdAgent);
   } catch (err: any) {
