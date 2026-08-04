@@ -560,18 +560,47 @@ export async function removeAgentVolumes(agentId: string): Promise<void> {
   }
 }
 
+export interface ReconcileResult {
+  /** Agents whose recorded status was examined. */
+  checked: number;
+  /** Agents demoted to `stopped` because their container was not running. */
+  reconciled: number;
+  /**
+   * `agent_id`s whose container could not be inspected at all. Their recorded
+   * status was left untouched, so it is now unverified — see
+   * `agent-status-verification.ts`. Absence is NOT in here: `inspectContainer`
+   * returns `null` for a 404, which is an answer, and only rethrows for a fault.
+   */
+  unverified: string[];
+}
+
 export async function reconcileAgentStatuses(
   getRunningAgents: () => Promise<Array<{ id: string; agent_id: string }>>,
   updateStatus: (id: string, status: string, containerId: string | null, error: string | null) => Promise<void>
-): Promise<void> {
+): Promise<ReconcileResult> {
   const agents = await getRunningAgents();
+  const result: ReconcileResult = { checked: agents.length, reconciled: 0, unverified: [] };
+
   for (const agent of agents) {
-    const state = await inspectContainer(agent.agent_id);
+    // Per-agent, so one unreachable container does not abandon the rest of the
+    // pass and leave them silently unchecked.
+    let state: Awaited<ReturnType<typeof inspectContainer>>;
+    try {
+      state = await inspectContainer(agent.agent_id);
+    } catch (err) {
+      console.error(`[reconcile] Agent ${agent.agent_id} could not be inspected; status left UNVERIFIED:`, err);
+      result.unverified.push(agent.agent_id);
+      continue;
+    }
+
     if (!state || state.status !== 'running') {
       console.log(`[reconcile] Agent ${agent.agent_id} marked running but container is ${state?.status || 'missing'}`);
       await updateStatus(agent.id, 'stopped', null, state ? `Container ${state.status}` : 'Container not found');
+      result.reconciled++;
     }
   }
+
+  return result;
 }
 
 function parseMemLimit(limit: string): number {
