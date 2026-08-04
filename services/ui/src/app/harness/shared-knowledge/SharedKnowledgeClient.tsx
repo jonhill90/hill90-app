@@ -9,7 +9,17 @@ interface GraphNode { id: string; type: string; label: string; meta?: Record<str
 interface GraphEdge { source: string; target: string; label?: string }
 
 function KnowledgeGraph() {
-  const [data, setData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[]; stats: Record<string, number> } | null>(null)
+  const [data, setData] = useState<{
+    nodes: GraphNode[]
+    edges: GraphEdge[]
+    // The corpus, measured with COUNT(*) — not the size of what was drawn.
+    stats: Record<string, number>
+    // What this response actually contains. Optional because an api older than
+    // #215 sends neither, and absence must read as "nothing to say" rather
+    // than as a truncation warning on a complete graph.
+    shown?: Record<string, number>
+    truncated?: boolean
+  } | null>(null)
   const [loading, setLoading] = useState(true)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -152,7 +162,18 @@ function KnowledgeGraph() {
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <GitBranch className="w-4 h-4 text-mountain-400" />
-          <span className="text-sm text-mountain-300">{data.stats.collections} collections · {data.stats.sources} sources · {data.stats.agents_with_knowledge} agents</span>
+          <span className="text-sm text-mountain-300">
+            {data.stats.collections} collections · {data.stats.sources} sources · {data.stats.agents_with_knowledge} agents
+          </span>
+          {data.truncated && data.shown && (
+            <span
+              className="text-xs text-amber-400/90 border border-amber-700/50 bg-amber-900/20 rounded px-1.5 py-0.5"
+              data-testid="graph-truncated-notice"
+            >
+              graph shows {data.shown.collections} of {data.stats.collections} collections
+              {' '}and {data.shown.sources} of {data.stats.sources} sources
+            </span>
+          )}
         </div>
       </div>
       <div className="rounded-lg border border-navy-700 bg-[#0f1923] overflow-hidden">
