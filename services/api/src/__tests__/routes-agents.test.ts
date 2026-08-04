@@ -241,6 +241,36 @@ describe('Agent lifecycle routes', () => {
     expect(res.body.container_id).toBe('container-id-123');
   });
 
+  it('POST /agents/:id/start clears any container_finished_at left by a PRIOR session (#285)', async () => {
+    // A stale exact stop time from the previous container must not survive
+    // into a fresh session — otherwise it could be read directly off the
+    // `agents` row (e.g. by GET /agents/:id) while the agent is running
+    // again, or misread by a later close that never re-observes the
+    // container as not-running.
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'uuid-1', agent_id: 'test-agent', name: 'Test',
+          tools_config: {}, cpus: '1.0', mem_limit: '1g', pids_limit: 200,
+          soul_md: '', rules_md: '', description: '',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] }) // SELECT agent_skills (skill instructions)
+      .mockResolvedValueOnce({ rows: [] }) // getAgentElevatedScope (AI-115 ceiling check)
+      .mockResolvedValueOnce({ rows: [] }) // SELECT DISTINCT s.scope (getAgentEffectiveScope)
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .post('/agents/uuid-1/start')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    const finalUpdate = mockQuery.mock.calls.find((c) =>
+      /UPDATE agents SET status = 'running'/i.test(String(c[0])));
+    expect(finalUpdate).toBeDefined();
+    expect(String(finalUpdate![0])).toMatch(/container_finished_at\s*=\s*NULL/);
+  });
+
   it('POST /agents/:id/start injects WORK_TOKEN env var', async () => {
     mockQuery
       .mockResolvedValueOnce({

@@ -208,10 +208,31 @@ export async function stopAndRemoveContainer(agentId: string): Promise<void> {
   await container.remove({ force: true });
 }
 
+/**
+ * Docker's own sentinel for "this has never finished" — not epoch zero, a
+ * literal zero-value `time.Time`. Reported for a container that is currently
+ * running, or was created but never started. Treated as "unknown", not as a
+ * real (and wildly wrong) instant in the year 1 (#285).
+ */
+const DOCKER_ZERO_TIME = '0001-01-01T00:00:00Z';
+
+function parseDockerTimestamp(raw: string | undefined): Date | null {
+  if (!raw || raw === DOCKER_ZERO_TIME) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 export async function inspectContainer(agentId: string): Promise<{
   status: string;
   containerId: string;
   health?: string;
+  /**
+   * The instant Docker recorded this container's most recent run ending —
+   * exact, when Docker can still answer (#285). Only meaningful once the
+   * container has stopped; a running container's `FinishedAt` is the zero
+   * sentinel and comes back `null` here, same as one that never started.
+   */
+  finishedAt: Date | null;
 } | null> {
   const containerName = `${CONTAINER_PREFIX}${agentId}`;
   assertAgentboxName(containerName);
@@ -225,6 +246,7 @@ export async function inspectContainer(agentId: string): Promise<{
       status: info.State.Status,
       containerId: info.Id,
       health: info.State.Health?.Status,
+      finishedAt: parseDockerTimestamp(info.State.FinishedAt),
     };
   } catch (err: any) {
     if (err.statusCode === 404) return null;
@@ -632,6 +654,15 @@ export interface AgentStatusPatch {
   containerState: string | null;
   containerId?: string | null;
   errorMessage?: string | null;
+  /**
+   * The exact instant Docker reported the container's most recent run
+   * ending — a `Date` when it is knowable, `null` when it is not (the
+   * container is absent, or reported the zero sentinel), `undefined` for "no
+   * opinion" (a steady-state observation that did not touch this). Written
+   * on both directions of a transition so a promotion clears what a prior
+   * demotion left behind (#285).
+   */
+  containerFinishedAt?: Date | null;
 }
 
 /**
@@ -690,6 +721,10 @@ export async function reconcileAgentStatuses(
         id: agent.id, agentId: agent.agent_id, createdBy: agent.created_by,
         previousStatus: agent.status, status: 'running',
         containerState, containerId: state!.containerId, errorMessage: null,
+        // Running again: whatever the container's own last run finished at
+        // is no longer this run's business, and it must not persist into the
+        // new session's eventual close (#285).
+        containerFinishedAt: null,
       });
       result.promoted++;
       result.reconciled++;
@@ -700,6 +735,11 @@ export async function reconcileAgentStatuses(
         previousStatus: agent.status, status: 'stopped',
         containerState, containerId: null,
         errorMessage: state ? `Container ${state.status}` : 'Container not found',
+        // Exact when the container is still present to ask (`state` is
+        // non-null and its FinishedAt was real); null when it has vanished
+        // or Docker reported the zero sentinel — either way, the session
+        // sweep below falls back to its existing NOW()-and-estimated close.
+        containerFinishedAt: state ? state.finishedAt : null,
       });
       result.demoted++;
       result.reconciled++;
