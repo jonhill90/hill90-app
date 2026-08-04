@@ -57,6 +57,13 @@ jobs:
         with:
           node-version: '20'
       - run: npm ci
+      # #329's CI run: npm ci exited 0 having silently dropped an optional
+      # native dependency (sharp's platform binary), and the first anyone
+      # heard about it was an ERR_DLOPEN_FAILED five unrelated jest suites
+      # later. This fails HERE, once, naming the cause — see
+      # services/api/scripts/verify-native-deps.js for why it is a script
+      # and not an npm flag.
+      - run: node scripts/verify-native-deps.js
       - run: npm test
 
   ui:
