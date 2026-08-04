@@ -1415,7 +1415,10 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
 
     // Update DB (store work_token for chat dispatch verification)
     await getPool().query(
-      `UPDATE agents SET status = 'running', container_id = $1, work_token = $2, error_message = NULL, container_state = 'running', updated_at = NOW() WHERE id = $3`,
+      // container_finished_at = NULL: this session has no end yet, and a
+      // stale exact stop time left by the PREVIOUS container must not read
+      // back out of GET /agents/:id while this one is running (#285).
+      `UPDATE agents SET status = 'running', container_id = $1, work_token = $2, error_message = NULL, container_state = 'running', container_finished_at = NULL, updated_at = NOW() WHERE id = $3`,
       [containerId, workToken, req.params.id]
     );
 

@@ -99,21 +99,28 @@ function escalateUnrenewedTokens(
  * and it also repairs the case where the stop ROUTE's own best-effort close
  * failed, which nothing repaired before.
  *
- * Estimated, always: this knows the row contradicts itself, never when the
- * contradiction started.
+ * Estimated ONLY when it has to be (#285): `reconcileAgentStatuses` stamps
+ * `agents.container_finished_at` with the exact instant Docker reported when
+ * it demoted this agent and the container was still there to ask. When that
+ * column is set, the close uses it and is NOT an estimate — this knows
+ * exactly when the contradiction started, because Docker told it. When the
+ * column is NULL — the container was already gone, or reported Docker's
+ * zero-value sentinel — this falls back to NOW(), unchanged from before, and
+ * stays marked as a guess.
  */
 async function closeSessionsForStoppedAgents(): Promise<void> {
   try {
     const { rowCount } = await getPool().query(
       `UPDATE agent_sessions s
-          SET stopped_at = NOW(), stopped_at_estimated = TRUE
+          SET stopped_at = COALESCE(a.container_finished_at, NOW()),
+              stopped_at_estimated = (a.container_finished_at IS NULL)
          FROM agents a
         WHERE s.agent_id = a.id
           AND s.stopped_at IS NULL
           AND a.status <> 'running'`
     );
     if (rowCount && rowCount > 0) {
-      console.warn(`[reconcile] Closed ${rowCount} session(s) left open by an agent that is not running (estimated)`);
+      console.warn(`[reconcile] Closed ${rowCount} session(s) left open by an agent that is not running`);
     }
   } catch (err) {
     console.error('[reconcile] Session close sweep failed:', err);
@@ -155,6 +162,10 @@ export async function runReconcilePass(): Promise<ReconcileResult | null> {
         if (patch.errorMessage !== undefined) {
           params.push(patch.errorMessage);
           sets.push(`error_message = $${params.length}`);
+        }
+        if (patch.containerFinishedAt !== undefined) {
+          params.push(patch.containerFinishedAt);
+          sets.push(`container_finished_at = $${params.length}`);
         }
         params.push(patch.id);
         await getPool().query(
