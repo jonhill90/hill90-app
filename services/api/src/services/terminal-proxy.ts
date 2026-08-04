@@ -211,6 +211,29 @@ const CLOSE_ACCESS_REVOKED = 4004;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /**
+ * How long shutdown waits for close frames to reach their peers (#318).
+ *
+ * NOT A GUESS AT WHAT A SOCKET NEEDS. `closeAllSessions` waits on the sockets
+ * themselves, so the normal case resolves in milliseconds; this is a ceiling for a
+ * peer that never answers, and it is anchored at both ends:
+ *
+ *   UPPER  no compose file sets `stop_grace_period`, so Docker's default 10s is the
+ *          whole shutdown budget — shared with closePool() and the exit. Two seconds
+ *          is a fifth of it, leaving eight for the rest.
+ *   LOWER  a close frame is a 2-byte code plus a short reason: one write on an
+ *          already-established connection. What it needs is an event-loop turn, which
+ *          is the same requirement boot/fatal.ts records for stderr — `process.exit()`
+ *          does not wait for a pending write. That is now the THIRD place in this
+ *          codebase where that property decides a design, so treat it as a known
+ *          property rather than rediscovering it a fourth time.
+ *
+ * Any value between roughly 250ms and 5s satisfies both bounds. 2s within that window
+ * is arbitrary, and arbitrary is acceptable here BECAUSE the wait is event-driven: the
+ * number is only reached by a socket that is already broken.
+ */
+const DRAIN_TIMEOUT_MS = 2_000;
+
+/**
  * Where the proxy connects once a caller is allowed in.
  *
  * INJECTABLE BECAUSE NOTHING AFTER THE HANDSHAKE WAS TESTABLE WITHOUT IT (#313).
@@ -226,6 +249,21 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
  * `resolveAgentModels`'s `exec` parameter and `boot/fatal.ts`'s `Exit` hook. Same
  * shape, same reason, same default-to-production behaviour when omitted.
  */
+/**
+ * A shutdown handle for the sessions this proxy owns.
+ *
+ * `server.close()` stops the listener accepting new connections and does not touch
+ * established ones — and an upgraded WebSocket is as established as it gets. Measured:
+ * after `server.close()` a live terminal's client is still `readyState === OPEN`, and
+ * `process.exit(0)` then severs it with no frame at all, so the client sees 1006
+ * (#318). Nothing outside this module can reach `wss.clients`, so the handle must come
+ * from here.
+ */
+export interface TerminalProxyHandle {
+  /** Close every live session with `code`; resolves when they are gone or the drain elapses. */
+  closeAllSessions: (code: number, reason: string, timeoutMs?: number) => Promise<number>;
+}
+
 export interface TerminalProxyOptions {
   resolveUpstream?: (threadId: string) => Promise<string | null>;
 }
@@ -234,7 +272,7 @@ export function attachTerminalProxy(
   server: ReturnType<typeof import('http').createServer>,
   verifyToken: (token: string) => Promise<{ sub: string; roles?: string[]; exp: number } | null>,
   options: TerminalProxyOptions = {},
-): void {
+): TerminalProxyHandle {
   const resolveUpstream = options.resolveUpstream ?? ((threadId: string) => resolveAgentWsUrl(threadId, ''));
   // Only ever select the plain version subprotocol. Returning the bearer entry would
   // echo the token back in the response's Sec-WebSocket-Protocol header.
@@ -446,4 +484,31 @@ export function attachTerminalProxy(
       socket.destroy();
     }
   });
+
+  return {
+    async closeAllSessions(code: number, reason: string, timeoutMs = DRAIN_TIMEOUT_MS): Promise<number> {
+      const live = [...wss.clients].filter((c) => c.readyState === WebSocket.OPEN);
+      if (live.length === 0) return 0;
+
+      console.log(`[terminal-proxy] Closing ${live.length} live session(s): ${code} ${reason}`);
+
+      // Wait for the closes; do not sleep for a guessed interval. Each socket resolves
+      // as it goes, so the normal case costs milliseconds and the timeout is a ceiling
+      // for a peer that never answers rather than a delay everyone pays.
+      const drained = Promise.all(
+        live.map((client) => new Promise<void>((resolve) => {
+          client.once('close', () => resolve());
+          client.close(code, reason);
+        })),
+      );
+
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        drained,
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+      ]);
+      if (timer) clearTimeout(timer);
+      return live.length;
+    },
+  };
 }

@@ -107,7 +107,7 @@ async function start() {
 
   // The verifier lives in services/terminal-token.ts so it can be tested: this is
   // the most privileged surface in the service and its refusals were silent.
-  attachTerminalProxy(server, (token: string) => verifyTerminalToken(token, { issuer, getSigningKey }));
+  const terminals = attachTerminalProxy(server, (token: string) => verifyTerminalToken(token, { issuer, getSigningKey }));
 
   console.log('[startup] WebSocket terminal proxy attached');
 
@@ -116,6 +116,26 @@ async function start() {
     console.log('[shutdown] Closing server...');
     stopStaleSweeper();
     stopAgentReconciler();
+
+    // SAY GOING AWAY, do not just vanish (#318). `server.close()` stops the listener
+    // accepting new connections and leaves established ones alone — an upgraded
+    // WebSocket included — and the `process.exit(0)` below then severs every live
+    // terminal with no frame at all. The client sees 1006, which is indistinguishable
+    // from a network fault, on a surface that went to the trouble of distinguishing
+    // 4001, 4002 and 4004 precisely so a client could act on the difference.
+    //
+    // 1001 is the standard "going away". It does not change what the ui does today —
+    // `shouldReconnect()` reconnects on 1001 exactly as it does on 1006, with the
+    // 2s/4s/…/10s ramp in XTerminal.tsx and a five-attempt cap — and that behaviour is
+    // correct for a restart: unlike 4004, reconnecting after a deploy is what the user
+    // wants. What changes is that a deliberate shutdown stops looking like a broken
+    // connection, in the client and in anything reading logs.
+    //
+    // Ordered BEFORE server.close() so the frames go out on a listener that is still
+    // running, and awaited so the writes happen before the exit below — the same
+    // property boot/fatal.ts records for stderr.
+    await terminals.closeAllSessions(1001, 'server shutting down');
+
     server.close();
     // `process.on` ignores the promise this returns, so a rejection here had
     // nowhere to go and killed the process before the exit below. See boot/fatal.
