@@ -230,7 +230,17 @@ correction.)*
 (`./scripts/local.sh up`) authenticates against **Hill90's** Keycloak, realm `platform`,
 and the token carries `resource_access.hill90-ui.roles`, `aud` including `hill90-api`, and
 no `admin` in `realm_access.roles`. `bash scripts/checks/tenant-login-platform-test.sh`
-re-proves it. The `auth` stack is gone from `local.sh`'s `STACKS`.
+re-proves **that**, and still passed on 2026-08-04. The `auth` stack is gone from
+`local.sh`'s `STACKS`.
+
+**But do not read that as "you can log in": as of 2026-08-04 the local UI login FAILS**
+(#271). The browser is sent to `http://app.localtest.me:8080/api/auth/callback/keycloak`,
+which the `hill90-ui` client rejects — `Invalid parameter: redirect_uri`, HTTP 400 — because
+`NEXTAUTH_URL` is the Traefik host and the client allows `localhost:13000`. The check above
+passes through it: `tenant-login-platform-test.sh:32` hardcodes the `localhost:13000`
+redirect, so it proves the TOKEN and cannot see the URI a person's browser sends. **A green
+check there is not evidence that a human can sign in locally**, and this file said it was
+for three days.
 
 **What is still open is the rest of it:** local Postgres and MinIO are still the app's own,
 and `--standalone` still runs the fork's Keycloak against a *copy* of the platform realm
