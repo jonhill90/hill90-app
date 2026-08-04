@@ -23,12 +23,49 @@
 const http = require('http');
 const net = require('net');
 
-const ID = `${process.pid}:${(process.env.JEST_WORKER_ID || '0')}`;
+// SHARED STATE, NOT MODULE STATE — and this is load-bearing, not style. This file
+// is a setupFilesAfterEnv entry, so Jest re-executes it fresh (new module registry,
+// new closures) once per test file. But http.ServerResponse.prototype and
+// net.Socket.prototype are the real, un-sandboxed Node core objects — the SAME
+// object across every test file sharing a worker. A module-scoped `let stampValue`
+// used to mean every file's setup wrapped ANOTHER layer around whatever writeHead
+// currently was, each layer re-stamping with its OWN closure's stampValue on the
+// way back down the call chain (headersSent stays false until the real, innermost
+// call), so the OLDEST — first-loaded — layer always won on the wire. A file's own
+// __setStampForControl override could only ever affect its own (usually outermost)
+// layer, so it was silently overwritten by an older sibling file's layer the moment
+// more than one file in a worker had loaded this setup before it. #339 found this
+// failing 2/2 on real full-suite runs; the diagnostic that first tried to rule out
+// "patch-stacking" stored its counter on `global`, which — confirmed directly — is
+// ALSO fresh per test file, so it could never see a layer stacked by an earlier
+// file. That ruling-out was performed by an instrument incapable of observing the
+// thing it was ruling out, not a diagnosis that stacking doesn't happen.
+//
+// The fix: state lives on the shared carrier itself (http.ServerResponse.prototype,
+// confirmed by direct probe to persist across files in one worker), keyed by a
+// plain string property — not a Symbol, since Symbol.for()'s registry is per-realm
+// and Jest gives each test file its own realm, so two files' Symbol.for() calls
+// with the same description are not guaranteed to collide to one symbol. Every
+// file that loads this setup now reads and mutates the SAME state object instead
+// of minting its own, and the monkey-patches themselves are installed at most once
+// per worker (guarded by state.patched) instead of stacking a new wrapper layer on
+// every file load.
+const STATE_KEY = '__hill90IdentityGuardState';
+const CARRIER = http.ServerResponse.prototype;
+if (!CARRIER[STATE_KEY]) {
+  const id = `${process.pid}:${(process.env.JEST_WORKER_ID || '0')}`;
+  Object.defineProperty(CARRIER, STATE_KEY, {
+    value: { ID: id, stampValue: id, violations: [], ourPorts: new Set(), patched: false },
+    enumerable: false,
+    configurable: false,
+  });
+}
+const state = CARRIER[STATE_KEY];
+const { ID } = state;
 const HEADER = 'x-test-app-id';
-let stampValue = ID;                 // overridable by the control only
-const violations = [];
 
-// PORTS THIS PROCESS LISTENS ON.
+// PORTS THIS PROCESS LISTENS ON — see state.ourPorts above for why this is now
+// shared rather than one Set per file.
 //
 // Not every response our own app writes goes through http.ServerResponse. The
 // terminal websocket handshake tests reject an upgrade from inside `ws`, which
@@ -38,7 +75,7 @@ const violations = [];
 //
 // So a missing stamp is only a violation when the responder is not one of OUR
 // listeners. A foreign daemon is on a port we never bound; `ws` is not.
-const ourPorts = new Set();
+//
 // A port is ours only WHILE WE HOLD IT. This set was append-only in the first
 // version, and that silently reopened the hole it was added to close: supertest
 // binds and closes an ephemeral port per request, the OS returns it to the pool,
@@ -46,55 +83,60 @@ const ourPorts = new Set();
 // guard treated that stranger as ours and stayed silent on a 501 that reached a
 // test — observed in a real failing run, seventh instrument failure in this
 // investigation. Removing on close is what makes "ours" mean currently-held.
-const origListen = net.Server.prototype.listen;
-net.Server.prototype.listen = function (...a) {
-  const srv = this;
-  srv.once('listening', () => { try { const p = (srv.address() || {}).port; if (p) { srv.__ourPort = p; ourPorts.add(p); } } catch (e) {} });
-  srv.once('close', () => { try { if (srv.__ourPort) ourPorts.delete(srv.__ourPort); } catch (e) {} });
-  return origListen.apply(this, a);
-};
 
-// --- server side: stamp every response this worker writes ---------------------
-const origWriteHead = http.ServerResponse.prototype.writeHead;
-http.ServerResponse.prototype.writeHead = function (...a) {
-  try { if (!this.headersSent) this.setHeader(HEADER, stampValue); } catch (e) {}
-  return origWriteHead.apply(this, a);
-};
-const origEnd = http.ServerResponse.prototype.end;
-http.ServerResponse.prototype.end = function (...a) {
-  try { if (!this.headersSent) this.setHeader(HEADER, stampValue); } catch (e) {}
-  return origEnd.apply(this, a);
-};
+if (!state.patched) {
+  state.patched = true;
 
-// --- client side: every response must carry OUR stamp -------------------------
-const origConnect = net.Socket.prototype.connect;
-net.Socket.prototype.connect = function (...a) {
-  const sk = this;
-  let buf = '';
-  let checked = false;
-  sk.on('data', (d) => {
-    if (checked || buf.length > 4096) return;
-    buf += d.toString('latin1');
-    const end = buf.indexOf('\r\n\r\n');
-    if (end === -1) return;
-    checked = true;
-    const head = buf.slice(0, end);
-    const m = new RegExp(`^${HEADER}:[ \\t]*(.+)$`, 'im').exec(head);
-    const statusLine = head.split('\r\n')[0];
-    if (!m) {
-      // Ours but unstampable (a ws upgrade rejection) — not a violation.
-      if (ourPorts.has(sk.remotePort)) return;
-      violations.push({ kind: 'NO STAMP', statusLine, port: sk.remotePort, head: head.slice(0, 300) });
-    } else if (m[1].trim() !== ID) {
-      violations.push({ kind: 'FOREIGN STAMP', got: m[1].trim(), expected: ID, statusLine, port: sk.remotePort });
-    }
-  });
-  return origConnect.apply(this, a);
-};
+  const origListen = net.Server.prototype.listen;
+  net.Server.prototype.listen = function (...a) {
+    const srv = this;
+    srv.once('listening', () => { try { const p = (srv.address() || {}).port; if (p) { srv.__ourPort = p; state.ourPorts.add(p); } } catch (e) {} });
+    srv.once('close', () => { try { if (srv.__ourPort) state.ourPorts.delete(srv.__ourPort); } catch (e) {} });
+    return origListen.apply(this, a);
+  };
+
+  // --- server side: stamp every response this worker writes -------------------
+  const origWriteHead = http.ServerResponse.prototype.writeHead;
+  http.ServerResponse.prototype.writeHead = function (...a) {
+    try { if (!this.headersSent) this.setHeader(HEADER, state.stampValue); } catch (e) {}
+    return origWriteHead.apply(this, a);
+  };
+  const origEnd = http.ServerResponse.prototype.end;
+  http.ServerResponse.prototype.end = function (...a) {
+    try { if (!this.headersSent) this.setHeader(HEADER, state.stampValue); } catch (e) {}
+    return origEnd.apply(this, a);
+  };
+
+  // --- client side: every response must carry OUR stamp ------------------------
+  const origConnect = net.Socket.prototype.connect;
+  net.Socket.prototype.connect = function (...a) {
+    const sk = this;
+    let buf = '';
+    let checked = false;
+    sk.on('data', (d) => {
+      if (checked || buf.length > 4096) return;
+      buf += d.toString('latin1');
+      const end = buf.indexOf('\r\n\r\n');
+      if (end === -1) return;
+      checked = true;
+      const head = buf.slice(0, end);
+      const m = new RegExp(`^${HEADER}:[ \\t]*(.+)$`, 'im').exec(head);
+      const statusLine = head.split('\r\n')[0];
+      if (!m) {
+        // Ours but unstampable (a ws upgrade rejection) — not a violation.
+        if (state.ourPorts.has(sk.remotePort)) return;
+        state.violations.push({ kind: 'NO STAMP', statusLine, port: sk.remotePort, head: head.slice(0, 300) });
+      } else if (m[1].trim() !== state.ID) {
+        state.violations.push({ kind: 'FOREIGN STAMP', got: m[1].trim(), expected: state.ID, statusLine, port: sk.remotePort });
+      }
+    });
+    return origConnect.apply(this, a);
+  };
+}
 
 afterEach(() => {
-  if (violations.length === 0) return;
-  const v = violations.splice(0, violations.length);
+  if (state.violations.length === 0) return;
+  const v = state.violations.splice(0, state.violations.length);
   const lines = v.map((x) => x.kind === 'NO STAMP'
     ? `  NO STAMP       ${x.statusLine}  from 127.0.0.1:${x.port}\n${x.head.split('\r\n').map((l) => '      ' + l).join('\n')}`
     : `  FOREIGN STAMP  ${x.statusLine}  from 127.0.0.1:${x.port}\n      produced by ${x.got}, this worker is ${x.expected}`);
@@ -120,7 +162,7 @@ afterEach(() => {
 // Draining is deliberate. Leaving the entries would make the guard's own
 // afterEach throw and fail the control that just proved it works.
 module.exports = {
-  __setStampForControl: (v) => { stampValue = v; },
-  __drainViolationsForControl: () => violations.splice(0, violations.length),
+  __setStampForControl: (v) => { state.stampValue = v; },
+  __drainViolationsForControl: () => state.violations.splice(0, state.violations.length),
   __ID: ID,
 };

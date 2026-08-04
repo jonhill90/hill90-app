@@ -42,15 +42,40 @@
  * daemon's transport. It is a control on the detector's logic, not a simulation of
  * the field failure.
  *
- * ARM B (FOREIGN STAMP) IS NOT IN THIS FILE. It was built, and failed twice out
- * of two real full-suite parallel runs while passing every isolated and
- * artificial-load run — a genuine, unexplained finding, not app breakage. A
- * committed test.skip was tried first and rejected: a check that cannot fire is
- * the same shape this repo has already deleted twice today and filed an issue
- * about once, a good comment on a skip doesn't change that, and it would read in
- * six months as something someone meant to come back to. The full reproduction
- * and evidence trail is filed as its own issue instead, where it's searchable
- * rather than buried in a skipped block — see the repo's open issues for arm B.
+ * ARM B (FOREIGN STAMP) IS NOW HERE — it was pulled out once (see #339) after
+ * failing 2/2 real full-suite parallel runs while passing every isolated and
+ * artificial-load run. The root cause, found and fixed in jest.identityguard.js:
+ * that file is a setupFilesAfterEnv entry, so Jest re-executes it fresh once per
+ * test file, but http.ServerResponse.prototype is the same real, un-sandboxed
+ * object across every file in a worker — so each file's load used to stack
+ * another monkey-patch layer on top of whatever was already installed, each layer
+ * re-stamping the response with its OWN module-closure's stampValue on the way
+ * back down the call chain. A file's own __setStampForControl override only ever
+ * touched its own layer, so an older sibling file's layer silently overwrote it
+ * whenever more than one file in a worker had loaded the setup before it — arm B
+ * failed to see its own override on the wire and recorded zero violations, the
+ * exact shape #339 measured. The fix moved the guard's state off per-file module
+ * closures onto the shared carrier itself, keyed by a plain string property (not
+ * Symbol.for(), whose registry is per-realm and does not collide across Jest's
+ * per-file realms), and made the monkey-patch installation idempotent instead of
+ * stacking. Full mechanism, the diagnostic blind spot that missed it the first
+ * time, and the deterministic before/after reproduction are in #339.
+ *
+ * The instrument that first tried to rule out patch-stacking stored its counter
+ * on `global`, which is also fresh per test file — so it could never observe a
+ * layer stacked by an earlier file. Patch-stacking was not ruled out; it was
+ * ruled out by an instrument incapable of seeing it.
+ *
+ * WHAT THIS DOES NOT PROVE: a deterministic two-layer reproduction (forcing a
+ * second module load via jest.resetModules(), simulating an earlier sibling
+ * file's load) failed 5/5 against the pre-fix guard and passed 8/8 against the
+ * fix — but twelve-plus attempts to reproduce the SAME failure across two
+ * genuinely separate test files under Jest's own real scheduler did not succeed
+ * (Jest did not honor the requested file order). So this arm proves the
+ * mechanism is real and the fix closes it; it does not confirm that this exact
+ * ordering is what caused the two original full-suite failures. If this test
+ * ever needs a skip to stay green, that is itself evidence the fix did not fully
+ * close the hole — pull it back out and reopen #339, do not skip it in place.
  */
 import http from 'http';
 import net from 'net';
@@ -138,5 +163,35 @@ describe('identity guard control (#179)', () => {
     // Ties the pass back to the mechanism, not just the outcome: undefined is why
     // `ourPorts.has(...)` couldn't have exempted this responder.
     expect(violations[0].port).toBeUndefined();
+  });
+
+  test('arm B — FOREIGN STAMP: a response stamped with another worker\'s ID is a violation', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end('ok');
+    });
+    await listen(server, 0);
+    const port = (server.address() as net.AddressInfo).port;
+
+    guard.__setStampForControl('other-worker:9');
+    let header: string | undefined;
+    try {
+      header = await get({ port, path: '/', method: 'GET' });
+    } finally {
+      // Reset before the response finishes draining, not after — a real request
+      // in-flight when this test ends must not carry the forced stamp into
+      // whatever the guard's own afterEach inspects next.
+      guard.__setStampForControl(guard.__ID);
+    }
+    await close(server);
+
+    // Ties the pass back to the mechanism, not just the outcome: the wire header
+    // must actually carry the forced foreign value, not just "some violation".
+    expect(header).toBe('other-worker:9');
+
+    const violations = guard.__drainViolationsForControl();
+    expect(violations).toHaveLength(1);
+    expect(violations[0].kind).toBe('FOREIGN STAMP');
+    expect(violations[0].got).toBe('other-worker:9');
   });
 });
