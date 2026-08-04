@@ -149,6 +149,24 @@ export async function runReconcilePass(): Promise<ReconcileResult | null> {
         // only reached when the status actually changed, and the next pass finds
         // the row agreeing and writes nothing. Asserted, not argued:
         // `vanished-container-escalation.test.ts` runs the second pass.
+        // #213: close the session this demotion ends. Nothing else does — the
+        // stop ROUTE closes sessions, and an agent that stopped without going
+        // through it left its row open, so `COALESCE(stopped_at, NOW())` grew
+        // for ever. Stamped as an ESTIMATE because this pass knows the container
+        // is gone, not when it went: the true stop time is somewhere between the
+        // previous pass and this one, or arbitrarily earlier if the API was down.
+        if (patch.status === 'stopped') {
+          try {
+            await getPool().query(
+              `UPDATE agent_sessions SET stopped_at = NOW(), stopped_at_estimated = TRUE
+               WHERE agent_id = $1 AND stopped_at IS NULL`,
+              [patch.id]
+            );
+          } catch (err) {
+            console.error(`[reconcile] Session close failed for ${patch.agentId}:`, err);
+          }
+        }
+
         if (patch.status === 'stopped' && patch.containerState === CONTAINER_ABSENT) {
           notify(
             patch.createdBy,
