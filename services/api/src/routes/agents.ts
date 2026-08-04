@@ -2597,14 +2597,24 @@ router.get('/:id/metrics', requireRole('user'), async (req: Request, res: Respon
         [agent.agent_id],
       ),
       getPool().query(
-        `SELECT MAX(created_at) AS last_active FROM (
-           SELECT created_at FROM agent_sessions WHERE agent_id = $1
+        // #286. THREE faults in one statement, none reachable by anyone because
+        // nothing has ever called this endpoint:
+        //   1. `created_at` — a column `agent_sessions` has never had;
+        //   2. the outer `MAX(created_at)` then names a column the UNION stops
+        //      producing once (1) is fixed, since a UNION takes its names from
+        //      the FIRST branch — fixing one moves the error rather than
+        //      removing it;
+        //   3. `$1` was compared against `agent_sessions.agent_id` (uuid) AND
+        //      `chat_messages.author_id` (varchar):
+        //      `operator does not exist: character varying = uuid`.
+        `SELECT MAX(ts) AS last_active FROM (
+           SELECT started_at AS ts FROM agent_sessions WHERE agent_id = $1
            UNION ALL
-           SELECT created_at FROM chat_messages WHERE author_id = $1 AND author_type = 'agent'
+           SELECT created_at AS ts FROM chat_messages WHERE author_id = $2 AND author_type = 'agent'
            UNION ALL
-           SELECT created_at FROM model_usage WHERE agent_id = $2
+           SELECT created_at AS ts FROM model_usage WHERE agent_id = $3
          ) AS events`,
-        [agent.id, agent.agent_id],
+        [agent.id, agent.id, agent.agent_id],
       ),
     ]);
 
@@ -2651,7 +2661,10 @@ router.get('/:id/artifacts', requireRole('user'), async (req: Request, res: Resp
     // Gather signal data
     const [infResult, chatResult, sessResult] = await Promise.all([
       getPool().query(
-        `SELECT COUNT(*) AS total_inferences, COUNT(DISTINCT model) AS distinct_models
+        // #286: was `COUNT(DISTINCT model)`. The column is `model_name`, so this
+        // endpoint answered 500 on every call too — found by the same check,
+        // never by anyone using it.
+        `SELECT COUNT(*) AS total_inferences, COUNT(DISTINCT model_name) AS distinct_models
          FROM model_usage WHERE agent_id = $1`,
         [agent.agent_id],
       ),
