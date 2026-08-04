@@ -85,7 +85,15 @@ function mockFetchDefaults() {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_USAGE) })
     }
     if (url === '/api/chat') {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_THREADS) })
+      // A real Response always carries headers, and the dashboard reads
+      // X-Total-Count for the thread count (#197). A double without them made
+      // fetchChat throw, which removed the recent-threads widget this test is
+      // about — an incomplete double failing a test for the wrong reason.
+      return Promise.resolve({
+        ok: true,
+        headers: { get: (k: string) => (k.toLowerCase() === 'x-total-count' ? String(MOCK_THREADS.length) : null) },
+        json: () => Promise.resolve(MOCK_THREADS),
+      })
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
   })
