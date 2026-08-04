@@ -48,6 +48,15 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       AKM_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hill90_akm_test
+      # #350: built and controlled since round two of the 2026-08-03 flakiness
+      # hunt, never once enabled here — a real 401 in CI could not have been
+      # classified by an instrument that only ever ran on someone's laptop.
+      # Permanently on, not available: an instrument nobody flips is the same
+      # as one that doesn't exist. Measured cost against the full suite,
+      # alternated to control for machine-load drift (4 runs without, 3 with):
+      # ~15.27s mean without, ~15.26s mean with — noise, not a tradeoff being
+      # made silently.
+      AUTH_401_PROBE: '1'
     defaults:
       run:
         working-directory: services/api
