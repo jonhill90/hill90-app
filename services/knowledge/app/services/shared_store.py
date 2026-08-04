@@ -208,18 +208,48 @@ async def get_source(pool: asyncpg.Pool, source_id: str) -> dict[str, Any] | Non
     return _serialize(dict(row)) if row else None
 
 
+SOURCES_PAGE_LIMIT = 200
+
+
 async def list_sources(
-    pool: asyncpg.Pool, collection_id: str
-) -> list[dict[str, Any]]:
+    pool: asyncpg.Pool,
+    collection_id: str,
+    limit: int = SOURCES_PAGE_LIMIT,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """One page of a collection's sources, and how many there are (#180).
+
+    THE TWIN of `list_entries`, and it was left behind when that was bounded.
+    This returned every row, and `SharedKnowledgeClient.tsx:886` renders
+    `{sources.length} source(s)` from it — a figure that was correct only
+    because nothing capped the query. #180 says exactly that: a length correct
+    only because nothing is bounded is a defect waiting for someone to bound it,
+    and #188 is the time this estate shipped that regression.
+
+    THE TOTAL IS A COUNT(*) over the same WHERE, never `len(rows)`, and it
+    travels with the page — bounding without telling the caller would turn "300
+    sources" into a confident "50", which is the defect wearing a fix (#215).
+
+    The `id` tiebreak matters for the same reason it does in `list_entries`:
+    sources created in the same instant share a `created_at`, and paging over a
+    non-unique sort key can hand one row to two pages and no page to another.
+    """
     rows = await pool.fetch(
         """SELECT id, collection_id, title, source_type, source_url,
                   content_hash, status, error_message, created_by, created_at, updated_at
            FROM shared_sources
            WHERE collection_id = $1
-           ORDER BY created_at DESC""",
+           ORDER BY created_at DESC, id DESC
+           LIMIT $2 OFFSET $3""",
+        UUID(collection_id),
+        limit,
+        offset,
+    )
+    total = await pool.fetchval(
+        """SELECT count(*) FROM shared_sources WHERE collection_id = $1""",
         UUID(collection_id),
     )
-    return [_serialize(dict(r)) for r in rows]
+    return [_serialize(dict(r)) for r in rows], int(total or 0)
 
 
 async def update_source_status(

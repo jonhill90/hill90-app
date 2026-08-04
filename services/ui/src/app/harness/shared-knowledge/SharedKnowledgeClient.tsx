@@ -310,6 +310,7 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
   // Data state
   const [collections, setCollections] = useState<Collection[]>([])
   const [sources, setSources] = useState<Source[]>([])
+  const [sourcesTotal, setSourcesTotal] = useState<number | null>(null)
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null)
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [qualitySummary, setQualitySummary] = useState<QualitySummary | null>(null)
@@ -353,8 +354,16 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
   const fetchSources = useCallback(async (collectionId: string) => {
     try {
       const res = await fetch(`/api/shared-knowledge/sources?collection_id=${collectionId}`)
+      // #180: what the server says exists, NOT sources.length. The list is
+      // bounded now, so counting what we were handed would report a page as a
+      // collection — the figure agreeing with itself, which is the whole family.
+      // `?.` for the same reason the api's totalFrom has it: a response without
+      // headers must degrade to "no total known", never throw and take the whole
+      // list with it.
+      const t = Number(res.headers?.get?.('X-Total-Count'))
       if (res.ok) {
         setSources(await res.json())
+        setSourcesTotal(Number.isFinite(t) ? t : null)
       }
     } catch {
       // silent
@@ -883,7 +892,9 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
                   <h2 className="text-lg font-semibold text-white">
                     {selectedCollection.name}
                     <span className="text-sm text-mountain-400 font-normal ml-2">
-                      {sources.length} source{sources.length !== 1 ? 's' : ''}
+                      {sourcesTotal !== null && sourcesTotal > sources.length
+                        ? `${sources.length} of ${sourcesTotal} sources`
+                        : `${sources.length} source${sources.length !== 1 ? 's' : ''}`}
                     </span>
                   </h2>
                   <div className="flex items-center gap-2">
