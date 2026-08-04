@@ -557,39 +557,76 @@ router.post('/threads', requireRole('user'), async (req: Request, res: Response)
       return;
     }
 
+    /*
+     * THE THREE INSERTS BELOW ARE ONE WRITE, so they run in one transaction.
+     *
+     * They were three independent statements. If the participants insert or the
+     * message insert threw, the outer catch answered 500 while the THREAD row
+     * survived — a thread with no participants, which `isParticipant` then hides
+     * from every non-admin including the person who created it, while the admin
+     * thread count still counts it.
+     *
+     * That is the middle rung of the ranking set out in workflows.ts: DETECTABLE
+     * but not self-identifying. Zero human participants cannot occur legitimately,
+     * so a query could find these — but nobody was ever going to write it. A
+     * transaction removes the need for the detector, which beats adding one.
+     *
+     * The shape is provider-connections.ts:296 verbatim — connect, BEGIN, work,
+     * COMMIT, ROLLBACK in the catch, release in a finally. An in-repo precedent
+     * beats a new abstraction even where a helper would read more prettily. This
+     * is the second user of the shape; a helper can be extracted at the third.
+     *
+     * The DISPATCH stays OUTSIDE the transaction on purpose: it calls other
+     * services, so holding a pooled connection across it would tie that
+     * connection to a network round-trip — and its failures are already reported
+     * honestly in the `failed` array rather than being errors at all.
+     */
     const pool = getPool();
+    const client = await pool.connect();
+    let thread: any;
+    let userMsg: any;
+    try {
+      await client.query('BEGIN');
 
-    // Create thread
-    const { rows: [thread] } = await pool.query(
-      `INSERT INTO chat_threads (type, title, created_by, lead_agent_id)
+      // Create thread
+      ({ rows: [thread] } = await client.query(
+        `INSERT INTO chat_threads (type, title, created_by, lead_agent_id)
        VALUES ($1, $2, $3, $4)
        RETURNING id, type, title, created_by, lead_agent_id, created_at, updated_at`,
-      [threadType, title || null, user.sub, lead_agent_id || null]
-    );
+        [threadType, title || null, user.sub, lead_agent_id || null]
+      ));
 
-    // Add participants: human owner + all agents
-    const participantValues: string[] = [];
-    const participantParams: any[] = [thread.id, user.sub];
-    participantValues.push(`($1, $2, 'human', 'owner')`);
-    let paramIdx = 3;
-    for (const agent of agents) {
-      participantValues.push(`($1, $${paramIdx}, 'agent', 'member')`);
-      participantParams.push(agent!.id);
-      paramIdx++;
+      // Add participants: human owner + all agents
+      const participantValues: string[] = [];
+      const participantParams: any[] = [thread.id, user.sub];
+      participantValues.push(`($1, $2, 'human', 'owner')`);
+      let paramIdx = 3;
+      for (const agent of agents) {
+        participantValues.push(`($1, $${paramIdx}, 'agent', 'member')`);
+        participantParams.push(agent!.id);
+        paramIdx++;
+      }
+      await client.query(
+        `INSERT INTO chat_participants (thread_id, participant_id, participant_type, role)
+         VALUES ${participantValues.join(', ')}`,
+        participantParams
+      );
+
+      // Create user message
+      ({ rows: [userMsg] } = await client.query(
+        `INSERT INTO chat_messages (thread_id, author_id, author_type, role, content, status, idempotency_key)
+         VALUES ($1, $2, 'human', 'user', $3, 'complete', $4)
+         RETURNING id, seq`,
+        [thread.id, user.sub, message.trim(), idempotency_key || null]
+      ));
+
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => { /* the connection may already be gone */ });
+      throw txErr;
+    } finally {
+      client.release();
     }
-    await pool.query(
-      `INSERT INTO chat_participants (thread_id, participant_id, participant_type, role)
-       VALUES ${participantValues.join(', ')}`,
-      participantParams
-    );
-
-    // Create user message
-    const { rows: [userMsg] } = await pool.query(
-      `INSERT INTO chat_messages (thread_id, author_id, author_type, role, content, status, idempotency_key)
-       VALUES ($1, $2, 'human', 'user', $3, 'complete', $4)
-       RETURNING id, seq`,
-      [thread.id, user.sub, message.trim(), idempotency_key || null]
-    );
 
     // Build participant list for group context (all agents, not just dispatch targets)
     const participantList = threadType === 'group'

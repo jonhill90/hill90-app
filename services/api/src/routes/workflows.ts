@@ -199,6 +199,8 @@ router.delete('/:id', requireRole('user'), async (req: Request, res: Response) =
 
 // ── Manual trigger ──────────────────────────────────────────────────
 router.post('/:id/run', requireRole('user'), async (req: Request, res: Response) => {
+  // Hoisted so the outer catch can mark the run it created. See the note below.
+  let runId: string | null = null;
   try {
     const user = (req as any).user;
     const admin = isAdmin(req);
@@ -223,12 +225,35 @@ router.post('/:id/run', requireRole('user'), async (req: Request, res: Response)
       return;
     }
 
-    // Create run record
+    /*
+     * From here until the response, a `workflow_runs` row exists saying 'running'.
+     * Everything after this line — four inserts, two updates — can throw, and the
+     * outer catch used to answer 500 while leaving that row running FOREVER.
+     * Nothing else ever touched it: the `status = 'error'` update further down
+     * lives inside the DISPATCH .catch, so it never fired for a failure in the
+     * insert sequence.
+     *
+     * WHY THAT WAS THE WORST SEAM IN THIS SERVICE, and the ranking to apply to the
+     * rest of them:
+     *
+     *   SELF-IDENTIFYING beats DETECTABLE beats NEITHER.
+     *
+     * A half-write that labels itself needs no detector — you read its own status.
+     * One that is merely detectable needs somebody to think of the query, and
+     * nobody does. One that is neither is permanent. This row was the third case
+     * dressed as the first: it carried a status, and the status was a lie, because
+     * `status='running' AND thread_id IS NULL` is ALSO the legitimate in-flight
+     * state between here and the update below — so no snapshot could tell a dead
+     * run from a live one except by age.
+     *
+     * `runId` is hoisted so the outer catch can reach it. That is the whole fix.
+     */
     const { rows: runRows } = await getPool().query(
       `INSERT INTO workflow_runs (workflow_id, status) VALUES ($1, 'running') RETURNING *`,
       [wf.id]
     );
     const run = runRows[0];
+    runId = run.id;
 
     // Create a chat thread and send the prompt
     const pool = getPool();
@@ -319,6 +344,30 @@ router.post('/:id/run', requireRole('user'), async (req: Request, res: Response)
     res.json({ ...run, thread_id: threadId, status: 'running' });
   } catch (err: any) {
     console.error('[workflows] Run error:', err);
+
+    /*
+     * Label the run before answering. Without this the caller was told 500 while
+     * a row sat at 'running' permanently — a failure the system could not
+     * afterwards distinguish from a run still in progress.
+     *
+     * Best-effort and separately guarded, for the same reason the dispatch
+     * .catch above is: the database failing is precisely the case that produces
+     * this catch, so recording the failure must not be able to throw out of it
+     * and turn a 500 into an unhandled rejection.
+     */
+    if (runId) {
+      try {
+        await getPool().query(
+          `UPDATE workflow_runs SET status = 'error', error = $1, completed_at = NOW(),
+           duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at))::int * 1000
+           WHERE id = $2 AND status = 'running'`,
+          [err?.message || 'Run setup failed', runId]
+        );
+      } catch (markErr) {
+        console.error(`[workflows] Failed to mark run ${runId} as error:`, markErr);
+      }
+    }
+
     res.status(500).json({ error: 'Failed to run workflow' });
   }
 });
