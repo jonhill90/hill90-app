@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from app.services import task_store
@@ -48,12 +48,25 @@ class TransitionBody(BaseModel):
 @router.get("")
 async def list_tasks(
     request: Request,
+    response: Response,
     agent_id: str | None = Query(None),
     status: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=2000, description="Max tasks to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip before the page"),
 ) -> list[dict[str, Any]]:
+    """List one page of tasks across agents.
+
+    ``agent_id`` is OPTIONAL here, so omitting it returns every task for every
+    agent — which is exactly why this needed a bound more than the agent-facing
+    twin did, not less (#184). The total goes in ``X-Total-Count``.
+    """
     _verify_service_token(request)
     pool = request.app.state.pool
-    return await task_store.list_tasks(pool, agent_id=agent_id, status=status)
+    tasks, total = await task_store.list_tasks(
+        pool, agent_id=agent_id, status=status, limit=limit, offset=offset
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return tasks
 
 
 @router.post("")

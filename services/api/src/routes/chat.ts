@@ -24,6 +24,7 @@ import { armCredentialDeadline, endStreamForExpiredCredential } from '../helpers
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { requireRole } from '../middleware/role';
+import { parsePageParams, DEFAULT_PAGE } from '../helpers/page-params';
 import { isAdmin, getAgentElevatedScope } from '../helpers/elevated-scope';
 import { auditLog } from '../helpers/audit';
 import { dispatchChatWork } from '../services/chat-dispatch';
@@ -277,29 +278,67 @@ router.get('/threads', requireRole('user'), async (req: Request, res: Response) 
     let query: string;
     let params: any[];
 
+    const page = parsePageParams(req);
+    if ('error' in page) {
+      res.status(400).json({ error: page.error });
+      return;
+    }
+    const limit = page.limit ?? DEFAULT_PAGE;
+    const offset = page.offset ?? 0;
+
+    // The SELECT list is identical in both branches; only the scope differs.
+    // Kept as one string so the two cannot drift into returning different
+    // columns to an admin than to a user.
+    const COLS = `t.id, t.type, t.title, t.created_by, t.lead_agent_id, t.created_at, t.updated_at,
+                      (SELECT content FROM chat_messages
+                       WHERE thread_id = t.id ORDER BY seq DESC LIMIT 1) AS last_message,
+                      (SELECT author_type FROM chat_messages
+                       WHERE thread_id = t.id ORDER BY seq DESC LIMIT 1) AS last_author_type`;
+
+    // ORDER BY carries an id tiebreak: updated_at is not unique, and paging
+    // over a non-unique sort key hands one thread to two pages and no page to
+    // another — the same silent wrong answer as truncation, arriving through
+    // pagination instead.
+    let countQuery: string;
+    let countParams: any[];
+
     if (admin) {
-      query = `SELECT t.id, t.type, t.title, t.created_by, t.lead_agent_id, t.created_at, t.updated_at,
-                      (SELECT content FROM chat_messages
-                       WHERE thread_id = t.id ORDER BY seq DESC LIMIT 1) AS last_message,
-                      (SELECT author_type FROM chat_messages
-                       WHERE thread_id = t.id ORDER BY seq DESC LIMIT 1) AS last_author_type
+      // No WHERE, deliberately: an admin sees every thread. That matches
+      // scopeToOwner (admin -> no filter) and isParticipant (admin bypass), so
+      // this is a VOLUME bound, not an authorization change. Nothing that was
+      // visible before is hidden now; it simply arrives one page at a time.
+      query = `SELECT ${COLS}
                FROM chat_threads t
-               ORDER BY t.updated_at DESC`;
-      params = [];
+               ORDER BY t.updated_at DESC, t.id DESC
+               LIMIT $1 OFFSET $2`;
+      params = [limit, offset];
+      countQuery = `SELECT COUNT(*) AS total FROM chat_threads t`;
+      countParams = [];
     } else {
-      query = `SELECT t.id, t.type, t.title, t.created_by, t.lead_agent_id, t.created_at, t.updated_at,
-                      (SELECT content FROM chat_messages
-                       WHERE thread_id = t.id ORDER BY seq DESC LIMIT 1) AS last_message,
-                      (SELECT author_type FROM chat_messages
-                       WHERE thread_id = t.id ORDER BY seq DESC LIMIT 1) AS last_author_type
+      query = `SELECT ${COLS}
                FROM chat_threads t
                JOIN chat_participants cp ON cp.thread_id = t.id
                WHERE cp.participant_id = $1 AND cp.participant_type = 'human' AND cp.left_at IS NULL
-               ORDER BY t.updated_at DESC`;
-      params = [user.sub];
+               ORDER BY t.updated_at DESC, t.id DESC
+               LIMIT $2 OFFSET $3`;
+      params = [user.sub, limit, offset];
+      // Same JOIN and same WHERE as the page. A count over a different scope
+      // would report someone else's thread count to this user.
+      countQuery = `SELECT COUNT(*) AS total
+                    FROM chat_threads t
+                    JOIN chat_participants cp ON cp.thread_id = t.id
+                    WHERE cp.participant_id = $1 AND cp.participant_type = 'human' AND cp.left_at IS NULL`;
+      countParams = [user.sub];
     }
 
-    const { rows } = await getPool().query(query, params);
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      getPool().query(query, params),
+      getPool().query(countQuery, countParams),
+    ]);
+
+    // COUNT(*) over the same scope, never rows.length: a total derived from
+    // the page agrees with itself and reports truncation as completeness.
+    res.setHeader('X-Total-Count', String(Number(countRows[0].total)));
 
     // Enrich with participant info
     const threadIds = rows.map((r: any) => r.id);
