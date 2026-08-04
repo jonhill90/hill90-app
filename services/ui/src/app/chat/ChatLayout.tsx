@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import Toast, { useToast } from '@/components/Toast'
 import { useRouter } from 'next/navigation'
 import type { Session } from 'next-auth'
 import ThreadList from './ThreadList'
@@ -38,6 +39,7 @@ interface Props {
 export default function ChatLayout({ session, activeThreadId }: Props) {
   const router = useRouter()
   const [threads, setThreads] = useState<ChatThread[]>([])
+  const { toast, showToast } = useToast()
   const [loading, setLoading] = useState(true)
   const [showNewThread, setShowNewThread] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -95,10 +97,21 @@ export default function ChatLayout({ session, activeThreadId }: Props) {
     if (staleThreads.length === 0) return
     if (!confirm(`Delete ${staleThreads.length} old/error threads?`)) return
 
+    // #217: a PARTIAL result reported as a whole one. The catch swallowed
+    // network errors and a non-ok DELETE was never checked at all, so three
+    // deletions out of seven looked exactly like seven — until the refetch put
+    // the survivors back, unexplained.
+    let failed = 0
     for (const t of staleThreads) {
       try {
-        await fetch(`/api/chat/${t.id}`, { method: 'DELETE' })
-      } catch { /* skip */ }
+        const res = await fetch(`/api/chat/${t.id}`, { method: 'DELETE' })
+        if (!res.ok) failed++
+      } catch {
+        failed++
+      }
+    }
+    if (failed > 0) {
+      showToast('error', `${failed} of ${staleThreads.length} thread(s) could not be deleted`)
     }
     fetchThreads()
     if (activeThreadId && staleThreads.some(t => t.id === activeThreadId)) {
@@ -108,6 +121,7 @@ export default function ChatLayout({ session, activeThreadId }: Props) {
 
   return (
     <div className="flex h-full overflow-hidden">
+      <Toast toast={toast} />
       {/* Thread list sidebar — desktop */}
       <div
         className={`${

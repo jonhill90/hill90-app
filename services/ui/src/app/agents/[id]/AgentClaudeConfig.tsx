@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Toast, { useToast, failureMessage } from '@/components/Toast'
 import { Bot, Key, Check } from 'lucide-react'
 
 interface Props {
@@ -12,6 +13,7 @@ interface Props {
 
 export default function AgentClaudeConfig({ agentId, envVars, agentStatus, onUpdate }: Props) {
   const [apiKey, setApiKey] = useState('')
+  const { toast, showToast } = useToast()
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
@@ -33,8 +35,15 @@ export default function AgentClaudeConfig({ agentId, envVars, agentStatus, onUpd
         setSaved(true)
         setTimeout(() => setSaved(false), 3000)
         onUpdate()
+      } else {
+        // #217: the res.ok check was here and correct, and the failing branch
+        // did nothing — so a rejected save looked exactly like a click that
+        // had not registered.
+        showToast('error', await failureMessage('Could not save the API key', res))
       }
-    } catch { /* ignore */ }
+    } catch {
+      showToast('error', 'Could not save the API key: the request did not complete')
+    }
     finally { setSaving(false) }
   }
 
@@ -42,16 +51,29 @@ export default function AgentClaudeConfig({ agentId, envVars, agentStatus, onUpd
     if (!confirm('Remove Claude API key from this agent?')) return
     const updated = { ...(envVars || {}) }
     delete updated.ANTHROPIC_API_KEY
-    await fetch(`/api/agents/${agentId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ env_vars: updated }),
-    })
+    // #217: this had NO res.ok check at all, four lines from handleSave which
+    // does — the twin pattern CONTRIBUTING documents. On failure the key simply
+    // reappeared after the refetch, with nothing saying why.
+    try {
+      const res = await fetch(`/api/agents/${agentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ env_vars: updated }),
+      })
+      if (!res.ok) {
+        showToast('error', await failureMessage('Could not remove the API key', res))
+      }
+    } catch {
+      showToast('error', 'Could not remove the API key: the request did not complete')
+    }
+    // The refetch runs either way: it is what puts the true state back on
+    // screen, and it was never the missing piece — being told was.
     onUpdate()
   }
 
   return (
     <div className="rounded-lg border border-navy-700 bg-navy-800 p-5">
+      <Toast toast={toast} />
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Bot className="w-4 h-4 text-mountain-400" />
