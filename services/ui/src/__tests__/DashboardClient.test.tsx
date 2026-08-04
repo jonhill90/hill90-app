@@ -328,15 +328,36 @@ describe('DashboardClient', () => {
   })
 
   it('renders recent chat threads widget', async () => {
-    // The second #117 victim — identical shape to 'Active Agents' (a
-    // static <h2>Recent Chats</h2>, gated on nothing, ahead of the
-    // fetchChat()-populated thread list) and fixed the same way: wait on the
-    // empty-state text disappearing, which only changes once `recentThreads`
-    // is actually set. Never independently confirmed to race in CI (17 recorded
-    // #117 occurrences since the discriminator landed were all the OTHER
-    // widget — see docs/decisions/api-suite-flakiness.md) but the render
-    // structure is the same defect, so it gets the same fix rather than being
-    // left half-corrected.
+    // RESOLVED, not left open: why did this victim never once show the
+    // ARRIVED LATE pattern in 264 CI runs (17/17 hits were 'Active Agents'),
+    // and does that mean it cannot race?
+    //
+    // It is NOT immune. DashboardClient.tsx:403's <h2>Recent Chats</h2> is
+    // exactly as unconditional as :369's <h2>Active Agents</h2> — read
+    // directly, neither heading is gated on its widget's data, both render
+    // on first paint. The OLD wait here (`getByText('Recent Chats')`) had
+    // the identical structural gap the Scout race was traced to. This was
+    // never a "this one is safe" case.
+    //
+    // What differs is EXPOSURE, not immunity, and it is a real, readable
+    // asymmetry: this widget's data comes from `fetchChat()`
+    // (DashboardClient.tsx:90-92), a SINGLE `await fetch('/api/chat')`.
+    // 'Active Agents' comes from `fetchHarness()` (:172-174), an
+    // `await Promise.all([...three fetches...])` — gated by whichever of the
+    // three is slowest, plus Promise.all's own combinator overhead. Fewer
+    // hops between mount and `setRecentThreads` means a narrower window for
+    // the same synchronous check to lose the race, not a zero one — 17 real
+    // occurrences at a measured, uniform 20ms says the window this component
+    // actually has is on that order; a chain with fewer hops landing inside
+    // a 264-run sample without once crossing it is a plausible rate, not
+    // evidence the rate is zero.
+    //
+    // So: FIXING A FLAKE THAT HAS NEVER FAILED, deliberately. The identical
+    // defect shape plus a probabilistic (not structural) reason for the
+    // observed 17-vs-0 split means leaving this widget on the old wait
+    // pattern would have been keeping a live, just-quieter version of the
+    // exact bug #117 exists to close — worth doing before a rarer flake here
+    // costs someone a night, not after.
     render(<DashboardClient session={MOCK_SESSION as any} />)
 
     await waitFor(() => {
