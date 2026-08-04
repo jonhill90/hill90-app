@@ -161,8 +161,16 @@ describe('the chat message stream ends when participation is revoked', () => {
 
     participant = false;                       // an operator removes them
 
+    // NOTHING BEFORE THE INTERVAL. participation-watch.ts documents "worst case
+    // ~30 seconds", and that rests on this route's bare 30000 literal, which
+    // nothing asserted. Raising it to 300000 would make the documented security
+    // property silently false; advancing short of it and then across it pins the
+    // number behaviourally, rather than by comparing a constant to itself.
+    await jest.advanceTimersByTimeAsync(29_000);
+    await new Promise((r) => setImmediate(r));
+
     // One tick of the timer that already existed.
-    await jest.advanceTimersByTimeAsync(30_000);
+    await jest.advanceTimersByTimeAsync(1_000);
     await jest.advanceTimersByTimeAsync(50);   // let the async re-check settle
 
     /*
