@@ -16,6 +16,53 @@ function dbHealthCheck(_req: Request, res: Response, next: () => void) {
 router.use(dbHealthCheck);
 router.use(requireRole('user'));
 
+/**
+ * How much of this window is known to be MISSING (#261).
+ *
+ * `log_usage` failures in `services/ai` are logged and swallowed — right for the
+ * request, wrong for the total, because `COUNT(*)`/`SUM(...)` over the rows that
+ * landed cannot tell a request that was never recorded from one that cost
+ * nothing. Nobody notices absent rows; they notice wrong totals, and an
+ * understated total looks exactly like a quiet period.
+ *
+ * So every figure this route returns is now accompanied by what is known to be
+ * absent from it. Zero is a real answer here and means "no failed writes are on
+ * record for this window" — not "the total is right", because a process that
+ * died holding a pending gap never got to record it.
+ */
+async function completenessFor(from: string, to?: string): Promise<Record<string, unknown>> {
+  const upper = to ? `${to}T00:00:00+00:00` : null;
+  try {
+    return await queryCompleteness(from, upper);
+  } catch (err) {
+    // Three states, not two. A qualification that cannot be read is not the
+    // same as a window with no gaps, and it must not take the totals down with
+    // it: before migration 063 lands, this table does not exist, and the
+    // figures are still the best available.
+    console.error('[usage] Completeness query failed:', err);
+    return { known_missing_rows: null, first_missing_at: null, last_missing_at: null, unavailable: true };
+  }
+}
+
+async function queryCompleteness(from: string, upper: string | null): Promise<Record<string, unknown>> {
+  const { rows } = await getPool().query(
+    `SELECT COALESCE(SUM(missed_count), 0)::int AS known_missing_rows,
+            MIN(first_failed_at) AS first_missing_at,
+            MAX(last_failed_at)  AS last_missing_at
+     FROM usage_write_gaps
+     WHERE last_failed_at >= $1::timestamptz
+       AND ($2::timestamptz IS NULL OR first_failed_at < $2::timestamptz + interval '1 day')`,
+    [from, upper]
+  );
+  const row = rows[0];
+  if (!row) throw new Error('completeness query returned no row');
+  return {
+    known_missing_rows: row.known_missing_rows || 0,
+    first_missing_at: row.first_missing_at || null,
+    last_missing_at: row.last_missing_at || null,
+  };
+}
+
 // Query usage with optional filtering and aggregation
 router.get('/', async (req: Request, res: Response) => {
   try {
@@ -90,7 +137,7 @@ router.get('/', async (req: Request, res: Response) => {
          ORDER BY ${groupCol}`,
         params
       );
-      res.json({ data: rows, group_by });
+      res.json({ data: rows, group_by, completeness: await completenessFor(`${fromDate}T00:00:00+00:00`, to as string | undefined) });
     } else {
       // Summary (no grouping)
       const { rows } = await getPool().query(
@@ -104,7 +151,7 @@ router.get('/', async (req: Request, res: Response) => {
          FROM model_usage ${whereClause}`,
         params
       );
-      res.json(rows[0]);
+      res.json({ ...rows[0], completeness: await completenessFor(`${fromDate}T00:00:00+00:00`, to as string | undefined) });
     }
   } catch (err) {
     console.error('[usage] Query error:', err);
