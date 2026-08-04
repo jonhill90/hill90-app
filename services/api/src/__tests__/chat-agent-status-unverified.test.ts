@@ -128,6 +128,34 @@ function proxyUnreachable() {
 let servedParticipantStatuses: string[] = [];
 
 /**
+ * THE PROBE. The last assumption standing, made checkable.
+ *
+ * `servedParticipantStatuses` records the status string the stub *decided on*,
+ * not the row object the route *read*. Those have been treated as identical
+ * because they come from the same object literal — the only unexamined step
+ * left between "served stopped" and a body saying "unknown".
+ *
+ * Two things are captured per served row, and the difference between them is
+ * the finding:
+ *
+ *   snapshot — a deep copy taken at serve time, frozen in the past.
+ *   live     — the very object handed to the route.
+ *
+ * If `live` has drifted from `snapshot` by the time the dump runs, something
+ * MUTATED the row after the query returned. That is a live possibility rather
+ * than a fishing expedition: the thread-detail and participants-update routes
+ * in `chat.ts` deliberately mutate their participant rows in place
+ * (`p.agent_status = status`), and a shared or reused row object would carry
+ * that across.
+ *
+ * `sqlSeen` records every statement the route issued, so a second participants
+ * query — or one taking a branch this stub does not model — is visible instead
+ * of inferred.
+ */
+let servedParticipantRows: Array<{ snapshot: any; live: any }> = [];
+let sqlSeen: string[] = [];
+
+/**
  * Route the pool by SQL shape rather than by call order. GET /chat/threads
  * issues its page and its COUNT through Promise.all, and an order-dependent
  * mock would pin an implementation detail instead of the behaviour.
@@ -142,6 +170,7 @@ let servedParticipantStatuses: string[] = [];
 function stubChatQueries(recordedStatus = 'running') {
   mockQuery.mockImplementation(async (sql: string) => {
     const text = String(sql);
+    sqlSeen.push(text.replace(/\s+/g, ' ').trim().slice(0, 90));
     if (text.includes('COUNT(*) AS total')) return { rows: [{ total: '1' }] };
     if (text.includes('FROM chat_threads')) {
       return {
@@ -158,18 +187,18 @@ function stubChatQueries(recordedStatus = 'running') {
     }
     if (text.includes('FROM chat_participants')) {
       servedParticipantStatuses.push(recordedStatus);
-      return {
-        rows: [{
-          thread_id: THREAD_ID,
-          participant_id: AGENT_UUID,
-          participant_type: 'agent',
-          role: 'member',
-          left_at: null,
-          agent_id: AGENT_SLUG,
-          agent_name: 'TestBot',
-          agent_status: recordedStatus,
-        }],
+      const row = {
+        thread_id: THREAD_ID,
+        participant_id: AGENT_UUID,
+        participant_type: 'agent',
+        role: 'member',
+        left_at: null,
+        agent_id: AGENT_SLUG,
+        agent_name: 'TestBot',
+        agent_status: recordedStatus,
       };
+      servedParticipantRows.push({ snapshot: JSON.parse(JSON.stringify(row)), live: row });
+      return { rows: [row] };
     }
     return { rows: [] };
   });
@@ -247,6 +276,18 @@ function dumpResponse(res: request.Response): string {
     `  expected thread  : ${THREAD_ID}`,
     `  expected agent   : ${AGENT_SLUG} (${AGENT_UUID})`,
     `  statuses served  : ${JSON.stringify(servedParticipantStatuses)}`,
+    `  rows served      : ${servedParticipantRows.length}`,
+    ...servedParticipantRows.flatMap((r, i) => {
+      const liveNow = JSON.stringify(r.live);
+      const atServe = JSON.stringify(r.snapshot);
+      return [
+        `    [${i}] at serve time : ${atServe}`,
+        `    [${i}] live now      : ${liveNow}`,
+        `    [${i}] MUTATED?      : ${liveNow === atServe ? 'no — identical' : 'YES — the route changed the row in place'}`,
+      ];
+    }),
+    `  sql issued       : ${servedParticipantRows.length === 0 && sqlSeen.length === 0 ? '<none>' : ''}`,
+    ...sqlSeen.map((q, i) => `    [${i}] ${q}`),
     `  parsed body      : ${JSON.stringify(res.body)}`,
     `  raw text         : ${raw}`,
     '--------------------------------------------------------------------------',
@@ -282,6 +323,8 @@ beforeEach(() => {
   mockQuery.mockReset();
   mockContainerInspect.mockReset();
   servedParticipantStatuses = [];
+  servedParticipantRows = [];
+  sqlSeen = [];
   resetStatusVerification();
   process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
 });
