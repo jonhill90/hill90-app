@@ -16,8 +16,34 @@ import crypto from 'crypto';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { isAdmin } from '../helpers/elevated-scope';
+import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 
 const router = Router();
+
+/**
+ * What this route is entitled to say about the agent a workflow belongs to.
+ *
+ * #250 added the third state and applied it in `routes/agents.ts`; #251 applied
+ * it in `routes/chat.ts`. This route was found afterwards (#262), selecting
+ * `a.status AS agent_status` and serializing it straight out of the join — so a
+ * `running` row reconciliation could not check was reported here as fact after
+ * two rounds of fixing exactly that.
+ *
+ * THE ENUMERATION THAT MISSED IT is the part worth carrying: #251 counted five
+ * UI surfaces by reading the components it already had open, and never swept for
+ * routes that SERVE a status. Rerun the method, not the number:
+ *
+ *   grep -rnE "a\\.status|agent_status" services/api/src/routes/
+ *   grep -rn  "agent_status\\|\\.status === 'running'" services/ui/src
+ */
+function withReportedAgentStatus<T extends { agent_slug?: string; agent_status?: string }>(row: T): T {
+  if (!row.agent_slug || row.agent_status == null) return row;
+  return {
+    ...row,
+    agent_status: reportedStatus(row.agent_slug, row.agent_status),
+    agent_status_verified: isStatusVerified(row.agent_slug),
+  };
+}
 
 // ── List workflows ──────────────────────────────────────────────────
 router.get('/', requireRole('user'), async (req: Request, res: Response) => {
@@ -34,7 +60,7 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
       admin ? [] : [user.sub]
     );
 
-    res.json(rows);
+    res.json(rows.map(withReportedAgentStatus));
   } catch (err: any) {
     console.error('[workflows] List error:', err);
     res.status(500).json({ error: 'Failed to list workflows' });
@@ -122,7 +148,7 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
       return;
     }
 
-    res.json(rows[0]);
+    res.json(withReportedAgentStatus(rows[0]));
   } catch (err: any) {
     console.error('[workflows] Get error:', err);
     res.status(500).json({ error: 'Failed to get workflow' });
