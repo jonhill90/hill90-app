@@ -90,6 +90,13 @@ It completes a real authorization-code flow and asserts `resource_access.hill90-
 `aud` including `hill90-api`, no `admin` in `realm_access.roles`, and that `iss` is realm
 `platform`.
 
+**Every request parameter is read from the running UI container** — `redirect_uri` from its
+`AUTH_URL`, plus `client_id`, the secret and the issuer — so the flow it runs is the flow a
+person runs. It hardcoded the redirect until 2026-08-04 and passed, in full green, on a
+stack where a browser login was an HTTP 400 (#271): a check that hardcodes a parameter can
+never fail on that parameter being wrong. `tests/scripts/login-check-sees-redirect.bats`
+keeps it that way.
+
 `compose/local.yml` is a purpose-built local stack. It is not the production
 topology: it creates its own Docker networks, skips Traefik entirely, and routes
 by published port instead of the 37 `traefik.*` labels in `deploy/compose/prod/`.
