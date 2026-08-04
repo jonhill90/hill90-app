@@ -13,6 +13,8 @@ import * as crypto from 'crypto';
 import { Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { generateAgentModelRouterToken, isModelRouterConfigured } from './model-router-token';
+import { revokeAgentModelRouterToken } from './model-router-revoke';
+import { auditLog } from '../helpers/audit';
 
 /**
  * POST /internal/model-router/refresh-token
@@ -121,6 +123,50 @@ export async function modelRouterRefreshHandler(req: Request, res: Response): Pr
   );
 
   console.info(`[model-router-refresh] Refreshed token for agent ${agent.agent_id} (jti=${newToken.jti})`);
+
+  // REVOKE THE TOKEN THIS REPLACED (#256).
+  //
+  // Revocation here is a JTI denylist, so a token can only be stopped by name —
+  // and the UPDATE above has just overwritten the only column that held the old
+  // name. Without this the superseded token stayed valid until its own expiry
+  // and nothing could name it: #245's end state, reached on the success path
+  // rather than by a failure.
+  //
+  // AFTER the swap, never before, and that order is forced rather than chosen:
+  // revoking first would mean a failed mint or UPDATE leaves the agent holding a
+  // revoked token with no replacement, which is worse than the defect. So this
+  // does NOT presume the stop-path ordering that #269 is waiting on — that
+  // decision has a genuine trade and this one does not.
+  //
+  // NEVER FAILS THE REFRESH. The new token is stored and about to be returned;
+  // a 500 now would tell the agent its refresh failed while the database says it
+  // succeeded. What a failure must not do is disappear, so it names the token
+  // that is loose and until when. Whether an orphan should also be COUNTED or
+  // retried is #269's to decide and is deliberately not decided here.
+  if (agent.model_router_jti) {
+    try {
+      await revokeAgentModelRouterToken(
+        agent.agent_id,
+        agent.model_router_jti,
+        agent.model_router_exp ?? undefined,
+      );
+      auditLog('token_revoked', agent.agent_id, agent.agent_id, 'agent', {
+        principal_id: agent.id, jti: agent.model_router_jti, reason: 'refresh',
+        owner_sub: agent.created_by,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'unknown error';
+      console.warn(
+        `[model-router-refresh] SUPERSEDED TOKEN STILL LIVE for agent ${agent.agent_id}: ` +
+        `jti=${agent.model_router_jti} valid until exp=${agent.model_router_exp} could not be revoked (${detail}). ` +
+        'It is no longer recorded on the agent row, so this line is the only thing that names it.'
+      );
+      auditLog('token_revoke_failed', agent.agent_id, agent.agent_id, 'agent', {
+        principal_id: agent.id, jti: agent.model_router_jti,
+        exp: agent.model_router_exp, reason: 'refresh', error: detail,
+      });
+    }
+  }
 
   res.json({
     token: newToken.token,
