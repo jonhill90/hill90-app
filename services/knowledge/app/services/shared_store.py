@@ -309,19 +309,39 @@ async def create_document(
     title: str,
     content_hash: str,
     chunk_count: int,
+    embedding_status: str = "pending",
 ) -> dict[str, Any]:
+    """Insert a document row.
+
+    ``embedding_status`` defaults to 'pending' rather than 'embedded' on
+    purpose: at the moment this row is created the chunks do not exist yet, so
+    claiming coverage here would be asserting something not yet true (#210).
+    The ingest sets the real value once it knows what the embedder returned.
+    """
     row = await pool.fetchrow(
         """INSERT INTO shared_documents
-           (source_id, ingest_job_id, title, content_hash, chunk_count)
-           VALUES ($1, $2, $3, $4, $5)
+           (source_id, ingest_job_id, title, content_hash, chunk_count, embedding_status)
+           VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING *""",
         UUID(source_id),
         UUID(ingest_job_id),
         title,
         content_hash,
         chunk_count,
+        embedding_status,
     )
     return _serialize(dict(row))
+
+
+async def set_document_embedding_status(
+    pool: asyncpg.Pool, document_id: str, status: str
+) -> None:
+    """Record what the embedder actually achieved for this document."""
+    await pool.execute(
+        "UPDATE shared_documents SET embedding_status = $2 WHERE id = $1",
+        UUID(document_id),
+        status,
+    )
 
 
 async def create_chunks(
@@ -329,43 +349,85 @@ async def create_chunks(
     document_id: str,
     chunks: list[tuple[int, str, int]],
     embeddings: list[list[float]] | None = None,
-) -> int:
+) -> tuple[int, int]:
     """Bulk-insert chunks. Each tuple is (chunk_index, content, token_estimate).
 
-    If embeddings are provided, stores them alongside the chunks.
-    Returns the number of chunks inserted.
+    Returns ``(inserted, embedded)`` — how many chunks were written and how
+    many of them carry a vector. The caller needs the second number to record
+    an honest embedding_status; it cannot infer it from the first (#210).
+
+    A PARTIAL embedding response is stored, not discarded. This used to be
+    ``if embeddings and len(embeddings) == len(chunks)``, which treated "the
+    embedder returned 30 vectors for 42 chunks" identically to "the embedder
+    returned nothing" and threw away all 30. The next person debugging a
+    coverage gap would have gone looking for a total outage that never
+    happened.
     """
     doc_uuid = UUID(document_id)
+    vectors = embeddings or []
 
-    if embeddings and len(embeddings) == len(chunks):
-        # Insert with embeddings
-        import json
-        records = [
-            (doc_uuid, idx, content, tokens, json.dumps(emb))
-            for (idx, content, tokens), emb in zip(chunks, embeddings)
-        ]
+    if len(vectors) != len(chunks):
+        # Distinguished in the log, because the two have different causes:
+        # none at all means the embedder was unreachable or unconfigured; a
+        # mismatch means it answered and answered short.
+        if not vectors:
+            logger.warning(
+                "chunk_embeddings_absent",
+                document_id=document_id,
+                chunks=len(chunks),
+            )
+        else:
+            logger.warning(
+                "chunk_embeddings_partial",
+                document_id=document_id,
+                chunks=len(chunks),
+                embeddings=len(vectors),
+            )
+
+    import json
+
+    embedded = 0
+    with_vec: list[tuple[Any, ...]] = []
+    without_vec: list[tuple[Any, ...]] = []
+
+    for i, (idx, content, tokens) in enumerate(chunks):
+        # Positional pairing is what the embedding API contract gives us: the
+        # nth vector belongs to the nth input. A short response therefore
+        # covers a PREFIX of the chunks, and the rest are genuinely unembedded.
+        if i < len(vectors):
+            with_vec.append((doc_uuid, idx, content, tokens, json.dumps(vectors[i])))
+            embedded += 1
+        else:
+            without_vec.append((doc_uuid, idx, content, tokens))
+
+    if with_vec:
         await pool.executemany(
             """INSERT INTO shared_chunks (document_id, chunk_index, content, token_estimate, embedding)
                VALUES ($1, $2, $3, $4, $5::vector)""",
-            records,
+            with_vec,
         )
-    else:
-        # Insert without embeddings (FTS-only)
-        records = [
-            (doc_uuid, idx, content, tokens)
-            for idx, content, tokens in chunks
-        ]
+    if without_vec:
         await pool.executemany(
             """INSERT INTO shared_chunks (document_id, chunk_index, content, token_estimate)
                VALUES ($1, $2, $3, $4)""",
-            records,
+            without_vec,
         )
-    return len(chunks)
+
+    return len(chunks), embedded
 
 
-# ---------------------------------------------------------------------------
-# Search
-# ---------------------------------------------------------------------------
+def embedding_status_for(total: int, embedded: int) -> str:
+    """Map coverage onto the column's four states.
+
+    A document with no chunks at all is 'embedded' rather than 'pending':
+    there is nothing missing, and marking it pending would put a permanent
+    entry on the backfill's work list that can never be satisfied.
+    """
+    if embedded >= total:
+        return "embedded"
+    if embedded == 0:
+        return "pending"
+    return "partial"
 
 
 async def search_chunks(
