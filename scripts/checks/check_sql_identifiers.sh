@@ -76,12 +76,41 @@ done
 TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
 node -e '
 const fs=require("fs"), path=require("path");
-const dir=process.argv[1];
+const root=process.argv[1];
 const excluded=(process.argv[3]||"").split(",").filter(Boolean);
-let checkable=0, dynamic=0, out=[];
-for (const f of fs.readdirSync(dir).filter(f=>f.endsWith(".ts"))) {
-  if (excluded.includes(f)) continue;
-  const src=fs.readFileSync(path.join(dir,f),"utf8");
+
+// WALK THE TREE, do not list directories.
+//
+// The first version scanned `src/routes` only. That was not a short list, it
+// was the WRONG KIND of list: SQL lives in five directories — routes (18
+// files), services (6), db (2), helpers (1) and src itself (1) — so the gate
+// covered 18 of 28 files while printing a healthy number, and a scheduler
+// statement that cannot parse sat outside it.
+//
+// Extending the list to routes+services+helpers would have missed src/db and
+// src/ for the same reason the first hole existed. A list must be maintained by
+// whoever adds a directory; a walk need not be. The only exclusions are tests,
+// which contain deliberately malformed SQL, and migrations, which are DDL run
+// by the migration runner rather than statements this code prepares.
+function walk(d) {
+  const out = [];
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    const p = path.join(d, e.name);
+    if (e.isDirectory()) {
+      if (["__tests__", "node_modules", "migrations"].includes(e.name)) continue;
+      out.push(...walk(p));
+    } else if (e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+let checkable=0, dynamic=0, out=[], files=0;
+for (const full of walk(root)) {
+  if (excluded.includes(path.basename(full))) continue;
+  files++;
+  const src=fs.readFileSync(full,"utf8");
   // COMMENTS AND WHITESPACE BETWEEN `query(` AND THE LITERAL.
   //
   // The first version allowed only \s*, so any statement with an explanatory
@@ -102,8 +131,8 @@ for (const f of fs.readdirSync(dir).filter(f=>f.endsWith(".ts"))) {
   }
 }
 fs.writeFileSync(process.argv[2], out.join("\n"));
-console.error(`checkable: ${checkable}   NOT CHECKABLE (interpolated): ${dynamic}`);
-' "$ROOT/services/api/src/routes" "$TMP" "$(IFS=,; echo "${EXCLUDES[*]%%:*}")"
+console.error(`files scanned: ${files}   checkable: ${checkable}   NOT CHECKABLE (interpolated): ${dynamic}`);
+' "$ROOT/services/api/src" "$TMP" "$(IFS=,; echo "${EXCLUDES[*]%%:*}")"
 
 OUT=$(psql_run < "$TMP" 2>&1)
 ERRORS=$(printf '%s' "$OUT" | grep -c 'ERROR:' || true)
