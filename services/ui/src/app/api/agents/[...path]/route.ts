@@ -1,6 +1,6 @@
 import { auth } from '@/auth'
 import { NextRequest, NextResponse } from 'next/server'
-import { passThroughHeaders } from '@/utils/api-proxy'
+import { passThroughHeaders, nonJsonUpstreamResponse } from '@/utils/api-proxy'
 import {
   readBodyLimited,
   bodyTooLargeResponse,
@@ -98,7 +98,15 @@ async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ pa
       if (err instanceof UpstreamTooLargeError) return upstreamTooLargeResponse(err)
       throw err
     }
-    const data = raw === '' ? null : JSON.parse(raw)
+    // #223: an unparseable body is an ANSWER from the upstream, not a failure
+    // to reach it. Sharing a catch with the fetch turned a 404 of HTML into a
+    // 502 with the cause erased.
+    let data: unknown
+    try {
+      data = raw === '' ? null : JSON.parse(raw)
+    } catch {
+      return nonJsonUpstreamResponse('agents-proxy', res.status, raw)
+    }
     /*
      * FORWARD THE HEADER, or the last hop undoes the work of every earlier one.
      *

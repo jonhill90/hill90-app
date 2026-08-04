@@ -1,5 +1,6 @@
 import { auth } from '@/auth'
 import { NextResponse } from 'next/server'
+import { nonJsonUpstreamResponse } from '@/utils/api-proxy'
 import {
   readUpstreamTextLimited,
   upstreamTooLargeResponse,
@@ -30,7 +31,13 @@ export async function GET() {
       if (err instanceof UpstreamTooLargeError) return upstreamTooLargeResponse(err)
       throw err
     }
-    const data = raw === '' ? null : JSON.parse(raw)
+    // #223
+    let data: unknown
+    try {
+      data = raw === '' ? null : JSON.parse(raw)
+    } catch {
+      return nonJsonUpstreamResponse('openapi-proxy', res.status, raw)
+    }
     return NextResponse.json(data, { status: res.status })
   } catch (err) {
     console.error('[docs-proxy] Error:', err)
