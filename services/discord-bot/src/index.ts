@@ -130,4 +130,26 @@ client.on('messageCreate', async (message: Message) => {
   }
 });
 
-client.login(BOT_TOKEN);
+// A REJECTION, not a throw — measured, because it decides the instrument.
+// `client.login()` returns a promise; an invalid, revoked or rotated
+// DISCORD_BOT_TOKEN rejects it with `TokenInvalid`. Induced with a bad token, the
+// failure arrives on `process.on('unhandledRejection')`, so a try/catch around this
+// call would not have caught it. discord.js registers no handler of its own and
+// neither did this file, so the process died on Node's default with a discord.js
+// stack and nothing of ours naming the cause.
+//
+// WHAT THIS FIXES AND WHAT IT DOES NOT. With `restart: unless-stopped` in
+// docker-compose.discord-bot.yml, a bad token still means a container that dies
+// forever — this makes each death legible, not survivable. A caught rejection that
+// logs and exits is a better obituary, not a working bot. The bot cannot run
+// without a valid token, and pretending otherwise (retrying, or staying up
+// unauthenticated) would be worse: it would look healthy while relaying nothing.
+//
+// The exit is deferred one turn on purpose: `console.error` followed immediately by
+// `process.exit()` loses the message when stderr is a pipe, which in a container it
+// always is — the same trap recorded in services/api/src/boot/fatal.ts.
+client.login(BOT_TOKEN).catch((err: unknown) => {
+  const code = (err as { code?: string })?.code;
+  console.error(`[discord-bot] login failed; the bot cannot start: ${code ?? err}`);
+  setImmediate(() => process.exit(1));
+});
