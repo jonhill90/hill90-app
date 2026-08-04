@@ -36,7 +36,6 @@ passed on the defect exactly as they did in the ui equivalent (app#218).
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from unittest import mock
 
