@@ -711,6 +711,33 @@ def _build_tool_instruction(tool_names: str, tool_defs: list[dict]) -> str:
     return "\n".join(parts)
 
 
+# finish_reason values that mean the model STOPPED SHORT rather than finished.
+# The content is real and worth delivering; what must not happen is delivering it
+# as though it were whole (#260).
+_CUT_SHORT_REASONS = {
+    "length": "the model reached its output limit",
+    "content_filter": "the provider's content filter stopped the response",
+}
+
+
+def _mark_incomplete(content: str, finish_reason: str | None) -> tuple[str, str | None]:
+    """Return (content, note) with an inline marker when the answer was cut short.
+
+    THE MARKER IS INLINE, and that is the point. This content is read by a model
+    — the loop appends assistant turns back into `messages`, other agents read
+    thread history, and the next turn reasons over whatever is there. A flag in a
+    sibling field is invisible to that reader; a sentence in the text is not.
+
+    Returns the note separately as well, so it lands in `chat_messages.error_message`
+    and is queryable rather than only legible.
+    """
+    reason = _CUT_SHORT_REASONS.get(finish_reason or "")
+    if not reason:
+        return content, None
+    note = f"Response incomplete: {reason} (finish_reason={finish_reason})."
+    return f"{content}\n\n[{note} The text above stops mid-answer.]", note
+
+
 def _run_tool_loop(
     *,
     messages: list[dict],
@@ -826,11 +853,41 @@ def _run_tool_loop(
             return
 
         result = resp.json()
-        choice = result.get("choices", [{}])[0]
+
+        # A 200 whose body is not a completion is a FAILURE, not an empty answer
+        # (#260). `services/ai/app/proxy.py` maps an unparseable upstream body to
+        # `{"error": ...}` while passing the upstream status through, so a 200
+        # can arrive with no `choices` at all. This used to fall through
+        # `.get("choices", [{}])[0]` to an empty message, invent
+        # `finish_reason="stop"` below, and deliver `status="complete"` with no
+        # content — indistinguishable from a model that chose to say nothing.
+        choices = result.get("choices")
+        if not isinstance(choices, list) or not choices:
+            upstream_error = result.get("error")
+            detail = (
+                str(upstream_error)[:200] if upstream_error
+                else f"200 response contained no choices: {str(result)[:200]}"
+            )
+            logger.error("Chat inference returned no completion: %s", detail)
+            _deliver_callback(
+                callback_url, chat_callback_token, message_id,
+                status="error",
+                error_message=f"Inference returned no completion: {detail}",
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                duration_ms=int((time.monotonic() - loop_start) * 1000),
+                emitter=emitter, work_id=work_id, correlation_id=correlation_id,
+            )
+            return
+
+        choice = choices[0]
         message = choice.get("message", {})
         content = message.get("content", "") or ""
         tool_calls = message.get("tool_calls")
-        finish_reason = choice.get("finish_reason", "stop")
+        # NOT defaulted to "stop". Absent is not the same as stopped, and
+        # inventing the marker manufactures a completeness claim the upstream
+        # never made — which is the whole of #260.
+        finish_reason = choice.get("finish_reason")
         response_model = result.get("model", model)
 
         # Accumulate tokens
@@ -852,14 +909,28 @@ def _run_tool_loop(
         # If no tool calls, this is the final response
         if not tool_calls or finish_reason != "tool_calls":
             total_duration = int((time.monotonic() - loop_start) * 1000)
+            marked_content, truncation_note = _mark_incomplete(content, finish_reason)
+            if truncation_note:
+                logger.warning(
+                    "Chat completion was cut short (finish_reason=%s) — delivering with a marker",
+                    finish_reason,
+                )
+            elif finish_reason is None:
+                # The third state. The upstream did not say whether this answer
+                # is whole, and we will not say so on its behalf. Recorded here
+                # rather than written into the message: if a provider routinely
+                # omits the field, a marker on every reply is noise, and noise
+                # is how a real marker stops being read.
+                logger.warning("Chat completion carried no finish_reason — completeness is unstated")
             _deliver_callback(
                 callback_url, chat_callback_token, message_id,
                 status="complete",
-                content=content,
+                content=marked_content,
                 model=response_model,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 duration_ms=total_duration,
+                error_message=truncation_note,
                 emitter=emitter, work_id=work_id, correlation_id=correlation_id,
             )
             return
