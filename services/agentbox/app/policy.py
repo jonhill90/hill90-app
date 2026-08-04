@@ -11,6 +11,29 @@ import threading
 from typing import Callable
 
 
+STDOUT_LIMIT_CHARS = 100_000
+STDERR_LIMIT_CHARS = 10_000
+
+
+def truncate_with_disclosure(text: str, limit: int) -> tuple[str, bool, int]:
+    """Return ``(text, truncated, chars_total)``.
+
+    ONE helper for both `execute` paths, deliberately (#221). Three sites
+    inventing three flag names is how one idea acquires three vocabularies, and
+    the field names here mirror `filesystem.read_file`'s `truncated` /
+    `chars_returned` so the codebase has one.
+
+    The bound itself is correct and stays. What was wrong is that a bounded
+    result was reported as the whole: an agent that runs `grep -rn x .` over a
+    large tree, reads 100,000 characters and sees nothing saying otherwise
+    concludes *those are all the matches*, and that conclusion is load-bearing
+    for whatever it does next. Nothing downstream can correct it.
+    """
+    if len(text) <= limit:
+        return text, False, len(text)
+    return text[:limit], True, len(text)
+
+
 class CommandPolicy:
     """Validates and executes commands against an allowlist/denylist policy."""
 
@@ -109,11 +132,27 @@ class CommandPolicy:
                 env=safe_env,
                 shell=False,
             )
+            stdout, stdout_truncated, stdout_total = truncate_with_disclosure(
+                result.stdout, STDOUT_LIMIT_CHARS
+            )
+            stderr, stderr_truncated, stderr_total = truncate_with_disclosure(
+                result.stderr, STDERR_LIMIT_CHARS
+            )
             return {
                 "success": result.returncode == 0,
                 "exit_code": result.returncode,
-                "stdout": result.stdout[:100_000],
-                "stderr": result.stderr[:10_000],
+                "stdout": stdout,
+                "stderr": stderr,
+                # NOT appended to stdout itself: unlike a prose completion, this
+                # is DATA an agent may parse — appending a sentence to `grep`
+                # output would be a new defect. The disclosure travels beside it,
+                # in the same JSON the tool result serialises.
+                "stdout_truncated": stdout_truncated,
+                "stdout_chars_returned": len(stdout),
+                "stdout_chars_total": stdout_total,
+                "stderr_truncated": stderr_truncated,
+                "stderr_chars_returned": len(stderr),
+                "stderr_chars_total": stderr_total,
             }
         except subprocess.TimeoutExpired:
             return {"success": False, "error": f"Timed out after {timeout}s"}
@@ -180,12 +219,14 @@ class CommandPolicy:
             # Stream stdout line-by-line
             stdout_parts: list[str] = []
             lines_emitted = 0
+            lines_total = 0
             try:
                 for raw_line in proc.stdout:  # type: ignore[union-attr]
                     line = raw_line.rstrip("\n")
                     if len(line) > max_line_len:
                         line = line[:max_line_len]
                     stdout_parts.append(raw_line)
+                    lines_total += 1
                     if on_output and lines_emitted < max_lines:
                         on_output(line)
                         lines_emitted += 1
@@ -199,12 +240,35 @@ class CommandPolicy:
             if timed_out.is_set():
                 return {"success": False, "error": f"Timed out after {timeout}s"}
 
-            stdout = "".join(stdout_parts)
+            stdout_all = "".join(stdout_parts)
+            stdout, stdout_truncated, stdout_total = truncate_with_disclosure(
+                stdout_all, STDOUT_LIMIT_CHARS
+            )
+            stderr_text, stderr_truncated, stderr_total = truncate_with_disclosure(
+                stderr, STDERR_LIMIT_CHARS
+            )
             return {
                 "success": proc.returncode == 0,
                 "exit_code": proc.returncode,
-                "stdout": stdout[:100_000],
-                "stderr": stderr[:10_000],
+                "stdout": stdout,
+                "stderr": stderr_text,
+                "stdout_truncated": stdout_truncated,
+                "stdout_chars_returned": len(stdout),
+                "stdout_chars_total": stdout_total,
+                "stderr_truncated": stderr_truncated,
+                "stderr_chars_returned": len(stderr_text),
+                "stderr_chars_total": stderr_total,
+                # The THIRD site, and the one the helper cannot cover: this is a
+                # LIVE stream that stopped at `max_lines` while the command kept
+                # running, so there is no field on the emitted events to carry a
+                # flag — the disclosure would have to be a new event type, and
+                # that schema is consumed by the api. Recorded in the RETURNED
+                # result instead, which keeps the change inside agentbox and
+                # still stops the final answer claiming the stream was whole.
+                # The event-stream contract is left to #222.
+                "output_stream_truncated": bool(on_output) and lines_total > lines_emitted,
+                "lines_emitted": lines_emitted,
+                "lines_total": lines_total,
             }
         except Exception as e:
             return {"success": False, "error": str(e)}

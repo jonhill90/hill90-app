@@ -103,11 +103,23 @@ async def execute_command(
 
     if _emitter:
         stdout_len = len(result.get("stdout", ""))
+        # #221: say so where a human looks, too. A `command_complete` reading
+        # "100000 bytes stdout" beside a command that produced ten times that is
+        # the same silent-truncation claim as the tool result used to make.
+        cut = []
+        if result.get("stdout_truncated"):
+            cut.append(f"stdout CUT at {stdout_len} of {result.get('stdout_chars_total')} chars")
+        if result.get("output_stream_truncated"):
+            cut.append(
+                f"live output CUT after {result.get('lines_emitted')} of "
+                f"{result.get('lines_total')} lines"
+            )
+        suffix = f" — {'; '.join(cut)}" if cut else ""
         _emitter.emit(
             type="command_complete",
             tool="shell",
             input_summary=command,
-            output_summary=f"exit {result.get('exit_code', -1)}, {stdout_len} bytes stdout",
+            output_summary=f"exit {result.get('exit_code', -1)}, {stdout_len} bytes stdout{suffix}",
             duration_ms=duration_ms,
             success=result.get("success", False),
             metadata=meta or None,
