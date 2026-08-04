@@ -48,7 +48,13 @@ from app.models import (
     UserModelInfo,
 )
 from app.policy import resolve_agent_policy, resolve_alias, resolve_aliases_list, resolve_model_policy
-from app.proxy import StreamOpenResult, proxy_chat_completion, proxy_embeddings, stream_chat_completion
+from app.proxy import (
+    StreamOpenResult,
+    proxy_chat_completion,
+    proxy_embeddings,
+    stream_chat_completion,
+    stream_error_event,
+)
 from app.revocation import revocation_manager
 from app.usage import log_usage
 
@@ -726,8 +732,13 @@ async def _handle_streaming(settings, body, claims, resolved_model, delegation_i
         except anyio.get_cancelled_exc_class():
             cancelled = True
             raise
-        except Exception:
-            pass  # streaming_result.error is set by the proxy generator
+        except Exception as exc:
+            # Was: `pass  # streaming_result.error is set by the proxy generator`.
+            # True, and the problem: the error was recorded for US — in
+            # streaming_result and in the usage row below — while the CALLER got
+            # a stream that merely stopped. Marking the ending is the only thing
+            # left that can say so once the 200 is on the wire (#259).
+            yield stream_error_event(exc)
         finally:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if cancelled:
