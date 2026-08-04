@@ -39,6 +39,7 @@ import { IncomingMessage } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { getPool } from '../db/pool';
 import { pumpWithBackpressure, RELAY_DEFAULTS } from './relay-backpressure';
+import { stillAuthorised } from '../helpers/participation-watch';
 
 const CONTAINER_PREFIX = 'agentbox-';
 const AGENTBOX_PORT = 8054;
@@ -189,6 +190,19 @@ const CLOSE_CREDENTIAL_EXPIRED = 4002;
 const CLOSE_RELAY_OVERFLOW = 4003;
 
 /**
+ * Close code for a session ended because the viewer was REMOVED from the thread
+ * (issue #196). Distinct from 4001 and 4002 for the same reason those are
+ * distinct from each other: 4001 means the credential was refused, 4002 means it
+ * was good and ran out, 4004 means it is still valid and the access behind it is
+ * gone. A client cannot act differently on conditions that arrive as one number.
+ *
+ * The ui MUST know this code. `terminalClose.ts` auto-reconnects on every code it
+ * does not recognise, so an unknown 4004 would make a removed user's terminal
+ * retry in a loop against an upgrade that now refuses it, and say nothing.
+ */
+const CLOSE_ACCESS_REVOKED = 4004;
+
+/**
  * setTimeout stores its delay in a signed 32-bit int. A larger value overflows
  * and the timer fires IMMEDIATELY — which would turn a long-lived session into
  * one that dies at once. Anything beyond this is capped; the socket then simply
@@ -307,7 +321,14 @@ export function attachTerminalProxy(
         });
 
         // Keep-alive: ping both sides every 30s to prevent idle timeout
-        // from Traefik, load balancers, or browser network stack
+        // from Traefik, load balancers, or browser network stack.
+        //
+        // The participation re-check rides THIS tick rather than arming a second
+        // timer (issue #196). Access was checked once before the upgrade, so
+        // removing a participant left their terminal streaming until the token
+        // expired — the system reported the removal succeeded while the thing it
+        // was meant to stop carried on. Admins are exempt for the same reason they
+        // bypass the check at connect.
         const pingInterval = setInterval(() => {
           if (clientWs.readyState === WebSocket.OPEN) {
             clientWs.ping();
@@ -315,6 +336,20 @@ export function attachTerminalProxy(
           if (agentWs.readyState === WebSocket.OPEN) {
             agentWs.ping();
           }
+
+          if (isAdmin) return;
+          void (async () => {
+            const allowed = await stillAuthorised(
+              () => isParticipant(threadId, user.sub),
+              'terminal-proxy',
+            );
+            if (allowed) return;
+            console.log(`[terminal-proxy] Closing thread=${threadId}: participation revoked`);
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.close(CLOSE_ACCESS_REVOKED, 'access revoked');
+            }
+            cleanupAll();
+          })();
         }, PING_INTERVAL_MS);
 
         // Ends the session when the credential does. Cleared in cleanupAll like
