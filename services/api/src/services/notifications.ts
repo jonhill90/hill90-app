@@ -11,6 +11,11 @@ export function notify(
   type: NotificationType = 'info',
   metadata?: Record<string, unknown>
 ): void {
+  // SAFE ONLY BECAUSE OF THE CALLEE. `void` attaches no rejection handler, so this
+  // line's safety is entirely `insertNotification`'s: its body is one try/catch that
+  // logs and returns. Remove or narrow that try and this becomes #133 exactly — an
+  // unhandled rejection, and Node 20 exits the process on one because this service
+  // registers no handler (boot/fatal.ts installs a backstop that logs it, nothing more).
   void insertNotification(userId, message, type, metadata);
 }
 

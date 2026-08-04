@@ -12,6 +12,7 @@ import { runReconcilePass, startAgentReconciler, stopAgentReconciler } from './s
 import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
 import { attachTerminalProxy } from './services/terminal-proxy';
 import { startStaleSweeper, stopStaleSweeper } from './routes/chat';
+import { dieOnStartupFailure, shutdownSafely, installUnhandledRejectionBackstop } from './boot/fatal';
 
 const PORT = process.env.PORT || 3000;
 
@@ -107,15 +108,20 @@ async function start() {
     stopStaleSweeper();
     stopAgentReconciler();
     server.close();
-    await closePool();
-    process.exit(0);
+    // `process.on` ignores the promise this returns, so a rejection here had
+    // nowhere to go and killed the process before the exit below. See boot/fatal.
+    await shutdownSafely(closePool);
   };
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 }
 
-start();
+// The backstop first, so it covers the startup path too. It logs and exits; it
+// does not make anything correct. See boot/fatal.ts.
+installUnhandledRejectionBackstop();
+
+dieOnStartupFailure(start());
 
 
 

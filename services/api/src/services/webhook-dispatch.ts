@@ -20,6 +20,11 @@ export function dispatchWebhooks(
   payload: Record<string, unknown>
 ): void {
   // Run async but don't await — caller should not block on webhook delivery
+  // SAFE ONLY BECAUSE OF THE CALLEE. `void` attaches no rejection handler, so this
+  // line's safety is entirely `dispatchAsync`'s: its body is one try/catch that
+  // logs and returns. Remove or narrow that try and this becomes #133 exactly — an
+  // unhandled rejection, and Node 20 exits the process on one because this service
+  // registers no handler (boot/fatal.ts installs a backstop that logs it, nothing more).
   void dispatchAsync(agentId, agentUuid, event, payload);
 }
 
