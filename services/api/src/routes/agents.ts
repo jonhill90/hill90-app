@@ -1101,6 +1101,59 @@ router.delete('/:id', requireRole('admin'), async (req: Request, res: Response) 
 
     const agent = rows[0];
 
+    // #340: this route deleted the row without ever attempting revocation,
+    // so a running agent's AKM/model-router tokens stayed live until their
+    // own `exp` for a container that no longer existed — worse than #245,
+    // where a revoke was at least attempted. #245's fix (preserve the JTI
+    // column when a revoke fails) does NOT transfer here: `DELETE FROM
+    // agents` removes whatever the columns hold either way, so there is no
+    // column left to preserve once this request returns. What DOES transfer
+    // is attempting the revoke and telling the audit trail the truth —
+    // token_revoked vs token_revoke_failed, naming jti/exp/agent — since the
+    // audit stream doesn't depend on the row surviving. Whether a
+    // revoke-failed token from this path is later counted or swept stays
+    // #269's, same boundary as `/stop`.
+    //
+    // Non-blocking, on purpose: every other cleanup step in this route
+    // (container stop just below, volume purge, avatar removal, config
+    // files) was ALREADY best-effort before this fix — each already caught
+    // its own errors and continued to the delete. The two revoke calls
+    // follow that pre-existing convention rather than deciding anything
+    // #269 hasn't: #269 is specifically about whether a failed revoke should
+    // block `/stop`, a route that had no such non-blocking precedent before
+    // #245/#269 raised the question. This route did.
+    const deleteCorrelationId = (req as any).correlationId;
+    if (agent.akm_jti && isAkmConfigured()) {
+      try {
+        await revokeAgentAkmToken(agent.agent_id, agent.akm_jti, agent.akm_exp ?? undefined);
+        auditLog('token_revoked', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.akm_jti, reason: 'delete',
+          owner_sub: agent.created_by, correlation_id: deleteCorrelationId,
+        });
+      } catch (err) {
+        console.error(`[agents] AKM token revocation failed for ${agent.agent_id}:`, err);
+        auditLog('token_revoke_failed', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.akm_jti, exp: agent.akm_exp, reason: 'delete',
+          owner_sub: agent.created_by, correlation_id: deleteCorrelationId,
+        });
+      }
+    }
+    if (agent.model_router_jti && isModelRouterConfigured()) {
+      try {
+        await revokeAgentModelRouterToken(agent.agent_id, agent.model_router_jti, agent.model_router_exp ?? undefined);
+        auditLog('token_revoked', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.model_router_jti, reason: 'delete',
+          owner_sub: agent.created_by, correlation_id: deleteCorrelationId,
+        });
+      } catch (err) {
+        console.error(`[agents] Model-router token revocation failed for ${agent.agent_id}:`, err);
+        auditLog('token_revoke_failed', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, jti: agent.model_router_jti, exp: agent.model_router_exp, reason: 'delete',
+          owner_sub: agent.created_by, correlation_id: deleteCorrelationId,
+        });
+      }
+    }
+
     // Stop container if running
     if (agent.status === 'running') {
       try {
