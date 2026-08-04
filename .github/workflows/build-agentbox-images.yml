@@ -75,7 +75,7 @@ jobs:
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
+          tags: tag:github-actions
 
       - name: Setup SSH key
         run: |
@@ -89,12 +89,15 @@ jobs:
         run: |
           SOPS_URL="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64"
           curl -fsSL -o /tmp/sops "$SOPS_URL"
+          # Verify we got a binary, not an HTML error page
           if file /tmp/sops | grep -q "HTML"; then
             echo "::error::SOPS download returned HTML instead of binary — check URL: $SOPS_URL"
             exit 1
           fi
           chmod +x /tmp/sops
           sudo mv /tmp/sops /usr/local/bin/sops
+          sops --version
+
           mkdir -p ~/.config/sops/age
           echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
           chmod 600 ~/.config/sops/age/keys.txt
@@ -102,6 +105,20 @@ jobs:
       - name: Get Tailscale IP from secrets
         id: get-ip
         run: |
+          if [ ! -f infra/secrets/prod.enc.env ]; then
+            echo "::error::infra/secrets/prod.enc.env does not exist in this repository."
+            cat <<'EOF'
+          The encrypted secrets store has not been created yet. See
+          infra/secrets/prod.enc.env.example for the required keys, then:
+
+            sops -e infra/secrets/prod.env > infra/secrets/prod.enc.env
+            rm infra/secrets/prod.env
+
+          It must contain TAILSCALE_IP, which is how this workflow reaches the VPS.
+          EOF
+            exit 1
+          fi
+
           TAILSCALE_IP=$(sops -d --extract '["TAILSCALE_IP"]' infra/secrets/prod.enc.env)
           if [ -z "$TAILSCALE_IP" ]; then
             echo "::error::TAILSCALE_IP is empty or absent in infra/secrets/prod.enc.env"
@@ -110,6 +127,8 @@ jobs:
           echo "::add-mask::$TAILSCALE_IP"
           echo "tailscale_ip=$TAILSCALE_IP" >> $GITHUB_OUTPUT
 
+      # Its own step, so a tailnet or key problem is distinguishable from a
+      # deploy problem. Hill90 does the same and for the same reason.
       - name: Verify SSH connectivity
         run: |
           ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
