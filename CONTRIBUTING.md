@@ -135,6 +135,35 @@ choosing the right tool.** `no-misused-promises` reported 191 sites in the same 
 middleware in `src/boot/async-errors.ts`. Reporting 197 would have counted a solved problem as
 an open one.
 
+## Undo a positive control with a snapshot, never with `git checkout`
+
+Every fix here is proven by breaking it again and watching the test go red. The
+obvious way to undo that break is `git checkout -- <file>` — and it discards
+**everything** uncommitted in that path, exits 0, and prints nothing.
+
+On 2026-08-04 that silently destroyed uncommitted work **four times in one
+session**. Every time it was noticed downstream, from a test failing for a
+reason that had to be traced back — never from the command, which reported
+success by saying nothing. That is this repository's own defect class, moved
+from the code into the workflow: an operation that destroys and reports success.
+
+Resolving to be careful had already failed three times before the fourth. So:
+
+```bash
+bash scripts/dev/snapshot.sh save services/api/src/routes/agents.ts
+# ...break it, run the test, watch it go red...
+bash scripts/dev/snapshot.sh restore      # prints every file it restores
+```
+
+`restore` **fails loudly when nothing is saved**, because a restore that did
+nothing is not the same as a successful one — the same rule the SQL gate applies
+to CANNOT DETERMINE. It stores bytes outside the repository, and deliberately
+does not use `git stash`: this worktree shares its stash stack with the main
+checkout, so a stash here can be popped by another session.
+
+Committing first also works, and is better when the experiment is long. What
+does not work is remembering.
+
 ## The instrument can contain the fault it was built to catch
 
 The section above says check the instrument. This one is narrower and worse: **an instrument
