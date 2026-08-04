@@ -546,3 +546,66 @@ setup() {
     [ "$behind_status" -ne "$unknown_status" ]
     [ "$behind_output" != "$unknown_output" ]
 }
+
+# ── #236: images are checked too, and the guard must be ABLE to fire ─────────
+#
+# The trap this covers: the per-thing path filter derives its pattern from the
+# name. The container form (`${cname#app-}`) applied to an image name like
+# `hill90/agentbox` yields `services/hill90/agentbox/`, which never matches —
+# so n_dep stays 0, the script says "none touch a deployable path", and a stale
+# image is reported as health. A guard that cannot fire is indistinguishable
+# from a pass, which is the failure this whole check exists to avoid.
+
+@test "a stale agentbox IMAGE says BEHIND, and exits 1" {
+    local old; old=$(git rev-parse HEAD)
+    commit_at 1 "services/agentbox/app/server.py" "feat(agentbox): change inside the image"
+    git branch -f origin-main main
+
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" \
+        CONTAINER_REVISIONS="hill90/agentbox=$old" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"hill90/agentbox"* ]]
+    [[ "$output" == *"OLD CODE"* ]]
+}
+
+@test "an agentbox image is stale when services/knowledge moves — it copies the akm CLI from it" {
+    local old; old=$(git rev-parse HEAD)
+    commit_at 1 "services/knowledge/app/main.py" "feat(knowledge): change the image depends on"
+    git branch -f origin-main main
+
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" \
+        CONTAINER_REVISIONS="hill90/agentbox=$old" bash "$CHECK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"OLD CODE"* ]]
+}
+
+@test "an image is NOT stale for a change outside its build context" {
+    local old; old=$(git rev-parse HEAD)
+    commit_at 1 "services/ui/src/app/page.tsx" "feat(ui): unrelated to any agent image"
+    git branch -f origin-main main
+
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" \
+        CONTAINER_REVISIONS="hill90/agentbox=$old" bash "$CHECK"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"none touch a deployable path"* ]]
+}
+
+@test "CONTROL: the image guard distinguishes the two, so it is not vacuous" {
+    # Without this, the three tests above could all pass against a guard that
+    # always said "none touch a deployable path" — the exact defect prevented.
+    local base; base=$(git rev-parse HEAD)
+    commit_at 2 "services/agentbox/app/server.py" "feat(agentbox): relevant"
+    git branch -f origin-main main
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" \
+        CONTAINER_REVISIONS="hill90/agentbox=$base" bash "$CHECK"
+    local rc_relevant=$status
+
+    local mid; mid=$(git rev-parse HEAD)
+    commit_at 1 "services/ui/src/app/page.tsx" "feat(ui): irrelevant"
+    git branch -f origin-main main
+    run env DEPLOYED_SHA="$(git rev-parse HEAD)" \
+        CONTAINER_REVISIONS="hill90/agentbox=$mid" bash "$CHECK"
+    local rc_irrelevant=$status
+
+    [ "$rc_relevant" -ne "$rc_irrelevant" ]
+}

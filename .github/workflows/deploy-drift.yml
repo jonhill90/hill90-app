@@ -156,13 +156,21 @@ jobs:
       # per container, over the same ssh. A container with no stamp prints
       # `<no value>`, which the check treats as UNSTAMPED rather than as a
       # revision — absence is never agreement.
-      - name: Ask each container which commit it was created from
+      #
+      # IMAGES ARE IN THIS LIST TOO (#236). `docker inspect` takes either, and
+      # an agent image drifts worse than a container: a container is recreated
+      # by the next deploy of its stack, so its drift self-corrects, whereas an
+      # image is only rebuilt when somebody chooses to. An absent image simply
+      # does not print a line, which reads as "nothing to compare" rather than
+      # as agreement — the state the host was in this morning.
+      - name: Ask each container and image which commit it was created from
         id: revs
         if: inputs.deployed_sha_override == ''
         run: |
           revs=$(ssh -i ~/.ssh/vps_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
             deploy@${{ steps.get-ip.outputs.tailscale_ip }} \
-            'for c in app-api app-ui app-ai app-knowledge app-mcp; do
+            'for c in app-api app-ui app-ai app-knowledge app-mcp \
+                      hill90/agentbox hill90/agentbox-monitor hill90/knowledge; do
                if docker inspect "$c" >/dev/null 2>&1; then
                  printf "%s=%s\n" "$c" "$(docker inspect "$c" --format "{{index .Config.Labels \"com.hill90.revision\"}}" 2>/dev/null | tr -d "[:space:]")"
                fi
