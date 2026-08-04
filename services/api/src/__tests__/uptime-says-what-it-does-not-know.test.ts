@@ -109,7 +109,11 @@ describe('a session nothing closes is what makes the number unbounded', () => {
     expect(String(closes[0][0])).toMatch(/stopped_at_estimated/);
   });
 
-  it('TWIN: a healthy agent has its session left alone', async () => {
+  it('TWIN: a running agent cannot have its session closed by the sweep', async () => {
+    // The sweep runs on EVERY pass — it is a statement about the state, not a
+    // hook on a transition — so the assertion is on what it can touch, not on
+    // whether it ran. A running agent's open session is the normal case and
+    // must survive.
     mockQuery.mockResolvedValueOnce({
       rows: [{
         id: 'uuid-1', agent_id: 'fine', status: 'running',
@@ -124,7 +128,37 @@ describe('a session nothing closes is what makes the number unbounded', () => {
 
     await runReconcilePass();
 
-    expect(sessionWrites()).toHaveLength(0);
+    const sweep = sessionWrites();
+    expect(sweep).toHaveLength(1);
+    expect(String(sweep[0][0])).toMatch(/a\.status <> 'running'/);
+    expect(String(sweep[0][0])).toMatch(/s\.stopped_at IS NULL/);
+  });
+
+  it('SELF-HEALING: a session left open by an agent that is ALREADY stopped is closed', async () => {
+    // The case the first version of this fix could not reach, and the reason it
+    // was rewritten. Closing inside the demotion's patch meant a crash between
+    // the two writes — or the close simply failing — left `stopped` beside an
+    // open session, and no later pass would retry, because a stopped row whose
+    // container is gone produces no patch at all. The window was smaller than
+    // the defect and just as permanent.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'uuid-1', agent_id: 'already-stopped', status: 'stopped',
+        container_id: null, container_state: 'absent',
+        created_by: 'admin-user', model_router_exp: null,
+      }],
+    });
+    const gone: any = new Error('no such container');
+    gone.statusCode = 404;
+    mockContainerInspect.mockRejectedValue(gone);
+    mockQuery.mockResolvedValue({ rows: [] });
+
+    const result = await runReconcilePass();
+
+    // No transition: the row already agrees with the container.
+    expect(result!.reconciled).toBe(0);
+    // And the sweep still repairs the contradiction.
+    expect(sessionWrites()).toHaveLength(1);
   });
 });
 

@@ -83,6 +83,44 @@ function escalateUnrenewedTokens(
 }
 
 /**
+ * Close any session still open for an agent that is not running (#213).
+ *
+ * DRIVEN BY STATE, NOT BY THE TRANSITION, and that is the whole point. The first
+ * version of this closed the session inside the demotion's patch — two
+ * autocommitted statements with a gap between them. A crash in that gap, or the
+ * close simply failing, left an agent `stopped` with an open session, and the
+ * NEXT pass would not retry: a stopped row whose container is absent produces no
+ * patch, so the per-transition hook is never reached again and the row accrues
+ * uptime for ever. The window was smaller than the defect being fixed and just
+ * as permanent.
+ *
+ * Written as a statement about the state instead — no agent that is not running
+ * may have an open session — it is idempotent, it self-heals after any failure,
+ * and it also repairs the case where the stop ROUTE's own best-effort close
+ * failed, which nothing repaired before.
+ *
+ * Estimated, always: this knows the row contradicts itself, never when the
+ * contradiction started.
+ */
+async function closeSessionsForStoppedAgents(): Promise<void> {
+  try {
+    const { rowCount } = await getPool().query(
+      `UPDATE agent_sessions s
+          SET stopped_at = NOW(), stopped_at_estimated = TRUE
+         FROM agents a
+        WHERE s.agent_id = a.id
+          AND s.stopped_at IS NULL
+          AND a.status <> 'running'`
+    );
+    if (rowCount && rowCount > 0) {
+      console.warn(`[reconcile] Closed ${rowCount} session(s) left open by an agent that is not running (estimated)`);
+    }
+  } catch (err) {
+    console.error('[reconcile] Session close sweep failed:', err);
+  }
+}
+
+/**
  * One pass. Never throws: a failure is a result ("nothing is verified"), not an
  * exception for a caller to swallow.
  */
@@ -149,24 +187,6 @@ export async function runReconcilePass(): Promise<ReconcileResult | null> {
         // only reached when the status actually changed, and the next pass finds
         // the row agreeing and writes nothing. Asserted, not argued:
         // `vanished-container-escalation.test.ts` runs the second pass.
-        // #213: close the session this demotion ends. Nothing else does — the
-        // stop ROUTE closes sessions, and an agent that stopped without going
-        // through it left its row open, so `COALESCE(stopped_at, NOW())` grew
-        // for ever. Stamped as an ESTIMATE because this pass knows the container
-        // is gone, not when it went: the true stop time is somewhere between the
-        // previous pass and this one, or arbitrarily earlier if the API was down.
-        if (patch.status === 'stopped') {
-          try {
-            await getPool().query(
-              `UPDATE agent_sessions SET stopped_at = NOW(), stopped_at_estimated = TRUE
-               WHERE agent_id = $1 AND stopped_at IS NULL`,
-              [patch.id]
-            );
-          } catch (err) {
-            console.error(`[reconcile] Session close failed for ${patch.agentId}:`, err);
-          }
-        }
-
         if (patch.status === 'stopped' && patch.containerState === CONTAINER_ABSENT) {
           notify(
             patch.createdBy,
@@ -177,6 +197,8 @@ export async function runReconcilePass(): Promise<ReconcileResult | null> {
         }
       }
     );
+    await closeSessionsForStoppedAgents();
+
     recordReconcilePass(result.unverified);
 
     // Only for agents this pass left alone and could verify. An agent it just
