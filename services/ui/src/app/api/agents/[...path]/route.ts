@@ -1,5 +1,6 @@
 import { auth } from '@/auth'
 import { NextRequest, NextResponse } from 'next/server'
+import { passThroughHeaders } from '@/utils/api-proxy'
 import {
   readBodyLimited,
   bodyTooLargeResponse,
@@ -98,7 +99,27 @@ async function proxyRequest(req: NextRequest, { params }: { params: Promise<{ pa
       throw err
     }
     const data = raw === '' ? null : JSON.parse(raw)
-    return NextResponse.json(data, { status: res.status })
+    /*
+     * FORWARD THE HEADER, or the last hop undoes the work of every earlier one.
+     *
+     * `GET /agents/:id/stats` and `/:id/artifacts` both set `X-Total-Count` from
+     * their own COUNT(*) — agents.ts:2591 says so explicitly, "each count is its
+     * own X-Total-Count, not a filter over one page (#188)". This route then
+     * returned the body without it, so a total that was computed correctly on the
+     * server arrived in the browser as nothing.
+     *
+     * A HEADER DROPPED IN TRANSIT IS THE SAME DEFECT AS A TOTAL COMPUTED FROM THE
+     * PAGE, just relocated: in both cases the caller ends up with a number it
+     * cannot trust, or none at all. Three layers were changed this session to
+     * report real totals; one silent hop at the end is enough to undo all of it.
+     *
+     * The list lives in api-proxy.ts and is imported, not copied — a second copy
+     * is precisely how this route came to differ from the shared proxy.
+     */
+    return NextResponse.json(data, {
+      status: res.status,
+      headers: passThroughHeaders(res),
+    })
   } catch (err) {
     console.error('[agents-proxy] Error:', err)
     return NextResponse.json({ error: 'API request failed' }, { status: 502 })
