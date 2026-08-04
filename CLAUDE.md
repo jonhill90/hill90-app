@@ -66,10 +66,21 @@ Most of these were bought with a real bug. They are not style preferences.
    **Never deploy from a workstation** — the guards do not run there. Use
    `dry_run=true` first; it exercises every guard and stops before touching the
    host.
-2. **The app is a tenant.** `hill90_edge` and `hill90_internal` are consumed as
-   `external: true`. This repo must never create them. `agent_sandbox` and
-   `docker_proxy` are the app's own, created by `docker-compose.api.yml`, which
-   is why `api` must precede `ai` and `knowledge`.
+2. **The app is a tenant.** `hill90_edge`, `hill90_internal`, and
+   `hill90_agent_internal` are consumed as `external: true` — three platform
+   networks, not two; `Verified 2026-08-04` directly against
+   `deploy/compose/prod/docker-compose.api.yml`, `.ai.yml` and `.knowledge.yml`,
+   none of which create `agent_internal`. This repo must never create any of
+   the three. `agent_sandbox` and `docker_proxy` are the app's own, created by
+   `docker-compose.api.yml`, which is why `api` must precede `ai` and
+   `knowledge`. *(This item omitted `agent_internal` since at least the
+   tenancy-cutover rewrite of this file — the network itself dates to #95,
+   well before that rewrite, so this was an omission carried forward, not new
+   drift. Per Hill90's own record — `docs/runbooks/tenant-app-deployment.md`
+   in `jonhill90/Hill90`, undated within that file, read 2026-08-04 — their
+   framing is "three are Hill90's ... two are the app's," which is what this
+   item now states; that framing is theirs, cited with its source, not
+   independently measured against their host from here.)*
 3. **Names are parameterised.** `NETWORK_PREFIX`, `VOLUME_PREFIX`,
    `CONTAINER_PREFIX`. Never hardcode a name that appears on the shared host.
 4. **A rename must be checked across five namespaces**, not three:
@@ -264,10 +275,16 @@ hardcodes a parameter can never fail on that parameter being wrong.** It now rea
 the client accepts that redirect. `tests/scripts/login-check-sees-redirect.bats` holds
 that shape — 8 of its 9 tests fail against the pre-fix files.
 
-**What is still open is the rest of it:** local Postgres and MinIO are still the app's own,
-and `--standalone` still runs the fork's Keycloak against a *copy* of the platform realm
-that has measurably drifted — so a standalone login proves the realm design, not the
-tenancy. See the follow-up issue on vendoring with a guard.
+**What is still open is the rest of it:** local Postgres and MinIO are still the app's own.
+**The realm-drift half is now fixed, `Verified 2026-08-04`:** `--standalone`'s vendored
+realm (`compose/local/keycloak/realm-local.json`) was missing the `basic` client scope —
+found and fixed in #345, after #306 and #313 made a sub-less token a hard 401 and turned
+what had been a silent local ownership bug into a full standalone lockout. `check_vendored_realm.py`
+now reports no drift against Hill90's realm, confirmed by importing the fixed file into a
+real Keycloak container and reading the client's scopes back, not by inference. *(This
+paragraph previously said `--standalone` "still runs the fork's Keycloak against a copy of
+the platform realm that has measurably drifted," unqualified. That was true of the tree
+before #345 and is not true of it now.)*
 
 ## Auth — what is true right now
 
@@ -326,21 +343,36 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   only: 3 CI failures against ~40 local runs across four emulated CI conditions.
   Unresolved. **Do not make it green by re-running** — a retry that passes tells you
   it is flaky and nothing more.
-- **`services/knowledge/tests/integration` does not run in CI** — **19** files, 98 tests,
-  excluded because they need a live pgvector Postgres on `localhost:5432`. The
-  exclusion is deliberate and commented in `ci.yml`, but the consequence is worth
-  knowing: the deletion-leaves-SEARCH regression test added in #84 **is in that
-  directory**, so no automated gate protects that behaviour. Run it against the local
-  stack. Giving that job a Postgres service container is the fix and has not been done.
+- **`services/knowledge/tests/integration` DOES run in CI** — this is corrected, not
+  aged. `Verified 2026-08-04`: the `knowledge` matrix leg in `ci.yml` runs against a
+  real `pgvector/pgvector:pg16` service container with an extension-enable step, wired
+  in by commit `c81865c` on **2026-08-03** — a full day before this file's own previous
+  edit, so the claim below was already false when it was last written here, not merely
+  stale since. The deletion-leaves-SEARCH regression test added in #84 is gated. The
+  file/test counts in the superseded text were also wrong independent of the CI
+  question: **21** test files exist today, not 19, with **135** test functions, not 98
+  — counted directly from the directory, not carried over from `ci.yml`'s own comment,
+  which repeats the same wrong 19/98 figures for the same reason this file did.
+  *(Superseded, kept for the record: "`services/knowledge/tests/integration` does not
+  run in CI — 19 files, 98 tests, excluded because they need a live pgvector Postgres
+  on `localhost:5432`... Giving that job a Postgres service container is the fix and
+  has not been done." That fix had already happened.)*
 - CI (`ci.yml`) runs on every pull request — six suites: api (jest), ui
   (vitest), pytest for ai/knowledge/mcp/agentbox. Deploy (`deploy.yml`) stays
   `workflow_dispatch` only; a merge must not deploy.
 - Backups live in **Hill90**: `bash scripts/backup.sh backup app-db`. Verified
   restorable 2026-07-29. Nothing in this repo backs anything up.
-- Stacks: `api ai knowledge mcp minio ui`. **`db` and `auth` are RETIRED and
-  `deploy.sh` refuses them** — identity and data are the platform's. Their compose
-  files are kept on purpose because local layers on them. `api` creates the two
-  agent networks, so it precedes `ai` and `knowledge`.
+- Stacks: `api ai knowledge mcp ui` — five, not six; `Verified 2026-08-04` against
+  `scripts/deploy.sh`'s own `DEPLOY_ORDER` (`ui api ai knowledge mcp`). **`db`, `auth`
+  and `minio` are RETIRED and `deploy.sh` refuses them** — identity, data and object
+  storage are the platform's. Their compose files are kept on purpose because local
+  layers on them (`minio`'s local compose stays for the same reason — local runs
+  `app-minio` deliberately, see below). `api` creates the two agent networks
+  (`agent_sandbox`, `docker_proxy`), so it precedes `ai` and `knowledge`. *(This line
+  previously read "Stacks: `api ai knowledge mcp minio ui`," listing `minio`
+  undistinguished from the five deployable stacks even though the very next bullet
+  already said it was retired — same shape as the MinIO paragraph's own
+  two-places-disagreeing note further down this file.)*
 - **`minio` is retired and `deploy.sh` refuses it**, like `db` and `auth` — since #91.
   Production object storage is the platform's `minio`; the app's `app-minio` has been
   stopped since 2026-07-31 01:40:43 UTC. **That removal window OPENED on 2026-08-01
@@ -366,6 +398,13 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   about a third of the failures counted were the foreign 501s; mechanism-level
   conclusions survive, rate-based ones do not. **Nobody should restart from zero:**
   [`docs/decisions/api-suite-flakiness.md`](docs/decisions/api-suite-flakiness.md).
+  **A recent data point, not a resolution — `2026-08-04`:** three full-suite runs
+  (119 suites, 1145 tests, run for unrelated work that session) came back completely
+  clean. Recorded because it happened, not because it settles anything: this
+  document's own bar is sixteen dead hypotheses and mechanism-level analysis, and
+  three clean runs don't meet that bar. A flake that hasn't appeared in three runs is
+  not the same claim as a flake that's been explained — treat this as one more data
+  point for whoever picks this up next.
 - **Two cheap diagnostics, both decisive here — try them before theorising.**
   **Does it pass alone?** One run. Passes alone → the defect needs company and every
   single-file theory is dead; fails alone → the cross-file search is unnecessary.
