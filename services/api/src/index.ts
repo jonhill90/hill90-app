@@ -17,13 +17,40 @@ import { dieOnStartupFailure, shutdownSafely, installUnhandledRejectionBackstop 
 const PORT = process.env.PORT || 3000;
 
 async function start() {
-  // Run migrations (safe-fail: log error but continue starting)
+  // A FAILED MIGRATION IS FATAL. This was `try { … } catch { console.error(…) }`
+  // with the comment "safe-fail: log error but continue starting", and it was the
+  // same defect family this service has closed repeatedly: an operation that fails
+  // and reports success. The API started, answered its health check, and served on
+  // whatever schema the database happened to have — while the code above it assumed
+  // the schema it shipped with. Nothing downstream could tell the difference: the
+  // promised 503 does not exist, so a route reading a column that was never added
+  // answers 500, and only under load that reaches it.
+  //
+  // NO MIGRATION FAILURE IS SURVIVABLE HERE, and the case for each was checked
+  // rather than waved away:
+  //   * the database is unreachable        — nothing this service does works anyway
+  //   * a migration's SQL fails            — runMigrations rolls that file back, so
+  //                                          the schema is a KNOWN older one, but the
+  //                                          code is the newer one. That mismatch is
+  //                                          exactly what must not serve.
+  //   * the migrations directory is absent — a build defect; see migrate.ts
+  //   * two instances start together       — pg_advisory_lock(42) makes them queue,
+  //                                          it does not fail. Not a failure case.
+  // If a genuinely survivable case appears, handle THAT case explicitly. Do not
+  // widen this back into a catch-all.
+  //
+  // The throw reaches dieOnStartupFailure at the bottom of this file, which logs
+  // under [startup] and exits 1 — flushing stderr first, because a container's
+  // stderr is a pipe and `console.error` then `process.exit()` loses the message.
   if (process.env.DATABASE_URL) {
     try {
       await runMigrations(getPool());
       console.log('[startup] Database migrations complete');
     } catch (err) {
-      console.error('[startup] Migration failed, agent routes may return 503:', err);
+      throw new Error(
+        'database migrations failed — refusing to serve on an unverified schema',
+        { cause: err },
+      );
     }
 
     // Reconcile agent container statuses. Awaited before app.listen below, so
