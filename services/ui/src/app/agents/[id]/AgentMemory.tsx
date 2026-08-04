@@ -59,6 +59,12 @@ export default function AgentMemory({ agentId }: Props) {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null)
+  /**
+   * How many entries MATCHED, which is not how many came back — the api caps the
+   * page at 20. Rendering `searchResults.length` said "20 results" over a corpus
+   * of 500 matches, and looked right because twenty rows were showing (#197 sweep).
+   */
+  const [searchTotal, setSearchTotal] = useState<number | null>(null)
   const [searchLoading, setSearchLoading] = useState(false)
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null)
   const [selectedContent, setSelectedContent] = useState<string | null>(null)
@@ -104,10 +110,16 @@ export default function AgentMemory({ agentId }: Props) {
     fetch(`/api/knowledge/search?q=${encodeURIComponent(search.trim())}&agent_id=${agentId}`)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (data?.results) setSearchResults(data.results)
-        else setSearchResults([])
+        if (data?.results) {
+          setSearchResults(data.results)
+          const t = Number(data.total_matches)
+          setSearchTotal(Number.isFinite(t) ? t : data.results.length)
+        } else {
+          setSearchResults([])
+          setSearchTotal(0)
+        }
       })
-      .catch(() => setSearchResults([]))
+      .catch(() => { setSearchResults([]); setSearchTotal(null) })
       .finally(() => setSearchLoading(false))
   }
 
@@ -200,7 +212,7 @@ export default function AgentMemory({ agentId }: Props) {
           value={search}
           onChange={e => {
             setSearch(e.target.value)
-            if (!e.target.value.trim()) setSearchResults(null)
+            if (!e.target.value.trim()) { setSearchResults(null); setSearchTotal(null) }
           }}
           placeholder="Search memory entries..."
           className="flex-1 rounded-md border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white placeholder-mountain-500 focus:outline-none focus:border-brand-500"
@@ -246,7 +258,11 @@ export default function AgentMemory({ agentId }: Props) {
             </div>
           ) : searchResults.length > 0 ? (
             <div className="space-y-2">
-              <p className="text-sm text-mountain-400 mb-2">{searchResults.length} results</p>
+              <p className="text-sm text-mountain-400 mb-2">
+                {searchTotal !== null && searchTotal > searchResults.length
+                  ? `Showing ${searchResults.length} of ${searchTotal} results`
+                  : `${searchTotal ?? searchResults.length} result${(searchTotal ?? searchResults.length) !== 1 ? 's' : ''}`}
+              </p>
               {searchResults.map(result => (
                 <button
                   key={result.id || result.path}

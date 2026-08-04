@@ -110,7 +110,10 @@ describe('AgentMemory', () => {
       expect(screen.getByTestId('search-result')).toBeInTheDocument()
     })
 
-    expect(screen.getByText('1 results')).toBeInTheDocument()
+    // Was '1 results'. The old render printed `searchResults.length` verbatim, so
+    // it had no pluralisation and reported the PAGE size. The figure now reports
+    // matches (#197 sweep), and the string changed with it.
+    expect(screen.getByText('1 result')).toBeInTheDocument()
   })
 
   it('T5: click entry loads content', async () => {
