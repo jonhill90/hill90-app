@@ -194,6 +194,90 @@ class TestWorkValidation:
         assert "payload" in body["detail"]
 
 
+class TestUnknownWorkType:
+    """hill90-app#222 finding 2: an unrecognised `type` must be rejected the
+    same way every other malformed request in this function is rejected —
+    work_failed, success=False, 400 — not acknowledged as work_completed
+    with success=True for work that never ran. Six sibling call sites in
+    this file already do this (five via _emit_work_failed for pre-work_id
+    validation, two — shell_disabled and missing-command — inline with
+    work_id metadata because they run after work_id exists, same as this
+    one does). This is the outlier matching its siblings, not a new
+    convention.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_is_rejected_with_400(self, tmp_path):
+        """An unrecognised type returns 400, not a 200 accept."""
+        runtime, _, _ = _make_runtime(tmp_path)
+        request = _MockRequest(
+            headers={"authorization": "Bearer test-token-123"},
+            body='{"type":"not_a_real_type"}',
+        )
+        response = await runtime.handle_work(request)
+        assert response.status_code == 400
+        body = json.loads(response.body)
+        assert body["error"] == "validation_error"
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_is_named_in_the_message(self, tmp_path):
+        """The caller learns WHAT was rejected, not just that something was —
+        the whole reason to reject rather than silently stub."""
+        runtime, _, _ = _make_runtime(tmp_path)
+        request = _MockRequest(
+            headers={"authorization": "Bearer test-token-123"},
+            body='{"type":"not_a_real_type"}',
+        )
+        response = await runtime.handle_work(request)
+        body = json.loads(response.body)
+        assert "not_a_real_type" in body["detail"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_emits_work_failed_not_work_completed(self, tmp_path):
+        """The event log must agree with the HTTP response — a consumer
+        reading events.jsonl and one reading the HTTP status must reach the
+        same conclusion about whether the work ran."""
+        runtime, _, log_path = _make_runtime(tmp_path)
+        request = _MockRequest(
+            headers={"authorization": "Bearer test-token-123"},
+            body='{"type":"not_a_real_type"}',
+        )
+        await runtime.handle_work(request)
+
+        events = [json.loads(line) for line in log_path.read_text().strip().split("\n") if line]
+        completed = [e for e in events if e["type"] == "work_completed"]
+        failed = [e for e in events if e["type"] == "work_failed"]
+        assert completed == [], "an unrecognised type must never emit work_completed"
+        assert len(failed) == 1
+        assert failed[0]["success"] is False
+        assert "not_a_real_type" in failed[0]["output_summary"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_work_failed_carries_the_work_id(self, tmp_path):
+        """Matches the two closest siblings (shell_disabled, missing-command):
+        both run after work_id exists and both put it in metadata. This
+        runs at the same point in the same function and must do the same.
+
+        The 400 response body itself carries no work_id — correctly, matching
+        shell_disabled and missing-command's bodies, neither of which does
+        either. work_received is what has it, so that is the cross-reference."""
+        runtime, _, log_path = _make_runtime(tmp_path)
+        request = _MockRequest(
+            headers={"authorization": "Bearer test-token-123"},
+            body='{"type":"not_a_real_type","correlation_id":"corr-xyz"}',
+        )
+        await runtime.handle_work(request)
+
+        events = [json.loads(line) for line in log_path.read_text().strip().split("\n") if line]
+        received = [e for e in events if e["type"] == "work_received"]
+        failed = [e for e in events if e["type"] == "work_failed"]
+        assert len(received) == 1
+        assert len(failed) == 1
+        work_id = received[0]["metadata"]["work_id"]
+        assert failed[0]["metadata"]["work_id"] == work_id
+        assert "corr-xyz" in failed[0]["input_summary"]
+
+
 class TestCorrelationIdValidation:
     @pytest.mark.asyncio
     async def test_work_rejects_correlation_id_number(self, tmp_path):
@@ -244,22 +328,28 @@ class TestCorrelationIdValidation:
 
     @pytest.mark.asyncio
     async def test_work_accepts_correlation_id_null(self, tmp_path):
-        """POST /work with null correlation_id is valid."""
+        """POST /work with null correlation_id is valid.
+
+        Uses type "chat" — a real recognised type with no payload
+        precondition — rather than a fictional type. #222 finding 2 made
+        unrecognised types 400; this test's subject is correlation_id
+        validity, not routing, so it needs a type that is actually accepted."""
         runtime, _, _ = _make_runtime(tmp_path)
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
-            body='{"type":"test","correlation_id":null}',
+            body='{"type":"chat","correlation_id":null}',
         )
         response = await runtime.handle_work(request)
         assert response.status_code == 200
 
     @pytest.mark.asyncio
     async def test_work_accepts_correlation_id_string(self, tmp_path):
-        """POST /work with string correlation_id is valid."""
+        """POST /work with string correlation_id is valid. See the null case
+        above for why type is "chat"."""
         runtime, _, _ = _make_runtime(tmp_path)
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
-            body='{"type":"test","correlation_id":"abc-123"}',
+            body='{"type":"chat","correlation_id":"abc-123"}',
         )
         response = await runtime.handle_work(request)
         assert response.status_code == 200
@@ -268,32 +358,43 @@ class TestCorrelationIdValidation:
 class TestWorkAccept:
     @pytest.mark.asyncio
     async def test_work_accepts_valid(self, tmp_path):
-        """POST /work with valid payload returns 200 with ack."""
+        """POST /work with valid payload returns 200 with ack.
+
+        Uses type "chat" rather than a fictional type — #222 finding 2 made
+        unrecognised types 400. This test is about the ack's SHAPE, not about
+        "custom_task" specifically; "chat" demonstrates the same shape for a
+        type the runtime actually accepts."""
         runtime, _, _ = _make_runtime(tmp_path)
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
-            body='{"type":"custom_task","payload":{"cmd":"echo hello"},"correlation_id":"corr-1"}',
+            body='{"type":"chat","payload":{"cmd":"echo hello"},"correlation_id":"corr-1"}',
         )
         response = await runtime.handle_work(request)
         assert response.status_code == 200
         body = json.loads(response.body)
         assert body["accepted"] is True
-        assert body["type"] == "custom_task"
+        assert body["type"] == "chat"
         assert "work_id" in body
 
     @pytest.mark.asyncio
     async def test_work_accepts_minimal(self, tmp_path):
-        """POST /work with only type field (payload defaults to {})."""
+        """POST /work with only type field (payload defaults to {}).
+
+        "chat" has no payload precondition at the synchronous-response level
+        (unlike shell_command, which requires payload.command), so it is the
+        type that actually exercises "payload defaults to {}" — the same
+        property this test checked before #222 finding 2 closed off using a
+        fictional type to reach the same code path."""
         runtime, _, _ = _make_runtime(tmp_path)
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
-            body='{"type":"ping"}',
+            body='{"type":"chat"}',
         )
         response = await runtime.handle_work(request)
         assert response.status_code == 200
         body = json.loads(response.body)
         assert body["accepted"] is True
-        assert body["type"] == "ping"
+        assert body["type"] == "chat"
 
 
 class TestWorkEvents:
@@ -314,14 +415,28 @@ class TestWorkEvents:
         assert "type=test" in received[0]["input_summary"]
 
     @pytest.mark.asyncio
-    async def test_emits_work_completed(self, tmp_path):
-        """POST /work emits a work_completed event."""
-        runtime, _, log_path = _make_runtime(tmp_path)
+    async def test_emits_work_completed(self, tmp_path, monkeypatch):
+        """POST /work emits a work_completed event.
+
+        Uses shell_command with a mocked executor (same pattern as
+        TestShellCommand) rather than a fictional type — #222 finding 2 made
+        unrecognised types 400, and the old "test" type never actually ran
+        anything; it only *looked* like a completed-work test because the
+        stub emitted work_completed synchronously. A real accepted type
+        completes on a background thread, hence the mock (deterministic,
+        no real subprocess) and the wait below."""
+        runtime, _, log_path = _make_shell_runtime(tmp_path)
+
+        async def mock_execute(command, timeout=30, **kwargs):
+            return json.dumps({"success": True, "exit_code": 0, "stdout": "hi\n", "stderr": ""})
+        monkeypatch.setattr("app.runtime.shell.execute_command", mock_execute)
+
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
-            body='{"type":"test"}',
+            body='{"type":"shell_command","payload":{"command":"echo hi"}}',
         )
         await runtime.handle_work(request)
+        time.sleep(0.5)
 
         events = [json.loads(line) for line in log_path.read_text().strip().split("\n") if line]
         completed = [e for e in events if e["type"] == "work_completed"]
@@ -345,11 +460,16 @@ class TestWorkEvents:
 
     @pytest.mark.asyncio
     async def test_work_id_in_event_metadata(self, tmp_path):
-        """Work ID from response appears in event metadata."""
+        """Work ID from response appears in event metadata.
+
+        Uses type "chat" — an accepted type's 200 response body carries
+        work_id; an unrecognised type's 400 body correctly does not
+        (#222 finding 2's test_unknown_type_work_failed_carries_the_work_id
+        covers that shape instead, cross-referencing via work_received)."""
         runtime, _, log_path = _make_runtime(tmp_path)
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
-            body='{"type":"test"}',
+            body='{"type":"chat"}',
         )
         response = await runtime.handle_work(request)
         response_body = json.loads(response.body)
@@ -455,14 +575,26 @@ class TestWorkFailedEvents:
         # Empty log is also correct — no events at all on auth failure
 
     @pytest.mark.asyncio
-    async def test_no_work_failed_on_success(self, tmp_path):
-        """Successful work does NOT emit work_failed."""
-        runtime, _, log_path = _make_runtime(tmp_path)
+    async def test_no_work_failed_on_success(self, tmp_path, monkeypatch):
+        """Successful work does NOT emit work_failed.
+
+        Uses shell_command with a mocked executor rather than a fictional
+        type — #222 finding 2 made unrecognised types 400 (which DOES emit
+        work_failed, correctly; that was the bug). Mocked and deterministic
+        rather than "chat" so this doesn't race a background thread that
+        might fail for unrelated reasons before the assertion runs."""
+        runtime, _, log_path = _make_shell_runtime(tmp_path)
+
+        async def mock_execute(command, timeout=30, **kwargs):
+            return json.dumps({"success": True, "exit_code": 0, "stdout": "", "stderr": ""})
+        monkeypatch.setattr("app.runtime.shell.execute_command", mock_execute)
+
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
-            body='{"type":"test"}',
+            body='{"type":"shell_command","payload":{"command":"echo hi"}}',
         )
         await runtime.handle_work(request)
+        time.sleep(0.5)
 
         events = [json.loads(line) for line in log_path.read_text().strip().split("\n") if line]
         failed = [e for e in events if e["type"] == "work_failed"]
