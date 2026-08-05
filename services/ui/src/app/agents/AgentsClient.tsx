@@ -66,6 +66,12 @@ export default function AgentsClient({ session }: { session: Session }) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [bulkActioning, setBulkActioning] = useState<'start' | 'stop' | null>(null)
+  // app#408: POST /:id/start's `warnings` field (#406) — present only when
+  // non-empty (AKM/model-router token generation failed but the container
+  // still launched). Keyed by agent id, replaced on every start/stop/restart
+  // action so a clean start clears a prior warning rather than leaving it
+  // stuck on an agent that is now fine.
+  const [startWarnings, setStartWarnings] = useState<Record<string, string[]>>({})
   const [importing, setImporting] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
   const [templates, setTemplates] = useState<AgentTemplate[]>([])
@@ -111,6 +117,15 @@ export default function AgentsClient({ session }: { session: Session }) {
 
   const handleAction = async (agentId: string, action: 'start' | 'stop' | 'restart') => {
     setActionLoading(agentId)
+    // Cleared up front on any action, not just start: a stale warning from a
+    // prior degraded start must not keep showing once the agent is stopped
+    // or being restarted, and a clean start must render nothing (#408).
+    setStartWarnings(prev => {
+      if (!(agentId in prev)) return prev
+      const next = { ...prev }
+      delete next[agentId]
+      return next
+    })
     try {
       if (action === 'restart') {
         // Stop then start
@@ -123,16 +138,21 @@ export default function AgentsClient({ session }: { session: Session }) {
         // Brief pause for container cleanup
         await new Promise(r => setTimeout(r, 1000))
         const startRes = await fetch(`/api/agents/${agentId}/start`, { method: 'POST' })
+        const startData = await startRes.json()
         if (!startRes.ok) {
-          const data = await startRes.json()
-          alert(data.error || 'Failed to start agent')
+          alert(startData.error || 'Failed to start agent')
           return
+        }
+        if (Array.isArray(startData.warnings) && startData.warnings.length > 0) {
+          setStartWarnings(prev => ({ ...prev, [agentId]: startData.warnings }))
         }
       } else {
         const res = await fetch(`/api/agents/${agentId}/${action}`, { method: 'POST' })
+        const data = await res.json()
         if (!res.ok) {
-          const data = await res.json()
           alert(data.error || `Failed to ${action} agent`)
+        } else if (action === 'start' && Array.isArray(data.warnings) && data.warnings.length > 0) {
+          setStartWarnings(prev => ({ ...prev, [agentId]: data.warnings }))
         }
       }
       await fetchData()
@@ -209,12 +229,19 @@ export default function AgentsClient({ session }: { session: Session }) {
 
     setBulkActioning('start')
     const errors: string[] = []
+    setStartWarnings(prev => {
+      const next = { ...prev }
+      for (const agent of targets) delete next[agent.id]
+      return next
+    })
     for (const agent of targets) {
       try {
         const res = await fetch(`/api/agents/${agent.id}/start`, { method: 'POST' })
+        const data = await res.json()
         if (!res.ok) {
-          const data = await res.json()
           errors.push(`${agent.name}: ${data.error || 'failed'}`)
+        } else if (Array.isArray(data.warnings) && data.warnings.length > 0) {
+          setStartWarnings(prev => ({ ...prev, [agent.id]: data.warnings }))
         }
       } catch {
         errors.push(`${agent.name}: request failed`)
@@ -475,6 +502,7 @@ export default function AgentsClient({ session }: { session: Session }) {
             return (
               <div
                 key={agent.id}
+                data-testid={`agent-card-${agent.id}`}
                 className="rounded-lg border border-navy-700 bg-navy-800 p-5 flex flex-col"
               >
                 <div className="flex items-center justify-between mb-2">
@@ -528,6 +556,27 @@ export default function AgentsClient({ session }: { session: Session }) {
                     <p className="text-xs text-red-300 line-clamp-2">
                       {errorDetails[agent.id] || agent.error_message}
                     </p>
+                  </div>
+                )}
+
+                {/* app#408: this start reported {status: "running"} but was
+                    degraded — AKM or model-router token generation failed
+                    (#406). status is "running", not "error", so this is a
+                    separate banner rather than folded into the one above:
+                    the container did launch, it just cannot do everything a
+                    clean start can. No line-clamp — the remedy the API
+                    already states (stop and restart) is IN the message. */}
+                {startWarnings[agent.id] && startWarnings[agent.id]!.length > 0 && (
+                  <div
+                    data-testid={`start-warnings-${agent.id}`}
+                    className="mb-3 px-2.5 py-2 rounded-md bg-amber-900/20 border border-amber-800/40 flex items-start gap-2"
+                  >
+                    <AlertTriangle size={14} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                    <div className="text-xs text-amber-300 space-y-0.5">
+                      {startWarnings[agent.id]!.map((w, i) => (
+                        <p key={i}>{w}</p>
+                      ))}
+                    </div>
                   </div>
                 )}
 

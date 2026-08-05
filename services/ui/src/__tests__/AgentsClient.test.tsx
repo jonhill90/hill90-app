@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
 // Mock next/link
@@ -300,5 +300,89 @@ describe('AgentsClient', () => {
 
     // Running agent should be first
     expect(links[0].textContent).toBe('ResearchBot')
+  })
+
+  // app#408: #406 made POST /:id/start return a `warnings` array when
+  // AKM/model-router token generation failed but the container still
+  // launched. This is the human half — the UI must render it, visibly
+  // enough that it is not mistaken for success.
+  describe('start warnings (app#408)', () => {
+    const WARNING_TEXT =
+      'Model-router token generation failed — agent started but cannot make inference requests until it is stopped and restarted'
+
+    it('a degraded start renders the warning banner on that agent only', async () => {
+      mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+        }
+        if (url === '/api/agents/agent-2/start' && opts?.method === 'POST') {
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                status: 'running',
+                container_id: 'c1',
+                principal_id: 'agent-2',
+                warnings: [WARNING_TEXT],
+              }),
+          })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<AgentsClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('WriterBot')).toBeInTheDocument()
+      })
+
+      const writerCard = screen.getByTestId('agent-card-agent-2')
+      fireEvent.click(within(writerCard).getByText('Start'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('start-warnings-agent-2')).toBeInTheDocument()
+      })
+      expect(within(writerCard).getByText(WARNING_TEXT)).toBeInTheDocument()
+
+      // Absent-safe on every OTHER agent — a banner that always appears
+      // fails the same way as one that never does.
+      expect(screen.queryByTestId('start-warnings-agent-1')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('start-warnings-agent-3')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('start-warnings-agent-4')).not.toBeInTheDocument()
+    })
+
+    it('a clean start renders no warning banner at all', async () => {
+      mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+        }
+        if (url === '/api/agents/agent-2/start' && opts?.method === 'POST') {
+          // No `warnings` key at all — matches the API's own contract
+          // (#406): present only when non-empty.
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({ status: 'running', container_id: 'c1', principal_id: 'agent-2' }),
+          })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<AgentsClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('WriterBot')).toBeInTheDocument()
+      })
+
+      const writerCard = screen.getByTestId('agent-card-agent-2')
+      fireEvent.click(within(writerCard).getByText('Start'))
+
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith('/api/agents/agent-2/start', { method: 'POST' })
+      })
+
+      expect(screen.queryByTestId('start-warnings-agent-2')).not.toBeInTheDocument()
+      expect(screen.queryByText(WARNING_TEXT)).not.toBeInTheDocument()
+    })
   })
 })
