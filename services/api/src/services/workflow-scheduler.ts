@@ -190,12 +190,26 @@ export async function executeWorkflow(pool: any, wf: any): Promise<void> {
     console.log('[workflow-scheduler] Dispatched "%s" → thread %s', wf.name, threadId);
   } catch (err: any) {
     console.error('[workflow-scheduler] Workflow "%s" failed:', wf.name, err);
-    await pool.query(
-      `UPDATE workflow_runs SET status = 'error', error = $1, completed_at = NOW(),
-       duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at))::int * 1000
-       WHERE id = $2`,
-      [err.message || 'Unknown error', runId]
-    );
+    // This write only runs because dispatch already failed — plausibly the
+    // same class of DB blip it's about to retry against. Guarded rather than
+    // left to propagate: an unguarded failure here used to skip the
+    // next_run_at advance below entirely, leaving the workflow "due" again
+    // on the very next tick — re-running the whole non-idempotent dispatch
+    // (new thread, new participants, new message, new agent dispatch) for
+    // as long as the blip lasted.
+    try {
+      await pool.query(
+        `UPDATE workflow_runs SET status = 'error', error = $1, completed_at = NOW(),
+         duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at))::int * 1000
+         WHERE id = $2`,
+        [err.message || 'Unknown error', runId]
+      );
+    } catch (recordErr) {
+      console.error(
+        '[workflow-scheduler] Failed to record failure for "%s" (run %s):',
+        wf.name, runId, recordErr
+      );
+    }
   }
 
   // Update last_run_at and compute next_run_at
