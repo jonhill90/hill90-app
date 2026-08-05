@@ -197,12 +197,40 @@ async def ingest_source(
             error=error_msg,
         )
 
-        await shared_store.update_ingest_job(
-            pool, job["id"], status="failed", error_message=error_msg
-        )
-        await shared_store.update_source_status(
-            pool, source["id"], status="error", error_message=error_msg
-        )
+        # These two writes only run because ingestion has ALREADY failed —
+        # plausibly from the same class of DB blip they're about to retry
+        # against. Unguarded, either one raising would replace error_msg (the
+        # only record of what actually went wrong) with an unrelated
+        # compensation-write failure, propagate past this function entirely
+        # (the caller in routes/internal_admin_shared.py only catches
+        # IngestError, not a bare Exception, so this becomes an unhandled
+        # 500), and leave the job/source rows stuck in whatever pre-failure
+        # state they were in — never marked failed/error. Best-effort: record
+        # the compensation failure too, but never let it eclipse error_msg.
+        try:
+            await shared_store.update_ingest_job(
+                pool, job["id"], status="failed", error_message=error_msg
+            )
+        except Exception as compensation_exc:
+            logger.error(
+                "ingest_failure_recording_failed",
+                source_id=source["id"],
+                job_id=job["id"],
+                original_error=error_msg,
+                compensation_error=str(compensation_exc),
+            )
+        try:
+            await shared_store.update_source_status(
+                pool, source["id"], status="error", error_message=error_msg
+            )
+        except Exception as compensation_exc:
+            logger.error(
+                "ingest_failure_recording_failed",
+                source_id=source["id"],
+                job_id=job["id"],
+                original_error=error_msg,
+                compensation_error=str(compensation_exc),
+            )
 
         source_err = {k: v for k, v in source.items() if k != "raw_content"}
 
