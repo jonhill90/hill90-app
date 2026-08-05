@@ -448,6 +448,60 @@ class TestFetchAndExtract:
             # is how the fetcher shipped returning the hostname for every page.
             assert result["title"] == "Test Page"
 
+    # THE ASSERTION THAT MATTERS. The docstring's own "Fetch Safety Contract"
+    # lists URL validation, DNS/CIDR checks, redirect re-validation, error
+    # message leak prevention, and response size limits — status_code is not
+    # in that list, and nothing in fetch_and_extract ever reads it outside the
+    # `is_redirect` branch. A 404 or 500 page frequently HAS extractable text
+    # ("404 Not Found — the page you requested does not exist") — trafilatura
+    # does not know or care that the surrounding response was an error, so
+    # that text passes the "not empty" check a few lines later and is ingested
+    # as if it were the page the caller asked for. ingest.py then marks the
+    # job completed and the source active: a source row that exists, with
+    # real chunks, that are not the content anyone asked to ingest.
+    @pytest.mark.asyncio
+    async def test_error_status_with_extractable_body_is_not_ingested_as_content(self) -> None:
+        """A 404/500 response must fail the fetch, even if its body has text."""
+        html = "<html><body><h1>404 Not Found</h1><p>The page you requested does not exist.</p></body></html>"
+        with (
+            patch("app.services.web_page_fetcher.socket.getaddrinfo") as mock_dns,
+            patch("app.services.web_page_fetcher.httpx.AsyncClient") as mock_client_cls,
+            patch("app.services.web_page_fetcher.trafilatura") as mock_traf,
+        ):
+            mock_dns.return_value = PUBLIC_DNS
+            resp = _make_streaming_response(
+                status_code=404,
+                headers={"content-type": "text/html"},
+                body=html.encode(),
+            )
+            mock_client_cls.return_value = _make_mock_client(resp)
+            # A real extractor WOULD pull text out of this — that's the point.
+            mock_traf.extract.return_value = "404 Not Found The page you requested does not exist."
+
+            with pytest.raises(FetchError, match="404"):
+                await fetch_and_extract("https://example.com/gone")
+
+            mock_traf.extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_server_error_status_is_also_rejected(self) -> None:
+        """POSITIVE CONTROL for the check being about the STATUS, not this one code."""
+        with (
+            patch("app.services.web_page_fetcher.socket.getaddrinfo") as mock_dns,
+            patch("app.services.web_page_fetcher.httpx.AsyncClient") as mock_client_cls,
+            patch("app.services.web_page_fetcher.trafilatura"),
+        ):
+            mock_dns.return_value = PUBLIC_DNS
+            resp = _make_streaming_response(
+                status_code=503,
+                headers={"content-type": "text/html"},
+                body=b"<html><body>Service Unavailable</body></html>",
+            )
+            mock_client_cls.return_value = _make_mock_client(resp)
+
+            with pytest.raises(FetchError, match="503"):
+                await fetch_and_extract("https://example.com/down")
+
     async def _fetch_with_metadata(self, metadata: object) -> dict:
         """Run a successful fetch with trafilatura's metadata mocked."""
         html = "<html><head><title>ignored, trafilatura is mocked</title></head><body><p>Body.</p></body></html>"
