@@ -446,6 +446,50 @@ describe('Chat thread CRUD', () => {
     expect(res.body.messages).toHaveLength(1);
   });
 
+  // Cleanup path 3 (thread load) said "Response timed out" — a claim about
+  // WHY that the code has no way to know is true. agentbox's own callback
+  // delivery is fire-and-forget with no retry, so a message stuck 'pending'
+  // this long may just as easily be one whose agent already answered and
+  // whose callback got lost, as one that is genuinely still unanswered.
+  // Found alongside the interval sweeper below, which said the identical
+  // false thing for the identical reason — this is the other of the two
+  // places that write it.
+  it('a stale pending message reconciled on thread load says only what was observed, not a claim about why', async () => {
+    const staleCreatedAt = new Date(Date.now() - 3 * 60 * 1000).toISOString(); // > STALE_TIMEOUT_MS (2m)
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1 }] })  // isParticipant
+      .mockResolvedValueOnce({
+        rows: [{ id: 'thread-1', type: 'direct', title: 'Test', created_by: 'regular-user',
+                 created_at: new Date(), updated_at: new Date() }],
+      })
+      .mockResolvedValueOnce({ rows: [] })  // participants
+      .mockResolvedValueOnce({ rows: [
+        { id: 'msg-stale', seq: 1, author_id: 'agent-1', author_type: 'agent', role: 'assistant',
+          content: '', status: 'pending', reply_to: null, target_agents: null,
+          created_at: staleCreatedAt },
+      ]})
+      .mockResolvedValueOnce({ rows: [{ total: '1' }] })
+      .mockResolvedValueOnce({ rows: [] });  // the reconciliation UPDATE itself
+
+    const res = await request(app)
+      .get('/chat/threads/thread-1')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.messages[0].status).toBe('error');
+    // THE ASSERTION THAT MATTERS: an observation, not a diagnosis.
+    expect(res.body.messages[0].error_message).toBe('No response received within 2 minutes');
+    expect(res.body.messages[0].error_message).not.toMatch(/timed out/i);
+
+    const updateCall = mockQuery.mock.calls.find(
+      ([sql, params]) => typeof sql === 'string'
+        && sql.includes("SET status = 'error'")
+        && sql.includes('chat_messages')
+        && Array.isArray(params) && params.includes('No response received within 2 minutes')
+    );
+    expect(updateCall).toBeDefined();
+  });
+
   // ── #203: the thread body is bounded, and the truncation is not silent ──
   //
   // Two things must hold together, and a fixture that checks only one is
@@ -1100,8 +1144,9 @@ describe('Chat multi-agent dispatch', () => {
   // #364: agentbox's handle_chat() checks the same env var and, if unset,
   // emits a local work_failed event and returns WITHOUT ever calling back —
   // the placeholder would otherwise sit 'pending' until the stale sweeper
-  // marks it "Response timed out" 2+ minutes later, pointing away from the
-  // real cause. Dispatch must never even be attempted in this case.
+  // marks it "No response received" 2+ minutes later, saying only what was
+  // observed rather than pointing away from the real cause. Dispatch must
+  // never even be attempted in this case.
   it('POST /chat/threads/:id/messages reports the actual cause when CHAT_CALLBACK_TOKEN is missing, not a timeout (#364)', async () => {
     const savedToken = process.env.CHAT_CALLBACK_TOKEN;
     delete process.env.CHAT_CALLBACK_TOKEN;
@@ -1972,9 +2017,9 @@ describe('Chat stale sweeper', () => {
       await jest.advanceTimersByTimeAsync(60_000);
 
       const sweepCall = mockQuery.mock.calls.find(
-        ([sql]) => typeof sql === 'string'
+        ([sql, params]) => typeof sql === 'string'
           && sql.includes("SET status = 'error'")
-          && sql.includes('Response timed out')
+          && Array.isArray(params) && params.includes('No response received within 2 minutes')
       );
       expect(sweepCall).toBeDefined();
       const sql = String(sweepCall![0]);

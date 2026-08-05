@@ -53,6 +53,13 @@ const router = Router();
 
 const MESSAGE_HISTORY_LIMIT = 50;
 const STALE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+// A claim about what was OBSERVED (no callback arrived in the window), not a
+// claim about WHY. agentbox's _deliver_callback is fire-and-forget with no
+// retry — the agent may have produced a real answer and lost it in delivery
+// just as easily as it may genuinely still be working. "Response timed out"
+// asserted the former cause specifically, which the code that writes this
+// message has no way to know is what actually happened.
+const NO_RESPONSE_MESSAGE = 'No response received within 2 minutes';
 const MAX_AGENTS_PER_GROUP = 8;
 const MAX_CHAIN_HOPS = parseInt(process.env.MAX_CHAIN_HOPS || '5', 10);
 const MAX_CHAIN_DURATION_MS = parseInt(process.env.MAX_CHAIN_DURATION_MS || '60000', 10);
@@ -283,8 +290,9 @@ async function dispatchToAgents(opts: {
   // Fail fast if CHAT_CALLBACK_TOKEN is absent: agentbox's handle_chat() checks
   // the same env var and, if unset, emits a local work_failed event and returns
   // WITHOUT ever calling back — the dispatch below would hang until the stale
-  // sweeper marks it "Response timed out" 2+ minutes later, actively pointing
-  // away from the real cause. Report the actual cause immediately instead.
+  // sweeper marks it "No response received" 2+ minutes later, saying only what
+  // was observed rather than pointing away from the real cause. Report the
+  // actual cause immediately instead.
   if (!process.env.CHAT_CALLBACK_TOKEN) {
     console.error('[chat] CHAT_CALLBACK_TOKEN not configured — refusing to dispatch');
     for (const { agent, placeholderId } of placeholders) {
@@ -888,15 +896,15 @@ router.get('/threads/:id', requireRole('user'), async (req: Request, res: Respon
     if (staleIds.length > 0) {
       await pool.query(
         `UPDATE chat_messages
-         SET status = 'error', error_message = 'Response timed out',
+         SET status = 'error', error_message = $2,
              seq = nextval('chat_messages_seq')
          WHERE id = ANY($1) AND status = 'pending'`,
-        [staleIds]
+        [staleIds, NO_RESPONSE_MESSAGE]
       );
       for (const msg of messages) {
         if (staleIds.includes(msg.id)) {
           msg.status = 'error';
-          msg.error_message = 'Response timed out';
+          msg.error_message = NO_RESPONSE_MESSAGE;
         }
       }
     }
@@ -2590,9 +2598,10 @@ export function startStaleSweeper(): void {
       // case the sweeper originally covered.
       const { rowCount } = await getPool().query(
         `UPDATE chat_messages
-         SET status = 'error', error_message = 'Response timed out',
+         SET status = 'error', error_message = $1,
              seq = nextval('chat_messages_seq'), updated_at = NOW()
-         WHERE status IN ('pending', 'thinking') AND updated_at < NOW() - INTERVAL '2 minutes'`
+         WHERE status IN ('pending', 'thinking') AND updated_at < NOW() - INTERVAL '2 minutes'`,
+        [NO_RESPONSE_MESSAGE]
       );
       if (rowCount && rowCount > 0) {
         console.log(`[chat-sweeper] Marked ${rowCount} stale pending/thinking message(s) as error`);
