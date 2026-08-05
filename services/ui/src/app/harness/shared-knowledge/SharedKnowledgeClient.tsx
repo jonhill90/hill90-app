@@ -136,6 +136,10 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
   const [collectionsError, setCollectionsError] = useState(false)
   const [sources, setSources] = useState<Source[]>([])
   const [sourcesTotal, setSourcesTotal] = useState<number | null>(null)
+  // A failed sources fetch used to leave `sources` at [] with no trace of
+  // why — "No sources in this collection" read identically for a real 500
+  // and a genuinely empty collection.
+  const [sourcesError, setSourcesError] = useState(false)
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null)
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [qualitySummary, setQualitySummary] = useState<QualitySummary | null>(null)
@@ -200,9 +204,12 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
       if (res.ok) {
         setSources(await res.json())
         setSourcesTotal(Number.isFinite(t) ? t : null)
+        setSourcesError(false)
+      } else {
+        setSourcesError(true)
       }
     } catch {
-      // silent
+      setSourcesError(true)
     }
   }, [])
 
@@ -231,6 +238,7 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
       fetchSources(selectedCollection.id)
     } else {
       setSources([])
+      setSourcesError(false)
     }
   }, [selectedCollection, fetchSources])
 
@@ -848,7 +856,14 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
                 )}
 
                 {/* Sources list */}
-                {sources.length === 0 ? (
+                {sourcesError ? (
+                  <div
+                    className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+                    data-testid="sources-error"
+                  >
+                    <p className="text-sm text-red-400">Could not load sources — try refreshing the page</p>
+                  </div>
+                ) : sources.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-navy-600 bg-navy-800/50 p-12 text-center">
                     <FileText className="w-10 h-10 text-mountain-500 mx-auto mb-3" />
                     <p className="text-mountain-400 font-medium mb-1">No sources in this collection</p>

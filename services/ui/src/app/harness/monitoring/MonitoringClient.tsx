@@ -272,14 +272,21 @@ export default function MonitoringClient() {
 
 function UsageStats() {
   const [usage, setUsage] = useState<any>(null)
+  // Without this, a failed fetch left `usage` at null forever and this
+  // widget showed "Loading usage..." indefinitely — never resolving, never
+  // saying the request failed. Matches the Agent Overview section's own
+  // loading/null/data three-way pattern above.
+  const [loading, setLoading] = useState(true)
   useEffect(() => {
     fetch('/api/usage?from=' + new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10))
       .then(r => r.ok ? r.json() : null)
       .then(d => setUsage(d))
-      .catch(() => {})
+      .catch(() => setUsage(null))
+      .finally(() => setLoading(false))
   }, [])
 
-  if (!usage) return <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 text-sm text-navy-400">Loading usage...</div>
+  if (loading) return <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 text-sm text-navy-400">Loading usage...</div>
+  if (!usage) return <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 text-sm text-navy-400" data-testid="usage-stats-error">Unable to fetch usage data.</div>
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -300,14 +307,20 @@ function UsageStats() {
 
 function KnowledgeStats() {
   const [stats, setStats] = useState<any>(null)
+  // Same as UsageStats above: without this, a failed fetch left `stats` at
+  // null forever and this widget showed "Loading knowledge stats..."
+  // indefinitely.
+  const [loading, setLoading] = useState(true)
   useEffect(() => {
     fetch('/api/shared-knowledge/stats')
       .then(r => r.ok ? r.json() : null)
       .then(d => setStats(d))
-      .catch(() => {})
+      .catch(() => setStats(null))
+      .finally(() => setLoading(false))
   }, [])
 
-  if (!stats) return <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 text-sm text-navy-400">Loading knowledge stats...</div>
+  if (loading) return <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 text-sm text-navy-400">Loading knowledge stats...</div>
+  if (!stats) return <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 text-sm text-navy-400" data-testid="knowledge-stats-error">Unable to fetch knowledge stats.</div>
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
