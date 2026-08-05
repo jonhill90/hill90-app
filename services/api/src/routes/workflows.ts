@@ -20,6 +20,15 @@ import { reportedStatus, isStatusVerified } from '../services/agent-status-verif
 
 const router = Router();
 
+// app#374: webhook_token_hash must never reach a response — it's a SHA-256
+// digest of the real trigger secret (see migration 068), and while a hash
+// can't be reversed into the token, there's no reason to return it either.
+// Two variants: JOIN queries below alias the table `w` (workflows.id and
+// agents.id would otherwise collide); INSERT/UPDATE ... RETURNING has no
+// alias.
+const PUBLIC_COLUMNS_JOINED = `w.id, w.name, w.description, w.agent_id, w.schedule_cron, w.prompt, w.output_type, w.output_config, w.enabled, w.last_run_at, w.next_run_at, w.created_by, w.created_at, w.updated_at, w.trigger_type`;
+const PUBLIC_COLUMNS = `id, name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled, last_run_at, next_run_at, created_by, created_at, updated_at, trigger_type`;
+
 /**
  * What this route is entitled to say about the agent a workflow belongs to.
  *
@@ -52,7 +61,7 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
 
     const { rows } = await getPool().query(
-      `SELECT w.*, a.name AS agent_name, a.agent_id AS agent_slug, a.status AS agent_status
+      `SELECT ${PUBLIC_COLUMNS_JOINED}, a.name AS agent_name, a.agent_id AS agent_slug, a.status AS agent_status
        FROM workflows w
        JOIN agents a ON w.agent_id = a.id
        ${admin ? '' : 'WHERE w.created_by = $1'}
@@ -97,11 +106,17 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
 
     const triggerType = req.body.trigger_type || 'cron';
     const webhookToken = triggerType === 'webhook' ? crypto.randomBytes(32).toString('hex') : null;
+    // app#374: only the hash is stored. webhookToken (the raw value) lives
+    // only in this request's memory and the response below — never in the
+    // database, never again after this response is sent.
+    const webhookTokenHash = webhookToken
+      ? crypto.createHash('sha256').update(webhookToken).digest('hex')
+      : null;
 
     const { rows } = await getPool().query(
-      `INSERT INTO workflows (name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled, created_by, trigger_type, webhook_token)
+      `INSERT INTO workflows (name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled, created_by, trigger_type, webhook_token_hash)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING *`,
+       RETURNING ${PUBLIC_COLUMNS}`,
       [
         name,
         description || null,
@@ -113,12 +128,15 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
         enabled !== false,
         user.sub,
         triggerType,
-        webhookToken,
+        webhookTokenHash,
       ]
     );
 
     const result = rows[0];
     if (webhookToken) {
+      // SHOWN EXACTLY ONCE. webhook_token_hash cannot be reversed, so this
+      // response is the only chance the caller will ever have to see or
+      // copy the trigger URL — the UI must capture it here, not re-fetch it.
       result.webhook_url = `/workflows/webhook/${webhookToken}`;
     }
 
@@ -136,7 +154,7 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
 
     const { rows } = await getPool().query(
-      `SELECT w.*, a.name AS agent_name, a.agent_id AS agent_slug, a.status AS agent_status
+      `SELECT ${PUBLIC_COLUMNS_JOINED}, a.name AS agent_name, a.agent_id AS agent_slug, a.status AS agent_status
        FROM workflows w
        JOIN agents a ON w.agent_id = a.id
        WHERE w.id = $1 ${admin ? '' : 'AND w.created_by = $2'}`,
@@ -182,7 +200,7 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
         enabled = COALESCE($8, enabled),
         updated_at = NOW()
        WHERE id = $9 ${admin ? '' : 'AND created_by = $10'}
-       RETURNING *`,
+       RETURNING ${PUBLIC_COLUMNS}`,
       admin
         ? [name, description, agent_id, schedule_cron, prompt, output_type, output_config ? JSON.stringify(output_config) : null, enabled, req.params.id]
         : [name, description, agent_id, schedule_cron, prompt, output_type, output_config ? JSON.stringify(output_config) : null, enabled, req.params.id, user.sub]
@@ -515,6 +533,10 @@ router.delete('/:id/steps/:stepId', requireRole('user'), async (req: Request, re
 router.post('/webhook/:token', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    // Looked up by digest, never by the plaintext value — same reasoning as
+    // migration 068: constant-time-in-spirit via a direct equality on a
+    // SHA-256 hash, never a plaintext comparison.
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
     const { rows: wfRows } = await getPool().query(
       `SELECT w.*, a.agent_id AS agent_slug, a.status AS agent_status, a.work_token,
@@ -522,8 +544,8 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
        FROM workflows w
        JOIN agents a ON w.agent_id = a.id
        LEFT JOIN model_policies mp ON a.model_policy_id = mp.id
-       WHERE w.webhook_token = $1 AND w.enabled = true`,
-      [token]
+       WHERE w.webhook_token_hash = $1 AND w.enabled = true`,
+      [tokenHash]
     );
 
     if (wfRows.length === 0) {

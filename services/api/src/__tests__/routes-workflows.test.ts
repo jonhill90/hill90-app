@@ -16,6 +16,10 @@ jest.mock('../db/pool', () => ({
   getPool: () => ({ query: mockQuery }),
 }));
 
+jest.mock('../services/chat-dispatch', () => ({
+  dispatchChatWork: jest.fn().mockResolvedValue({ accepted: true, work_id: 'work-1' }),
+}));
+
 function makeToken(sub: string, roles: string[]): string {
   return jwt.sign(
     { sub, resource_access: { 'hill90-ui': { roles } } },
@@ -43,7 +47,6 @@ const MOCK_WORKFLOW = {
   output_config: '{}',
   enabled: true,
   trigger_type: 'cron',
-  webhook_token: null,
   created_by: 'regular-user',
   created_at: '2026-04-19T00:00:00Z',
   agent_name: 'HealthBot',
@@ -76,8 +79,12 @@ describe('Workflows routes', () => {
         .get('/workflows')
         .set('Authorization', `Bearer ${adminToken}`);
 
-      const queryStr = mockQuery.mock.calls[0][0];
-      expect(queryStr).not.toContain('created_by');
+      // Not a bare substring check: app#374 made the column list explicit
+      // (to exclude webhook_token_hash), so `created_by` now legitimately
+      // appears as a SELECTed column even for admin. What actually matters
+      // is that no WHERE clause restricts by it.
+      const queryStr = mockQuery.mock.calls[0][0] as string;
+      expect(queryStr).not.toMatch(/WHERE\s+w\.created_by/i);
     });
 
     it('rejects unauthenticated', async () => {
@@ -107,10 +114,13 @@ describe('Workflows routes', () => {
       expect(res.body.name).toBe('Daily Health Check');
     });
 
-    it('creates a webhook-triggered workflow', async () => {
+    it('creates a webhook-triggered workflow: response carries a fresh raw token once, the INSERT only ever gets its hash', async () => {
       mockQuery.mockResolvedValueOnce({ rows: [{ id: 'agent-uuid' }] });
+      // RETURNING uses PUBLIC_COLUMNS (app#374) — the row the "DB" hands
+      // back has no webhook token or hash field at all, matching the real
+      // column list post-migration-068.
       mockQuery.mockResolvedValueOnce({
-        rows: [{ ...MOCK_WORKFLOW, trigger_type: 'webhook', webhook_token: 'abc123' }],
+        rows: [{ ...MOCK_WORKFLOW, trigger_type: 'webhook' }],
       });
 
       const res = await request(app)
@@ -125,6 +135,18 @@ describe('Workflows routes', () => {
         });
 
       expect(res.status).toBe(201);
+      // 32 random bytes, hex-encoded = 64 hex chars.
+      expect(res.body.webhook_url).toMatch(/^\/workflows\/webhook\/[0-9a-f]{64}$/);
+      expect(JSON.stringify(res.body)).not.toMatch(/"webhook_token_hash"/);
+
+      // The INSERT writes only a hash, never the raw token generated above.
+      const insertCall = mockQuery.mock.calls[1];
+      const rawToken = res.body.webhook_url.replace('/workflows/webhook/', '');
+      const insertedHash = insertCall[1][10]; // webhook_token_hash is the 11th bound param
+      expect(insertedHash).not.toBe(rawToken);
+      expect(insertedHash).toBe(
+        require('crypto').createHash('sha256').update(rawToken).digest('hex')
+      );
     });
 
     it('rejects missing required fields', async () => {
@@ -208,6 +230,66 @@ describe('Workflows routes', () => {
       expect(res.status).toBe(200);
       expect(res.body).toHaveLength(1);
       expect(res.body[0].status).toBe('completed');
+    });
+  });
+
+  // app#374: the token in the URL is looked up by SHA-256 digest
+  // (migration 068), never by plaintext equality — the raw value must
+  // never appear as a bound query parameter.
+  describe('POST /workflows/webhook/:token', () => {
+    it('hashes the presented token before querying, and never binds the raw value', async () => {
+      const rawToken = 'a'.repeat(64);
+      const expectedHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+      mockQuery.mockImplementation((sql: string) => {
+        if (/FROM workflows w/.test(sql)) {
+          return Promise.resolve({
+            rows: [{
+              ...MOCK_WORKFLOW, agent_slug: 'health-bot', agent_status: 'running',
+              work_token: 'wt-secret', allowed_models: ['gpt-4o'],
+            }],
+          });
+        }
+        if (/INSERT INTO workflow_runs/.test(sql)) return Promise.resolve({ rows: [{ id: 'run-1' }] });
+        if (/INSERT INTO chat_threads/.test(sql)) return Promise.resolve({ rows: [{ id: 'thread-1' }] });
+        if (/INSERT INTO chat_messages/.test(sql)) return Promise.resolve({ rows: [{ id: 'msg-1' }] });
+        return Promise.resolve({ rows: [] });
+      });
+
+      const res = await request(app)
+        .post(`/workflows/webhook/${rawToken}`)
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ triggered: true, workflow: MOCK_WORKFLOW.name, run_id: 'run-1', thread_id: 'thread-1' });
+
+      const lookupCall = mockQuery.mock.calls.find((c: unknown[]) => /FROM workflows w/.test(String(c[0])));
+      expect(lookupCall).toBeDefined();
+      expect(String(lookupCall![0])).toContain('webhook_token_hash');
+      expect(String(lookupCall![0])).not.toMatch(/WHERE\s+w\.webhook_token\s*=/i);
+      expect(lookupCall![1]).toEqual([expectedHash]);
+      // The raw token must never be a bound parameter anywhere in this call.
+      expect((lookupCall![1] as unknown[]).includes(rawToken)).toBe(false);
+    });
+
+    it('CONTROL: a route that queried by plaintext would bind the raw token, not its hash', () => {
+      // Proves the assertions above have teeth: this is what the OLD,
+      // pre-#374 query would have bound.
+      const rawToken = 'a'.repeat(64);
+      const plaintextParams = [rawToken];
+      expect(plaintextParams.includes(rawToken)).toBe(true);
+    });
+
+    it('returns 404 for an unknown token without distinguishing it from a disabled workflow', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+
+      const res = await request(app)
+        .post(`/workflows/webhook/${'b'.repeat(64)}`)
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({});
+
+      expect(res.status).toBe(404);
     });
   });
 });

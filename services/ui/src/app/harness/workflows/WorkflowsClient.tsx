@@ -14,7 +14,6 @@ interface Workflow {
   schedule_cron: string | null
   prompt: string
   trigger_type: string
-  webhook_token: string | null
   output_type: string
   output_config: Record<string, unknown>
   enabled: boolean
@@ -84,6 +83,10 @@ export default function WorkflowsClient() {
   const [stepsLoading, setStepsLoading] = useState(false)
   const [rightTab, setRightTab] = useState<'runs' | 'steps'>('runs')
   const [stepForm, setStepForm] = useState({ agent_id: '', prompt: '' })
+  // app#374: the API now stores only a hash of the webhook token and never
+  // returns the raw value again after creation — this is the ONLY place it
+  // is ever held client-side, and only until the user dismisses it.
+  const [newWebhookUrl, setNewWebhookUrl] = useState<string | null>(null)
 
   const [form, setForm] = useState({
     name: '', description: '', agent_id: '', schedule_cron: '*/30 * * * *', prompt: '', output_type: 'none', output_config: '{}', trigger_type: 'cron'
@@ -134,6 +137,10 @@ export default function WorkflowsClient() {
     const method = editingId ? 'PUT' : 'POST'
     const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     if (res.ok) {
+      const data = await res.json()
+      // Only a create response can ever carry this — PUT never sets or
+      // returns a webhook token, and a later GET can no longer see it either.
+      if (!editingId && data.webhook_url) setNewWebhookUrl(data.webhook_url)
       setShowForm(false)
       setEditingId(null)
       setForm({ name: '', description: '', agent_id: '', schedule_cron: '*/30 * * * *', prompt: '', output_type: 'none', output_config: '{}', trigger_type: 'cron' })
@@ -221,6 +228,34 @@ export default function WorkflowsClient() {
           <Plus className="w-4 h-4" /> New Workflow
         </button>
       </div>
+
+      {/* One-time webhook URL reveal (app#374): the server never returns this
+          value again after this response — copy it now or regenerate later. */}
+      {newWebhookUrl && (
+        <div className="mb-6 rounded-lg border border-amber-700 bg-amber-950/30 p-4">
+          <p className="text-sm text-amber-300 font-medium mb-1">Webhook URL — shown once</p>
+          <p className="text-xs text-mountain-400 mb-2">
+            Copy this now. It will not be shown again — the server only keeps a hash of it, not the value itself.
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-xs text-white bg-navy-900 border border-navy-700 rounded px-3 py-2 font-mono break-all">
+              {newWebhookUrl}
+            </code>
+            <button
+              onClick={() => { navigator.clipboard.writeText(newWebhookUrl); }}
+              className="px-3 py-2 rounded bg-navy-700 hover:bg-navy-600 text-white text-xs cursor-pointer"
+            >
+              Copy
+            </button>
+            <button
+              onClick={() => setNewWebhookUrl(null)}
+              className="px-3 py-2 rounded bg-navy-700 hover:bg-navy-600 text-white text-xs cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Create/Edit Form */}
       {showForm && (
@@ -341,11 +376,6 @@ export default function WorkflowsClient() {
                     <Clock className="w-3 h-3" />
                     {wf.trigger_type === 'webhook' ? 'Webhook trigger' : wf.schedule_cron ? cronToHuman(wf.schedule_cron) : 'No schedule'}
                   </div>
-                  {wf.webhook_token && (
-                    <div className="text-xs text-mountain-500 font-mono truncate" title={`/workflows/webhook/${wf.webhook_token}`}>
-                      Webhook: /workflows/webhook/{wf.webhook_token.slice(0, 12)}...
-                    </div>
-                  )}
                   <div>Agent: <span className="text-mountain-300">{wf.agent_name}</span>
                     <span className={`ml-1 text-xs ${wf.agent_status === 'running' ? 'text-brand-400' : 'text-mountain-500'}`}>({wf.agent_status})</span>
                   </div>
