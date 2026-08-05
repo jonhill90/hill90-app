@@ -8,7 +8,10 @@ interface McpServer {
   name: string
   description: string | null
   transport: string
-  connection_config: Record<string, unknown>
+  // The API never returns the credential-bearing connection_config (app#369)
+  // — connection_display is a server-computed, non-secret summary of it:
+  // command + arg/env counts for stdio, origin-only for sse/http.
+  connection_display: { command?: string; args_count?: number; env_count?: number; url_origin?: string }
   is_platform: boolean
   agent_count: number
   created_by: string
@@ -39,22 +42,32 @@ export default function McpServersClient() {
   useEffect(() => { fetchServers() }, [fetchServers])
 
   const handleSubmit = async () => {
-    const connection_config: Record<string, unknown> = {}
-    if (form.transport === 'stdio') {
-      connection_config.command = form.command
-      if (form.args) connection_config.args = form.args.split(' ').filter(Boolean)
-      if (form.env) {
-        try { connection_config.env = JSON.parse(form.env) } catch { /* ignore */ }
-      }
-    } else {
-      connection_config.url = form.url
-    }
-
-    const body = {
+    // The connection fields start blank on edit (the API no longer sends
+    // the plaintext to prefill from) and are optional there: leaving them
+    // blank means "keep the stored config as-is", matching PUT's own
+    // COALESCE contract, which only re-encrypts when connection_config is
+    // present in the body at all. On create the fields are required (see
+    // the submit button's disabled condition below), so this always builds
+    // a config in that case.
+    const anchorFilled = form.transport === 'stdio' ? !!form.command : !!form.url
+    const body: Record<string, unknown> = {
       name: form.name,
       description: form.description || null,
       transport: form.transport,
-      connection_config,
+    }
+
+    if (!editingId || anchorFilled) {
+      const connection_config: Record<string, unknown> = {}
+      if (form.transport === 'stdio') {
+        connection_config.command = form.command
+        if (form.args) connection_config.args = form.args.split(' ').filter(Boolean)
+        if (form.env) {
+          try { connection_config.env = JSON.parse(form.env) } catch { /* ignore */ }
+        }
+      } else {
+        connection_config.url = form.url
+      }
+      body.connection_config = connection_config
     }
 
     const url = editingId ? `/api/mcp-servers/${editingId}` : '/api/mcp-servers'
@@ -75,15 +88,18 @@ export default function McpServersClient() {
   }
 
   const handleEdit = (s: McpServer) => {
-    const cfg = s.connection_config || {}
+    // The stored command/args/env/url can't be prefilled — the API never
+    // returns them (app#369). Leaving them blank and honest ("unchanged"
+    // placeholders below) beats prefilling blank-and-plausible: the latter
+    // silently overwrites the stored config with emptiness on save.
     setForm({
       name: s.name,
       description: s.description || '',
       transport: s.transport,
-      command: (cfg.command as string) || '',
-      args: Array.isArray(cfg.args) ? cfg.args.join(' ') : '',
-      env: cfg.env ? JSON.stringify(cfg.env) : '',
-      url: (cfg.url as string) || '',
+      command: '',
+      args: '',
+      env: '',
+      url: '',
     })
     setEditingId(s.id)
     setShowForm(true)
@@ -136,29 +152,45 @@ export default function McpServersClient() {
                 <div>
                   <label className="block text-sm text-mountain-400 mb-1">Command</label>
                   <input value={form.command} onChange={e => setForm(f => ({ ...f, command: e.target.value }))}
-                    className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none" placeholder="npx -y @modelcontextprotocol/server-github" />
+                    className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none"
+                    placeholder={editingId ? 'Leave blank to keep the current command unchanged' : 'npx -y @modelcontextprotocol/server-github'} />
                 </div>
                 <div>
                   <label className="block text-sm text-mountain-400 mb-1">Arguments (space-separated)</label>
                   <input value={form.args} onChange={e => setForm(f => ({ ...f, args: e.target.value }))}
-                    className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none" placeholder="--token ghp_xxx" />
+                    className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none"
+                    placeholder={editingId ? 'Leave blank to keep unchanged' : '--token ghp_xxx'} />
                 </div>
                 <div className="md:col-span-2">
                   <label className="block text-sm text-mountain-400 mb-1">Environment (JSON)</label>
                   <input value={form.env} onChange={e => setForm(f => ({ ...f, env: e.target.value }))}
-                    className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none" placeholder='{"GITHUB_TOKEN": "ghp_..."}' />
+                    className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none"
+                    placeholder={editingId ? 'Leave blank to keep unchanged' : '{"GITHUB_TOKEN": "ghp_..."}'} />
                 </div>
+                {editingId && (
+                  <p className="md:col-span-2 text-xs text-mountain-500 -mt-2">
+                    Command, arguments and environment are stored encrypted and not shown here. Fill in a command to
+                    replace the whole connection config, or leave all three blank to keep it as-is.
+                  </p>
+                )}
               </>
             ) : (
               <div className="md:col-span-2">
                 <label className="block text-sm text-mountain-400 mb-1">Server URL</label>
                 <input value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))}
-                  className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none" placeholder="http://localhost:3001/mcp" />
+                  className="w-full rounded border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono focus:border-brand-500 focus:outline-none"
+                  placeholder={editingId ? 'Leave blank to keep the current URL unchanged' : 'http://localhost:3001/mcp'} />
+                {editingId && (
+                  <p className="text-xs text-mountain-500 mt-1">
+                    Stored encrypted and not shown here. Fill in a URL to replace it, or leave blank to keep it as-is.
+                  </p>
+                )}
               </div>
             )}
           </div>
           <div className="flex items-center gap-2 mt-4">
-            <button onClick={handleSubmit} disabled={!form.name || (form.transport === 'stdio' ? !form.command : !form.url)}
+            <button onClick={handleSubmit}
+              disabled={!form.name || (!editingId && (form.transport === 'stdio' ? !form.command : !form.url))}
               className="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium disabled:opacity-50 cursor-pointer">
               {editingId ? 'Save Changes' : 'Create Server'}
             </button>
@@ -199,8 +231,12 @@ export default function McpServersClient() {
               {s.description && <p className="text-xs text-mountain-400 mb-1">{s.description}</p>}
               <div className="text-xs text-mountain-500 font-mono">
                 {s.transport === 'stdio'
-                  ? `${(s.connection_config as any).command || ''} ${((s.connection_config as any).args || []).join(' ')}`.trim()
-                  : (s.connection_config as any).url || ''
+                  ? [
+                      s.connection_display?.command,
+                      s.connection_display?.args_count ? `(${s.connection_display.args_count} arg${s.connection_display.args_count !== 1 ? 's' : ''} hidden)` : null,
+                      s.connection_display?.env_count ? `(${s.connection_display.env_count} env var${s.connection_display.env_count !== 1 ? 's' : ''} hidden)` : null,
+                    ].filter(Boolean).join(' ')
+                  : s.connection_display?.url_origin || ''
                 }
               </div>
             </div>
