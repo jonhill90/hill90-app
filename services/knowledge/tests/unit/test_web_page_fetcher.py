@@ -6,6 +6,7 @@ Tests cover the full Fetch Safety Contract:
 - Redirect re-validation on every hop
 - Error message information leak prevention
 - Response size limits (Content-Length header + streaming body enforcement)
+- Non-2xx HTTP status rejected before extraction (#437)
 """
 
 from __future__ import annotations

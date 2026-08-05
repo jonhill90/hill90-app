@@ -64,8 +64,11 @@ those two moved to GitHub — `AI-258` is now
   [hill90-docs](https://github.com/jonhill90/hill90-docs) as `ai-app/openapi.yaml`, so
   the two may already disagree and nothing checks it.
 - Tests live next to their services: `services/api` (jest), `services/ui`
-  (vitest), `services/mcp` and `services/agentbox` (pytest). End-to-end
-  Playwright suites are in `tests/e2e/` and require a running stack.
+  (vitest), `services/mcp`, `services/agentbox`, `services/ai` and
+  `services/knowledge` (pytest — this list omitted the last two for as long
+  as they've had test suites; all four are the `python` matrix job in
+  `ci.yml`). End-to-end Playwright suites are in `tests/e2e/` and require a
+  running stack.
 - Do not commit real secrets. `.env.example` files are tracked; `.env` is not.
 
 ## Dependency pins that are load-bearing
