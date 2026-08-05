@@ -419,7 +419,15 @@ router.delete('/:id', async (req: Request, res: Response) => {
     await client.query('COMMIT');
     res.json({ deleted: true });
   } catch (err) {
-    await client.query('ROLLBACK');
+    // app#487 follow-up: guarded, not rethrown. This route (unlike the
+    // identical connect/BEGIN/work/COMMIT/ROLLBACK-in-catch shape in
+    // chat.ts and discord-internal.ts) builds a specific response from
+    // `err` right here rather than rethrowing to app.ts's generic terminal
+    // handler — so if ROLLBACK itself throws (the connection already
+    // dropped), that must not replace `err` before the two lines below run.
+    // Postgres discards the transaction when the connection is released
+    // regardless, same reasoning db/pool.ts's withTransaction relies on.
+    await client.query('ROLLBACK').catch(() => { /* the connection may already be gone */ });
     console.error('[provider-connections] DELETE failed (rolled back):', err);
     res.status(500).json({ error: 'Failed to delete connection — cascade cleanup error' });
   } finally {

@@ -236,4 +236,40 @@ describe('Provider Connections — JSONB Cascade', () => {
     expect(rollbackCall).toBeDefined();
     expect(mockClientRelease).toHaveBeenCalled();
   });
+
+  // F6 (app#487 follow-up): the catch block's own ROLLBACK was unguarded,
+  // unlike the identical connect/BEGIN/work/COMMIT/ROLLBACK-in-catch shape
+  // in chat.ts and discord-internal.ts, both of which wrap their ROLLBACK
+  // in `.catch(() => {})` before rethrowing the original error. Matching
+  // that pattern here verbatim would have been WRONG: chat.ts's and
+  // discord-internal.ts's `throw txErr` only ever reaches app.ts's generic
+  // terminal handler, which always answers `{ error: 'Internal server
+  // error' }` regardless of what txErr says — those two routes never send
+  // a route-specific error to the client either way, guarded or not. This
+  // route is the one place in the three siblings that DOES construct a
+  // specific response from the original error, so the fix guards the
+  // ROLLBACK call itself (not a rethrow) so a second, unrelated fault
+  // (the connection already being gone) can't erase the first.
+  it('F6: a ROLLBACK that itself fails still surfaces the ORIGINAL cascade error, not a generic one', async () => {
+    const connId = 'conn-double-fault';
+    mockClientQuery.mockResolvedValueOnce({}); // BEGIN
+    mockClientQuery.mockResolvedValueOnce({ rows: [{ id: connId }] }); // DELETE
+    // Router model SELECT throws — this is the error that actually matters.
+    mockClientQuery.mockRejectedValueOnce(new Error('DB read failure'));
+    // ROLLBACK itself also fails — e.g. the connection already dropped.
+    mockClientQuery.mockRejectedValueOnce(new Error('connection terminated'));
+
+    const res = await request(app)
+      .delete(`/provider-connections/${connId}`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    // THE ASSERTION THAT MATTERS: the original, specific, actionable error
+    // reaches the response — not app.ts's generic terminal-handler message,
+    // and not a 500 with no body distinguishing this from any other fault.
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/cascade/i);
+    expect(res.body.error).not.toMatch(/Internal server error/i);
+
+    expect(mockClientRelease).toHaveBeenCalled();
+  });
 });
