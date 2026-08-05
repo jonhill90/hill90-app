@@ -80,8 +80,16 @@ class RevocationManager:
                     self.last_cleanup_success = time.time()
                     self.last_cleanup_error = None
                 except Exception as e:
-                    self.last_cleanup_error = str(e)
-                    logger.warning("revocation_cleanup_error", error=str(e))
+                    # Same fallback as usage_gaps.py/proxy.py's own
+                    # error-recording sites: some exception types (a bare
+                    # `raise SomeError()`) stringify to "", which would
+                    # otherwise record a blank, unreadable failure —
+                    # indistinguishable from the field never having been
+                    # set — at the exact moment an operator is checking
+                    # /health/ready to find out why cleanup keeps failing.
+                    reason = f"{e.__class__.__name__}: {e}"
+                    self.last_cleanup_error = reason
+                    logger.warning("revocation_cleanup_error", error=reason)
 
         self._cleanup_task = asyncio.create_task(_loop())
 
