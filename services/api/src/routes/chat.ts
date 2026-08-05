@@ -336,8 +336,13 @@ async function dispatchToAgents(opts: {
       const reason = result.status === 'rejected'
         ? String(result.reason)
         : (result.value.error || 'not accepted');
-      console.error(`[chat] Dispatch failed for agent=${agent.agent_id}: ${reason}`);
+      // Sanitize before this reaches ANY output — console.error included.
+      // Container stdout/stderr is shipped to Loki and retained there, so an
+      // unredacted token logged "just for diagnostics" ends up in a queryable
+      // log store, which is a worse leak surface than the DB column this was
+      // written to protect in the first place.
       const safeReason = sanitizeDispatchReason(reason, [agent.work_token]);
+      console.error(`[chat] Dispatch failed for agent=${agent.agent_id}: ${safeReason}`);
       try {
         await pool.query(
           `UPDATE chat_messages SET status = 'error', error_message = $2,

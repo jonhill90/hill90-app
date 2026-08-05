@@ -1047,7 +1047,9 @@ describe('Chat multi-agent dispatch', () => {
   // The fix must not trade a readable error for a leaked credential: the work
   // token is sent as a Bearer header on the request that just failed, so it
   // must never survive into a column a user can read.
-  it('POST /chat/threads/:id/messages redacts the agent work token from a persisted dispatch failure reason', async () => {
+  it('POST /chat/threads/:id/messages redacts the agent work token from both the persisted AND the logged dispatch failure reason', async () => {
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
     mockDispatchChatWork.mockResolvedValue({
       accepted: false,
       error: 'Agentbox returned 401: Authorization: Bearer super-secret-work-token-abc123 rejected',
@@ -1085,6 +1087,14 @@ describe('Chat multi-agent dispatch', () => {
     const params = updateCall![1] as unknown[];
     expect(String(params[1])).not.toContain('super-secret-work-token-abc123');
     expect(String(params[1])).toContain('[REDACTED]');
+
+    // Container stdout/stderr is shipped to and retained in Loki — a token
+    // that survives into console.error is a leak there too, not "just a log".
+    const loggedCalls = consoleErrorSpy.mock.calls.map(args => args.join(' '));
+    expect(loggedCalls.some(line => line.includes('super-secret-work-token-abc123'))).toBe(false);
+    expect(loggedCalls.some(line => line.includes('Dispatch failed for agent=alpha') && line.includes('[REDACTED]'))).toBe(true);
+
+    consoleErrorSpy.mockRestore();
   });
 
   // #364: agentbox's handle_chat() checks the same env var and, if unset,
