@@ -250,6 +250,22 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
 
     // Scope-Change Safety Contract (D2, D3, D8):
     // No elevated scope transition while tools_config is live in a running container.
+    //
+    // Scoped deliberately to the SCOPE TRANSITION, not to every tools_config
+    // write: a PUT that edits tools_config with oldScope === newScope on an
+    // already-elevated, already-assigned skill skips this guard entirely.
+    // Verified this is not a gap, not just assumed: a running agent's actual
+    // capabilities come from agent.yml, generated once at POST
+    // /agents/:id/start from the AGENT row's own tools_config snapshot
+    // (agent-files.ts), and agentbox's AgentConfig.from_file() reads that
+    // file exactly once at process start (server.py's __main__ block) —
+    // no refresh loop ever re-reads it. A skill's tools_config only reaches
+    // an agent's row via the resolve-on-save merge in POST/DELETE
+    // /agents/:id/skills (assign/unassign), and assignment itself is
+    // blocked with 409 while the agent is running. This PUT handler never
+    // touches agents.tools_config for an already-assigned agent at all. So
+    // an in-place skill edit cannot reach a running container through any
+    // code path that exists — the contract's name is accurate as scoped.
     const oldScope = existing[0].scope;
     const newScope = scope || oldScope;
     if (oldScope !== newScope && (isElevatedScope(oldScope) || isElevatedScope(newScope))) {

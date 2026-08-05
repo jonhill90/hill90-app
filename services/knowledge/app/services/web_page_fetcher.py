@@ -6,6 +6,13 @@ Implements the Fetch Safety Contract:
 - Manual redirect following with re-validation on every hop
 - Error messages omit resolved IP addresses
 - Response size limits
+- Non-2xx HTTP status rejected before extraction (#437)
+
+This list is the contract, not a description of it — #437 found and fixed a
+missing check (non-2xx status) here BECAUSE this docstring claimed
+completeness and stopped at five items. Keep this list and the code in the
+same commit as any future item; the artifact whose incompleteness caused
+that defect is this one.
 """
 
 from __future__ import annotations

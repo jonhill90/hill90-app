@@ -2,7 +2,8 @@
 
 Provides the POST /work endpoint contract for receiving work items.
 Routes work by type: 'chat' → chat handler, 'shell_command' → shell execution.
-Unknown types emit work_completed stub.
+Unknown types are rejected at the boundary: a work_failed event and HTTP 400
+(#222 finding 2) — not a work_completed stub, which is what this used to do.
 """
 
 from __future__ import annotations

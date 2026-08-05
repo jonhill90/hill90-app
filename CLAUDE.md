@@ -372,9 +372,14 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
   run in CI — 19 files, 98 tests, excluded because they need a live pgvector Postgres
   on `localhost:5432`... Giving that job a Postgres service container is the fix and
   has not been done." That fix had already happened.)*
-- CI (`ci.yml`) runs on every pull request — six suites: api (jest), ui
-  (vitest), pytest for ai/knowledge/mcp/agentbox. Deploy (`deploy.yml`) stays
-  `workflow_dispatch` only; a merge must not deploy.
+- CI (`ci.yml`) runs on every pull request — eight jobs, `Verified 2026-08-05`
+  against the workflow file directly: api (jest), ui (vitest), a pytest matrix
+  for ai/knowledge/mcp/agentbox, lint (eslint + ruff across api/ui/python),
+  services/cli (go) and services/cli (node), sql-identifiers, and scripts
+  (bats). "Six suites" undercounted this from the day `lint`, `cli`,
+  `cli-node` and `sql-identifiers` were added and never folded into the
+  count. Deploy (`deploy.yml`) stays `workflow_dispatch` only; a merge must
+  not deploy.
 - Backups live in **Hill90**: `bash scripts/backup.sh backup app-db`. Verified
   restorable 2026-07-29. Nothing in this repo backs anything up.
 - Stacks: `api ai knowledge mcp ui` — five, not six; `Verified 2026-08-04` against
