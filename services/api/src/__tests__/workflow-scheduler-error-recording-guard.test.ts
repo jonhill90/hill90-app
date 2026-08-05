@@ -1,3 +1,14 @@
+// MODULE SCOPE, not global. A test file with no top-level `import` or `export`
+// is a SCRIPT to TypeScript, so its top-level `const`s land in the global
+// scope and collide with any other such file's. This file and
+// workflow-scheduler-run.test.ts both declare `mockQuery` and `WORKFLOW`,
+// which broke `main`'s CI with TS2451 the moment this file merged (#465) —
+// and the repo has been here before, with a duplicate OLD_ENV.
+//
+// `export {}` makes this a module and scopes its declarations. It is load
+// bearing; deleting it re-breaks the build.
+export {}
+
 /**
  * workflow-scheduler.ts's own failure handler — code that only runs once a
  * scheduled workflow dispatch has already failed.

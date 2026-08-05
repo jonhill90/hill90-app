@@ -1,3 +1,9 @@
+// MODULE SCOPE, not global — see scripts/check-test-module-scope.js. Without
+// this, `mockQuery` and `WORKFLOW` below are global and collide with the
+// identically-named declarations in workflow-scheduler-error-recording-guard
+// .test.ts, which is what turned `main` red with TS2451. Load bearing.
+export {}
+
 /**
  * The scheduled-run path, called by a test for the first time.
  *
