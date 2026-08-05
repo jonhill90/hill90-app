@@ -163,7 +163,24 @@ export default function DashboardClient({ session }: { session: Session }) {
     )
     try {
       const res = await fetch('/api/services/health')
+      // Both guards route into the catch below, which already marks every
+      // service unhealthy — the right behaviour, written by whoever added
+      // that catch, and previously unreachable for the case that matters.
+      //
+      // res.ok first: a refusing route handler answers
+      // NextResponse.json({ error }, { status }), which is NOT ok but IS
+      // valid JSON, so res.json() succeeds and `services` is undefined.
+      // Assigning that to state (typed ServiceHealth[], never optional)
+      // makes the NEXT render throw on services.filter — outside this
+      // function, so this catch never saw it and the page went blank
+      // instead of showing red dots.
+      if (!res.ok) throw new Error(`health probe returned HTTP ${res.status}`)
       const data = await res.json()
+      // And the array check, because res.ok alone does not cover a 200 whose
+      // shape changed — the exact way #303 broke the knowledge graph.
+      if (!Array.isArray(data?.services)) {
+        throw new Error('health response carried no services array')
+      }
       setServices(data.services)
       setLastChecked(new Date().toLocaleTimeString())
     } catch {
