@@ -1,7 +1,7 @@
 /**
  * helpers/cron.ts's isValidCronExpression is the single validity check now
  * shared by routes/workflows.ts and routes/agents.ts's schedule route
- * (app#485) — before this, each had its own hand-rolled check that
+ * (app#487) — before this, each had its own hand-rolled check that
  * disagreed both with each other and with cron-parser, the library the
  * scheduler actually parses with at run time.
  */

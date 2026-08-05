@@ -95,7 +95,7 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       return;
     }
 
-    // app#485: this used to be a field-count check only ("5 or 6
+    // app#487: this used to be a field-count check only ("5 or 6
     // whitespace-separated fields"), which accepted out-of-range values
     // like "99 99 99 99 99" — the scheduler's own cron-parser call rejects
     // those, but by then the row was already written with next_run_at left

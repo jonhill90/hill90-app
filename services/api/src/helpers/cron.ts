@@ -8,7 +8,7 @@ import { CronExpressionParser } from 'cron-parser';
  * routes/workflows.ts and routes/agents.ts each had their own hand-rolled
  * check before this (a field-count check with no range validation, and a
  * regex permitting out-of-range values like `60` in the minute field),
- * neither of which agreed with what cron-parser itself accepts (app#485).
+ * neither of which agreed with what cron-parser itself accepts (app#487).
  */
 export function isValidCronExpression(expr: string): boolean {
   try {

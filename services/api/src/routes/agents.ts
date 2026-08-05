@@ -3521,7 +3521,7 @@ router.put('/:id/schedule', requireRole('user'), async (req: Request, res: Respo
     const { schedule_cron, schedule_enabled } = req.body;
 
     if (schedule_cron !== undefined && schedule_cron !== null && schedule_cron !== '') {
-      // app#485: the field-count-plus-regex check this replaced accepted
+      // app#487: the field-count-plus-regex check this replaced accepted
       // out-of-range values (e.g. "60" in the minute field, which this
       // route's own regex `[0-9,\-\/]+` matched but no cron implementation
       // treats as valid) and, unlike routes/workflows.ts's validator, never

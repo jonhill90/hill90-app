@@ -242,7 +242,7 @@ export async function executeWorkflow(pool: any, wf: any): Promise<void> {
   );
 }
 
-// Throws (does not swallow) on an unparseable cron — app#485. Its three
+// Throws (does not swallow) on an unparseable cron — app#487. Its three
 // callers above are each responsible for deciding what "the cron I was
 // given can't be parsed" means for their own moment (skip a tick, abort
 // initialization for this row, or note it after a run), and each now

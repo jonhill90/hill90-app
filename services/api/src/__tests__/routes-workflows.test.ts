@@ -174,7 +174,7 @@ describe('Workflows routes', () => {
       expect(res.body.error).toContain('cron');
     });
 
-    it('POSITIVE CONTROL (app#485): rejects a cron with valid field COUNT but out-of-range VALUES', async () => {
+    it('POSITIVE CONTROL (app#487): rejects a cron with valid field COUNT but out-of-range VALUES', async () => {
       // The pre-fix validator only checked "5 or 6 whitespace-separated
       // fields" — this string passes that check but every field is out of
       // range, and cron-parser (what the scheduler actually uses to compute

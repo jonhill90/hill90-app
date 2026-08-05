@@ -1,5 +1,5 @@
 /**
- * PUT /agents/:id/schedule (app#485). Before this fix, this route's own
+ * PUT /agents/:id/schedule (app#487). Before this fix, this route's own
  * hand-rolled `isValidCron` was a regex (`[0-9,\-\/]+`) that accepted any
  * digit sequence in each field — including out-of-range values like `60`
  * in the minute field, which cron-parser (used to compute
