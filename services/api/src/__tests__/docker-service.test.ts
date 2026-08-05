@@ -149,6 +149,112 @@ describe('createAndStartContainer metadata application', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Wrong-record sweep, services/helpers tier: a failed edge-network attach
+// was caught, logged, and swallowed — createAndStartContainer returned a
+// bare container ID either way, so the caller (routes/agents.ts's
+// POST /:id/start) marked the agent 'running' with no signal that a
+// host_docker/vps_system-scope agent is missing the network it needs
+// outbound internet access through. Unlike this file's own AKM/model-router
+// token failures (routes/agents.ts's `startWarnings`), nothing observed or
+// surfaced this one — and no reconciliation pass re-checks edge-network
+// membership either (agent-status-verification.ts's "unknown" tri-state
+// covers only whether a container's running/stopped status was verified).
+//
+// WHAT THIS TEST PROVES. That createAndStartContainer's return value lets
+// the caller tell "edge network attached" from "it didn't, silently" — not
+// that the caller (routes/agents.ts) surfaces it as a warning; that's a
+// separate route-level test.
+describe('createAndStartContainer edge-network attach failure is signalled, not swallowed', () => {
+  const mockStart = jest.fn().mockResolvedValue(undefined);
+  const mockInspect = jest.fn().mockResolvedValue({ Id: 'container-id-abc' });
+  const mockCreateContainer = jest.fn().mockResolvedValue({ start: mockStart, inspect: mockInspect });
+  const mockGetContainer = jest.fn().mockImplementation(() => {
+    const err: any = new Error('not found');
+    err.statusCode = 404;
+    throw err;
+  });
+  const mockConnect = jest.fn();
+  const mockGetNetwork = jest.fn().mockReturnValue({ connect: mockConnect });
+
+  beforeEach(() => {
+    jest.resetModules();
+    mockCreateContainer.mockClear();
+    mockStart.mockClear();
+    mockInspect.mockClear();
+    mockConnect.mockReset();
+    mockGetNetwork.mockClear();
+    process.env.AGENTBOX_CONFIG_HOST_PATH = '/opt/hill90/agentbox-configs';
+
+    jest.doMock('dockerode', () => {
+      return jest.fn().mockImplementation(() => ({
+        createContainer: mockCreateContainer,
+        getContainer: mockGetContainer,
+        getNetwork: mockGetNetwork,
+      }));
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.AGENTBOX_CONFIG_HOST_PATH;
+    jest.restoreAllMocks();
+  });
+
+  it('THE ASSERTION THAT MATTERS: a rejected edge-network connect is visible in the return value', async () => {
+    const { createAndStartContainer, AGENT_NETWORK } = require('../services/docker');
+    mockConnect.mockRejectedValueOnce(new Error('docker daemon hiccup'));
+
+    const result = await createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '1.0',
+      memLimit: '1g',
+      pidsLimit: 200,
+      network: AGENT_NETWORK,
+    });
+
+    // The container still started — this fix does not undo that, same
+    // reasoning as every other degraded-but-started path in this codebase.
+    expect(mockStart).toHaveBeenCalledTimes(1);
+    expect(result.containerId).toBe('container-id-abc');
+    // THE ASSERTION THAT MATTERS: the caller can tell.
+    expect(result.edgeNetworkAttachFailed).toBe(true);
+  });
+
+  it('TWIN: a successful edge-network connect reports no failure', async () => {
+    const { createAndStartContainer, AGENT_NETWORK } = require('../services/docker');
+    mockConnect.mockResolvedValueOnce(undefined);
+
+    const result = await createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '1.0',
+      memLimit: '1g',
+      pidsLimit: 200,
+      network: AGENT_NETWORK,
+    });
+
+    expect(result.containerId).toBe('container-id-abc');
+    expect(result.edgeNetworkAttachFailed).toBe(false);
+  });
+
+  it('a sandbox-scope agent (no edge network needed) never calls getNetwork at all', async () => {
+    const { createAndStartContainer, AGENT_SANDBOX_NETWORK } = require('../services/docker');
+
+    const result = await createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '1.0',
+      memLimit: '1g',
+      pidsLimit: 200,
+      network: AGENT_SANDBOX_NETWORK,
+    });
+
+    expect(mockGetNetwork).not.toHaveBeenCalled();
+    expect(result.edgeNetworkAttachFailed).toBe(false);
+  });
+});
+
 describe('resolveAgentNetwork', () => {
   const { resolveAgentNetwork, AGENT_NETWORK, AGENT_SANDBOX_NETWORK } = require('../services/docker');
 

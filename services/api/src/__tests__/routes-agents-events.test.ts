@@ -22,7 +22,7 @@ jest.mock('../db/pool', () => ({
 
 // Mock docker service
 jest.mock('../services/docker', () => ({
-  createAndStartContainer: jest.fn().mockResolvedValue('container-id-123'),
+  createAndStartContainer: jest.fn().mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false }),
   stopAndRemoveContainer: jest.fn().mockResolvedValue(undefined),
   inspectContainer: jest.fn().mockResolvedValue({ status: 'running', containerId: 'abc', health: 'healthy' }),
   getContainerLogs: jest.fn(),

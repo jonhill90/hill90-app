@@ -15,7 +15,7 @@ const TEST_ISSUER = 'https://auth.hill90.com/realms/hill90';
 
 // Mock pg pool
 const mockQuery = jest.fn();
-const mockCreateAndStartContainer = jest.fn().mockResolvedValue('container-id-123');
+const mockCreateAndStartContainer = jest.fn().mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
 const mockStopAndRemoveContainer = jest.fn().mockResolvedValue(undefined);
 const mockEnsureRequiredToolsInstalled = jest.fn().mockResolvedValue(undefined);
 jest.mock('../db/pool', () => ({
@@ -196,7 +196,7 @@ describe('Agent lifecycle routes', () => {
   beforeEach(() => {
     mockQuery.mockReset();
     mockCreateAndStartContainer.mockReset();
-    mockCreateAndStartContainer.mockResolvedValue('container-id-123');
+    mockCreateAndStartContainer.mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
     mockStopAndRemoveContainer.mockReset();
     mockStopAndRemoveContainer.mockResolvedValue(undefined);
     mockEnsureRequiredToolsInstalled.mockReset();
@@ -669,7 +669,7 @@ describe('Agent container profile wiring', () => {
   beforeEach(() => {
     mockQuery.mockReset();
     mockCreateAndStartContainer.mockReset();
-    mockCreateAndStartContainer.mockResolvedValue('container-id-123');
+    mockCreateAndStartContainer.mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
     mockEnsureRequiredToolsInstalled.mockReset();
     mockEnsureRequiredToolsInstalled.mockResolvedValue(undefined);
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
@@ -919,7 +919,7 @@ describe('Agent start — network resolution (S1-S4)', () => {
   beforeEach(() => {
     mockQuery.mockReset();
     mockCreateAndStartContainer.mockReset();
-    mockCreateAndStartContainer.mockResolvedValue('container-id-123');
+    mockCreateAndStartContainer.mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
     mockEnsureRequiredToolsInstalled.mockReset();
     mockEnsureRequiredToolsInstalled.mockResolvedValue(undefined);
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
