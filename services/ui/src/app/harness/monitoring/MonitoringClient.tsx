@@ -290,7 +290,10 @@ function UsageStats() {
           the real total. Number()-wrapped either way since Postgres numeric
           serializes as a string. */}
       <StatCard label="Cost" value={`$${Number(usage.total_cost_usd ?? 0).toFixed(4)}`} color="text-amber-400" isString />
-      <StatCard label="Models Used" value={usage.distinct_models ?? 0} color="text-blue-400" />
+      {/* #370: was reading a field the API never returned — always 0. Now
+          computed by usage.ts as COUNT(DISTINCT model_name), which — like
+          Requests/Tokens above — is a bigint and arrives as a string. */}
+      <StatCard label="Models Used" value={Number(usage.distinct_models ?? 0)} color="text-blue-400" />
     </div>
   )
 }

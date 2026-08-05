@@ -121,6 +121,7 @@ describe('Usage query routes', () => {
         total_output_tokens: '2000',
         total_tokens: '7000',
         total_cost_usd: '0.035000',
+        distinct_models: '3',
       }],
     });
     const res = await request(app)
@@ -129,6 +130,13 @@ describe('Usage query routes', () => {
     expect(res.status).toBe(200);
     expect(res.body.total_requests).toBe('10');
     expect(res.body.total_cost_usd).toBe('0.035000');
+    // #370: MonitoringClient's "Models Used" card reads this field; it was
+    // never in the SELECT, so the card always rendered 0 regardless of the
+    // real count. Assert the SQL computes it AND the response carries it —
+    // a fixture with the field but a query that never selected it would
+    // pass the second assertion for the wrong reason.
+    expect(res.body.distinct_models).toBe('3');
+    expect(mockQuery.mock.calls[0][0]).toContain('COUNT(DISTINCT model_name) AS distinct_models');
   });
 
   it('GET /usage filters by agent_id', async () => {

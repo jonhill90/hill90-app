@@ -140,6 +140,12 @@ router.get('/', async (req: Request, res: Response) => {
       res.json({ data: rows, group_by, completeness: await completenessFor(`${fromDate}T00:00:00+00:00`, to as string | undefined) });
     } else {
       // Summary (no grouping)
+      //
+      // distinct_models (#370): added because the Monitoring page's "Models
+      // Used" card was already reading it and getting undefined — the card
+      // was built against an API that was never finished. Ungrouped only:
+      // in the grouped branch above, group_by=model would make this
+      // trivially 1 per row, and nothing consumes it there.
       const { rows } = await getPool().query(
         `SELECT
            COUNT(*) AS total_requests,
@@ -147,7 +153,8 @@ router.get('/', async (req: Request, res: Response) => {
            COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
            COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
            COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens,
-           COALESCE(SUM(cost_usd), 0)::numeric(10,6) AS total_cost_usd
+           COALESCE(SUM(cost_usd), 0)::numeric(10,6) AS total_cost_usd,
+           COUNT(DISTINCT model_name) AS distinct_models
          FROM model_usage ${whereClause}`,
         params
       );
