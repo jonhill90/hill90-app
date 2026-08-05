@@ -84,6 +84,28 @@ beforeEach(() => {
 });
 afterEach(() => { jest.restoreAllMocks(); delete process.env.TERMINAL_ALLOWED_ORIGINS; });
 
+/**
+ * An exp that leaves at least `bufferSeconds` of real runway no matter where
+ * `nowMs` falls within its current second. See the 4002 test above for why
+ * Math.floor(nowMs/1000)+N (the previous approach) could not promise that.
+ */
+function expWithGuaranteedRunway(bufferSeconds: number, nowMs: number = Date.now()): number {
+  return Math.ceil(nowMs / 1000) + bufferSeconds;
+}
+
+/**
+ * The instant that minimizes Math.floor(nowMs/1000)+N's real runway: 1ms
+ * before nowMs's current second started, i.e. .999 of the PREVIOUS second.
+ * floor() only depends on which whole second a value falls in, so nudging
+ * within nowMs's OWN second changes nothing — floor(nowMs/1000) is already
+ * identical whichever millisecond of that second you pick. Landing one
+ * second earlier is what makes Math.floor(forced/1000)+1 resolve to nowMs's
+ * current second, i.e. an exp already at or before nowMs itself.
+ */
+function worstCaseInstantForOldFormula(nowMs: number = Date.now()): number {
+  return Math.floor(nowMs / 1000) * 1000 - 1;
+}
+
 /** Open a real client session and report how it ends. */
 function connect(): { ws: WebSocket; opened: Promise<void>; closed: Promise<{ code: number; reason: string }> } {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/chat/threads/${THREAD}/terminal`, [PROTO, 'hill90.bearer.tok'], {
@@ -98,8 +120,27 @@ function connect(): { ws: WebSocket; opened: Promise<void>; closed: Promise<{ co
 
 describe('4002 — the session does not outlive the credential', () => {
   it('closes with 4002 when the token expires, and says so', async () => {
-    // A credential with ~1.2s left. The proxy arms setTimeout(exp - now) at upgrade.
-    verdict = { sub: 'user-1', roles: [], exp: Math.floor(Date.now() / 1000) + 1 };
+    // Math.floor(Date.now()/1000)+1 (the previous formula here) discards the
+    // sub-second remainder before adding one whole second, so real runway
+    // was anywhere in (0, 1] depending on where "now" fell in its current
+    // second — on a loaded runner the credential could already be expired
+    // by the time terminal-proxy.ts's upgrade handler reads Date.now(), which
+    // 401s (correct behaviour for an expired token) before the handshake this
+    // test needs ever completes. That's a race in this fixture, not a
+    // product defect: verified directly against terminal-proxy.ts, which
+    // refuses with 401 whenever `expiresAtMs <= Date.now()` at upgrade time.
+    //
+    // expWithGuaranteedRunway uses Math.ceil instead: runway is always in
+    // [bufferSeconds, bufferSeconds + 1), never approaching 0 regardless of
+    // where "now" falls in its second. Forced here to the worst instant for
+    // the OLD formula (1ms before a second rolls over) so this test always
+    // exercises the boundary it exists to guard, rather than depending on
+    // being unlucky enough to hit it — the guarantee is proven every run.
+    verdict = {
+      sub: 'user-1',
+      roles: [],
+      exp: expWithGuaranteedRunway(2, worstCaseInstantForOldFormula()),
+    };
 
     const { opened, closed } = connect();
     await opened;                       // the handshake succeeded — the session is live
