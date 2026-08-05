@@ -117,4 +117,50 @@ describe('KnowledgeGraph — the live response contract', () => {
     expect(screen.queryByText(/Failed to load graph/)).not.toBeInTheDocument()
     expect(screen.queryByTestId('graph-truncated-notice')).not.toBeInTheDocument()
   })
+
+  // The force-directed rewrite (neural-map graph) skips creating a
+  // d3-force simulation entirely when there are zero nodes — asserted here
+  // because that path is exactly where a naive rewrite divides by zero
+  // (empty-array averages, angle = i / length) or leaves a timer spinning
+  // with nothing to settle. The estate's own corpus is three collections
+  // and seven sources today, but a fresh install or a wiped knowledge base
+  // starts here.
+  it('renders with zero nodes — no crash, no division by zero, no spinning timer', async () => {
+    mockGraph({
+      nodes: [],
+      edges: [],
+      total: { collections: 0, sources: 0, agents_with_knowledge: 0 },
+      shown: { collections: 0, sources: 0, agents_with_knowledge: 0 },
+      truncated: false,
+    })
+    await openGraphTab()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-counts')).toBeInTheDocument()
+    })
+    const counts = screen.getByTestId('graph-counts')
+    expect(counts).toHaveTextContent('0 collections')
+    expect(counts).toHaveTextContent('0 sources')
+    expect(counts).toHaveTextContent('0 agents')
+    expect(screen.getByTestId('knowledge-graph-canvas')).toBeInTheDocument()
+    expect(screen.queryByText(/Failed to load graph/)).not.toBeInTheDocument()
+  })
+
+  it('renders with exactly one node', async () => {
+    mockGraph({
+      nodes: [LIVE.nodes[0]],
+      edges: [],
+      total: { collections: 1, sources: 0, agents_with_knowledge: 0 },
+      shown: { collections: 1, sources: 0, agents_with_knowledge: 0 },
+      truncated: false,
+    })
+    await openGraphTab()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-counts')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('graph-counts')).toHaveTextContent('1 collections')
+    expect(screen.getByTestId('knowledge-graph-canvas')).toBeInTheDocument()
+    expect(screen.queryByText(/Failed to load graph/)).not.toBeInTheDocument()
+  })
 })
