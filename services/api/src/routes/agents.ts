@@ -2388,14 +2388,21 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
           res.end();
         });
 
-        stream.on('error', (err: Error) => {
+        stream.on('error', (err: unknown) => {
           clearPoll();
-          res.write(`event: error\ndata: ${err.message}\n\n`);
+          // `(err: Error)` above only claims the stream's 'error' event is
+          // typed — Node's Readable contract does not enforce that at
+          // runtime, and a non-Error emission's .message is undefined,
+          // which used to write the literal text "undefined" into the
+          // wire frame a client renders as the error message.
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          res.write(`event: error\ndata: ${errorMessage}\n\n`);
           res.end();
         });
 
       } catch (err: any) {
-        res.write(`event: error\ndata: ${err.message}\n\n`);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        res.write(`event: error\ndata: ${errorMessage}\n\n`);
         res.end();
       }
       return;
@@ -2686,13 +2693,17 @@ router.get('/:id/logs', requireRole('admin'), async (req: Request, res: Response
           res.end();
         });
 
-        stream.on('error', (err: Error) => {
-          res.write(`event: error\ndata: ${err.message}\n\n`);
+        stream.on('error', (err: unknown) => {
+          // Same gap as the /:id/events route's identical handler: the
+          // Readable contract's 'error' typing is not enforced at runtime.
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          res.write(`event: error\ndata: ${errorMessage}\n\n`);
           res.end();
         });
 
       } catch (err: any) {
-        res.write(`event: error\ndata: ${err.message}\n\n`);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        res.write(`event: error\ndata: ${errorMessage}\n\n`);
         res.end();
       }
       return;
