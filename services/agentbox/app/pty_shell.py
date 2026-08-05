@@ -14,6 +14,7 @@ import select
 import signal
 import struct
 import termios
+import time
 from dataclasses import dataclass
 from typing import Generator
 
@@ -22,6 +23,8 @@ TERM_COLS = 120
 TERM_ROWS = 40
 READ_SIZE = 4096
 SELECT_TIMEOUT = 0.1  # 100ms poll
+SIGTERM_GRACE_SECONDS = 2.0  # matches the comment this replaces; was never enforced
+SIGTERM_POLL_INTERVAL = 0.05
 
 
 @dataclass
@@ -115,15 +118,60 @@ def execute_streaming(
                         os.kill(pid, signal.SIGTERM)
                     except OSError:
                         pass
-                    # Give process 2s to terminate gracefully
-                    try:
-                        os.waitpid(pid, os.WNOHANG)
-                    except ChildProcessError:
-                        pass
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except OSError:
-                        pass
+                    # Actually give the process SIGTERM_GRACE_SECONDS to
+                    # terminate gracefully. The comment this replaces claimed
+                    # a 2s grace period but the single os.waitpid(pid,
+                    # os.WNOHANG) call below it was non-blocking — it
+                    # returned immediately whether or not the child had
+                    # exited, so SIGKILL always followed SIGTERM by
+                    # microseconds. A child that traps SIGTERM to flush
+                    # output or clean up never got the chance; it was killed
+                    # before its handler could run.
+                    # Drain interleaved with the reap poll, not after it: on
+                    # this platform's pty, output the child wrote is not
+                    # reliably still readable from master_fd once the child
+                    # has actually exited and its slave fd is gone — reaping
+                    # first and draining after can come back empty even
+                    # though the child's SIGTERM handler visibly ran.
+                    # Verified directly: interleaved reads captured the
+                    # handler's output every time; read-after-reap did not.
+                    reaped = False
+                    grace_deadline = time.monotonic() + SIGTERM_GRACE_SECONDS
+                    while time.monotonic() < grace_deadline:
+                        drain_ready, _, _ = select.select([master_fd], [], [], SIGTERM_POLL_INTERVAL)
+                        if drain_ready:
+                            try:
+                                data = os.read(master_fd, READ_SIZE)
+                                if data:
+                                    yield data
+                            except OSError:
+                                pass
+                        try:
+                            result_pid, _ = os.waitpid(pid, os.WNOHANG)
+                            if result_pid != 0:
+                                reaped = True
+                                break
+                        except ChildProcessError:
+                            reaped = True
+                            break
+                    if not reaped:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                    # One more pass in case data landed between the last
+                    # poll iteration and the reap/kill above.
+                    while True:
+                        drain_ready, _, _ = select.select([master_fd], [], [], 0.05)
+                        if not drain_ready:
+                            break
+                        try:
+                            data = os.read(master_fd, READ_SIZE)
+                            if not data:
+                                break
+                            yield data
+                        except OSError:
+                            break
                     timed_out = True
                     break
 
