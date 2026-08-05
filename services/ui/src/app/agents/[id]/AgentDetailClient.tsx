@@ -242,9 +242,13 @@ export default function AgentDetailClient({
       if (res.ok) {
         setAvatarVersion(v => v + 1)
         await fetchAgent()
+      } else {
+        const data = await res.json().catch(() => ({}))
+        alert(data.error || 'Failed to upload avatar')
       }
     } catch (err) {
       console.error('Failed to upload avatar:', err)
+      alert('Failed to upload avatar')
     } finally {
       setAvatarUploading(false)
       if (avatarInputRef.current) avatarInputRef.current.value = ''
