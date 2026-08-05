@@ -18,6 +18,14 @@ import SharedKnowledgeClient from '@/app/harness/shared-knowledge/SharedKnowledg
  *
  * Every fixture makes the two DISAGREE — 2 drawn, 40,000 in the corpus. One
  * where they match cannot detect the defect.
+ *
+ * WHAT THIS FILE CANNOT SEE, and did not, for the whole life of #303: these
+ * fixtures say `stats`, because they were written from the component. The
+ * knowledge service sends `total`. Every test here passed while the Graph tab
+ * threw on `data.stats.collections` in production. The fixtures are kept as
+ * they are — they are now the back-compat arm for a pre-#303 api — and the
+ * live shape is covered in `KnowledgeGraphContract.test.tsx`, whose fixtures
+ * are transcribed from a real response rather than composed here.
  */
 
 const GRAPH = {
