@@ -1600,23 +1600,43 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
       throw new Error(`Tool installation failed: ${installErr?.message || installErr}`);
     }
 
-    // Store AKM JTI + exp for revocation on stop
+    // Store AKM JTI + exp for revocation on stop.
+    //
+    // Best-effort, deliberately: the container is already running and
+    // work_token below is what actually matters for this start to succeed.
+    // Losing this JTI only means a later revoke-on-stop has nothing to
+    // revoke by name — the same risk POST /:id/stop already accepts and
+    // documents for a failed revoke call (#269). What must not happen is
+    // the reverse: this write throwing and aborting the whole start, which
+    // used to report status='error' while the container was genuinely
+    // running and work_token was never written — a wrong state nothing else
+    // corrects, since agent-reconciler.ts only restores Docker-observable
+    // fields (status, container_id, container_state), not work_token.
     if (akmJti) {
-      await getPool().query(
-        `UPDATE agents SET akm_jti = $1, akm_exp = $2, updated_at = NOW() WHERE id = $3`,
-        [akmJti, akmExp, req.params.id]
-      );
+      try {
+        await getPool().query(
+          `UPDATE agents SET akm_jti = $1, akm_exp = $2, updated_at = NOW() WHERE id = $3`,
+          [akmJti, akmExp, req.params.id]
+        );
+      } catch (err) {
+        console.error(`[agents] Failed to store AKM JTI for ${agent.agent_id}:`, err);
+      }
     }
 
-    // Store model-router JTI + exp + refresh hash for revocation on stop and token refresh
+    // Store model-router JTI + exp + refresh hash for revocation on stop and
+    // token refresh. Same best-effort reasoning as the AKM write above.
     if (modelRouterJti) {
       const mrRefreshHash = modelRouterRefreshSecret
         ? crypto.createHash('sha256').update(modelRouterRefreshSecret).digest('hex')
         : null;
-      await getPool().query(
-        `UPDATE agents SET model_router_jti = $1, model_router_exp = $2, model_router_refresh_hash = $3, updated_at = NOW() WHERE id = $4`,
-        [modelRouterJti, modelRouterExp, mrRefreshHash, req.params.id]
-      );
+      try {
+        await getPool().query(
+          `UPDATE agents SET model_router_jti = $1, model_router_exp = $2, model_router_refresh_hash = $3, updated_at = NOW() WHERE id = $4`,
+          [modelRouterJti, modelRouterExp, mrRefreshHash, req.params.id]
+        );
+      } catch (err) {
+        console.error(`[agents] Failed to store model-router JTI for ${agent.agent_id}:`, err);
+      }
     }
 
     // Update DB (store work_token for chat dispatch verification)
