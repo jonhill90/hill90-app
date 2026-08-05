@@ -3556,3 +3556,65 @@ contention alone does not explain.
 remaining population split into two shapes needing different instruments than anything
 tried so far. Full data, sample sizes, and the handoff note for whoever resumes this:
 [issue #432](https://github.com/jonhill90/hill90-app/issues/432).
+
+## Round twenty (2026-08-05, same day) — a real contradiction, and a permanent fix
+
+Root-caused ONE wrong-status instance completely, per the standing instruction to stop
+sampling and work one defect the way a production bug gets worked: `routes-agents.test.ts`,
+`GET /agents/:id/logs requires admin role`, expected 403, received 400 (batch A run 7).
+Chosen because it touches no database (confirmed via call-order logging) and the
+assertion is unambiguous.
+
+**Exhaustive code-path elimination (deterministic, no runs needed):** read every
+middleware and the complete handler for this exact route — `createRequireAuth` (5
+`res.status()` calls, all 401), `correlation-id.ts` (no status calls), `app.ts`'s global
+error handler (hardcodes 500 regardless of `err.status`), `router.use(dbHealthCheck)`
+(503 or `next()` only), `requireRole('admin')` (401 or 403 only), and the handler body
+itself (200/404/413/500 only). **It is architecturally impossible for this app's own
+code to answer this request with 400, under any input.**
+
+That directly contradicted the earlier "sibling-worker cross-talk ruled out" reading:
+the identity guard recorded zero violations for this exact run
+(`grep -c "RESPONSE IDENTITY VIOLATION" flakeA_run_7.log` = 0, confirmed from the raw
+log, not an artifact-collection gap). Both cannot be true if a real, impossible 400
+genuinely arrived. Resolving this by reading code, not by sampling further, is what
+this round is about.
+
+**The resolution: the guard had exactly the blind spot the estate keeps re-learning
+about.** `state.ID`/`state.stampValue` in `jest.identityguard.js` are WORKER constants —
+every response this worker's app writes carries the identical stamp, for ANY request,
+correct or misattributed. The guard can prove "not a foreign process" and "not a sibling
+worker" — and those rulings stand, unchanged — but it was never built to, and structurally
+cannot, prove "the right response for THIS request." A same-worker cross-request mixup
+is invisible to a worker-level stamp by construction, not by bug. An instrument that
+cannot observe a class of event looks identical to that class being absent.
+
+**Correcting the record, as instructed, rather than leaving the overstated version
+standing:** round eighteen's "sibling-worker/foreign-responder cross-talk ruled out" is
+correct AS SCOPED — foreign-worker cross-talk really is ruled out, the guard's own check
+proves that — but was over-read if taken as ruling out "cross-talk" generally. Same-worker
+cross-request mixup was never tested by that instrument and remained genuinely open. The
+properly-scoped test for it (this session's temporary `jest.reqcorrelate.js`, per-request
+nonce echo, positive-controlled) DID test it directly: 31 executions, 12 real wrong-status
+failures observed, zero mismatches — real evidence against it as a general mechanism, via
+the correct tool, not via the guard's silence.
+
+**Shipped a permanent fix rather than just a correction.** This was a real gap in an
+always-on, shipped instrument the whole investigation depends on trusting, so
+`jest.identityguard.js` now carries a third check alongside NO STAMP / FOREIGN STAMP:
+WRONG REQUEST — a per-request nonce, echoed by the server, checked by the client against
+what was actually sent for that exact connection. The existing worker-stamp checks are
+unchanged, not replaced; WRONG REQUEST only evaluates when the worker stamp already says
+"ours," so it adds a distinct class rather than overlapping the first two. Positive-
+controlled with a new committed arm (arm D in `identity-guard-control.test.ts`),
+failing-test-first verified (stashed the guard, confirmed arm D fails with the exact
+predicted `TypeError`, restored), and regression-checked with two full-suite runs (one
+clean 133/133, no false positives from the new check).
+
+**The original instance is still not mechanistically closed** — it did not recur during
+this session's instrumented runs, so there was no live recapture. It remains a genuine,
+narrowly-characterized anomaly: proven impossible by the code as read, not yet proven by
+what mechanism the 400 actually arrived. The guard now watches for exactly this going
+forward, permanently, in every run.
+
+Full writeup and the contradiction-resolution evidence: issue #432.
