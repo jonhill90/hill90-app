@@ -139,6 +139,32 @@ class TestWorkAuth:
         response = await runtime.handle_work(request)
         assert response.status_code == 401
 
+    # THE ASSERTION THAT MATTERS (cross-service sibling-drift sweep). The
+    # api's own chat-callback token check (services/api/src/routes/chat.ts)
+    # verifies the identical class of secret — a static Bearer token gating
+    # an internal endpoint on the trusted network — with crypto.timingSafeEqual,
+    # explicitly commented "(timing-safe)". This check compared the SAME kind
+    # of secret with plain Python `==`, which short-circuits on the first
+    # mismatching byte: a real timing side-channel on WORK_TOKEN. Functional
+    # correctness (right token accepted, wrong token 401) is unchanged by the
+    # fix and already covered by the tests above; this test is the only one
+    # that can tell "uses a constant-time comparison" from "happens to return
+    # the same true/false" — it asserts the code path actually calls
+    # hmac.compare_digest rather than inferring it from the outcome.
+    @pytest.mark.asyncio
+    async def test_auth_uses_constant_time_comparison(self, tmp_path):
+        import hmac as hmac_module
+        from unittest.mock import patch
+
+        runtime, _, _ = _make_runtime(tmp_path)
+        request = _MockRequest(
+            headers={"authorization": "Bearer test-token-123"},
+            body='{"type":"test"}',
+        )
+        with patch.object(hmac_module, "compare_digest", wraps=hmac_module.compare_digest) as spy:
+            await runtime.handle_work(request)
+        assert spy.called, "expected the token check to call hmac.compare_digest, not a plain =="
+
 
 class TestWorkValidation:
     @pytest.mark.asyncio

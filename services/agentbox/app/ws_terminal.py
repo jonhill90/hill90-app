@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hmac
 import json
 import logging
 import os
@@ -62,9 +63,12 @@ async def ws_terminal_handler(websocket: WebSocket, work_token: str | None) -> N
 
     Auth: Bearer token in query param ?token=<WORK_TOKEN>.
     """
-    # Auth check
+    # Auth check. Constant-time comparison (hmac.compare_digest) — same
+    # WORK_TOKEN secret and same reasoning as runtime.py's _check_auth: a
+    # plain `!=` is a timing side-channel, and the api's own comparable
+    # check (chat.ts, crypto.timingSafeEqual) is constant-time.
     token = websocket.query_params.get("token", "")
-    if not work_token or token != work_token:
+    if not work_token or not hmac.compare_digest(token, work_token):
         await websocket.close(code=4001, reason="unauthorized")
         return
 
