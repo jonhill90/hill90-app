@@ -15,6 +15,7 @@ import {
   updateKeycloakProfile,
 } from '../services/keycloak-account';
 import { getIssuer } from '../middleware/keycloak-config';
+import { auditLog } from '../helpers/audit';
 
 const router = Router();
 
@@ -93,6 +94,12 @@ router.patch('/', requireRole('user'), async (req: Request, res: Response) => {
 
 // POST /profile/avatar — upload avatar
 router.post('/avatar', requireRole('user'), upload.single('avatar'), async (req: Request, res: Response) => {
+  // avatarKey() mints a fresh random-UUID key every call — a retry after
+  // failure never reclaims or overwrites a previous attempt's key, it only
+  // creates another one. So once uploadAvatar() below succeeds, that S3
+  // object exists whether or not anything after it does; this is hoisted
+  // so both catches can name it if it ends up orphaned (#424).
+  let uploadedKey: string | null = null;
   try {
     const user = (req as any).user;
     const file = req.file;
@@ -118,6 +125,7 @@ router.post('/avatar', requireRole('user'), upload.single('avatar'), async (req:
     const oldKey = rows[0]?.avatar_key;
 
     await uploadAvatar(s3, key, processed);
+    uploadedKey = key;
 
     // Upsert profile row
     await getPool().query(
@@ -133,12 +141,27 @@ router.post('/avatar', requireRole('user'), upload.single('avatar'), async (req:
         await deleteAvatar(s3, oldKey);
       } catch (err) {
         console.error('[profile] Failed to delete old avatar:', err);
+        auditLog('avatar_old_key_cleanup_failed', user.sub, user.sub, 'human', {
+          stale_key: oldKey, error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
     res.json({ message: 'Avatar uploaded' });
   } catch (err) {
     console.error('[profile] POST avatar error:', err);
+    // uploadedKey set means the S3 object was created but something after
+    // it failed (the DB upsert) — that object now exists with nothing in
+    // the database referencing it. Audited rather than left as a
+    // console.error nobody reads, same "the audit stream doesn't depend
+    // on the row surviving" reasoning already applied elsewhere in this
+    // sweep (#424).
+    if (uploadedKey) {
+      const user = (req as any).user;
+      auditLog('avatar_upload_orphaned_object', user?.sub || 'unknown', user?.sub || 'unknown', 'human', {
+        orphaned_key: uploadedKey, error: err instanceof Error ? err.message : String(err),
+      });
+    }
     res.status(500).json({ error: 'Failed to upload avatar' });
   }
 });
@@ -158,12 +181,28 @@ router.delete('/avatar', requireRole('user'), async (req: Request, res: Response
     }
 
     const s3 = getS3Client();
-    await deleteAvatar(s3, rows[0].avatar_key);
+    const deletedKey = rows[0].avatar_key;
+    await deleteAvatar(s3, deletedKey);
 
-    await getPool().query(
-      'UPDATE user_profiles SET avatar_key = NULL, updated_at = NOW() WHERE keycloak_id = $1',
-      [user.sub]
-    );
+    try {
+      await getPool().query(
+        'UPDATE user_profiles SET avatar_key = NULL, updated_at = NOW() WHERE keycloak_id = $1',
+        [user.sub]
+      );
+    } catch (err) {
+      // The S3 object is genuinely gone by this point — a retry of this
+      // same route is safe (S3 DELETE is idempotent on an already-missing
+      // key) and will repeat this UPDATE until it lands. What this must
+      // not do is vanish into the generic catch below unaudited: the
+      // resulting dangling avatar_key is already surfaced honestly on the
+      // next GET /avatar (see that route's own comment), but that only
+      // shows THAT it went stale, not WHY (#424).
+      console.error('[profile] Avatar deleted from S3 but DB update failed:', err);
+      auditLog('avatar_delete_db_update_failed', user.sub, user.sub, 'human', {
+        deleted_key: deletedKey, error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
 
     res.json({ message: 'Avatar deleted' });
   } catch (err) {
