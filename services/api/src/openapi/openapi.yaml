@@ -2347,7 +2347,12 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: Graph data with collections, sources, and agent nodes
+          description: >
+            Graph data with collection, source, agent, and user nodes. `contains`
+            edges are the collection/source hierarchy; `retrieved` edges (#377)
+            connect an agent or user node to a source, derived from
+            shared_retrievals' recorded chunk_ids — the one edge type in this
+            graph that reflects actual usage rather than ingestion structure.
 
   /shared-knowledge/stats:
     get:
