@@ -1074,7 +1074,7 @@ async def knowledge_graph(
     scoped here — this service has no owner mapping for an agent_id, and
     whether showing "who searched what" is a leak or an intended
     transparency feature is a separate product/security judgment call, not
-    bundled into this fix (see the deferred issue this fix's PR links to).
+    bundled into this fix — filed as app#460 rather than decided here.
 
     MOVED HERE FROM THE API, which queried `shared_collections`,
     `shared_sources` and `knowledge_entries` through its own pool — tables that
