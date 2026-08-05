@@ -14,6 +14,12 @@ const TEST_ISSUER = 'https://auth.hill90.com/realms/hill90';
 const mockQuery = jest.fn();
 jest.mock('../db/pool', () => ({
   getPool: () => ({ query: mockQuery }),
+  // #424: POST / and PUT /:id now run their row write + skill_tools resync
+  // in one transaction. BEGIN/COMMIT/ROLLBACK are deliberately NOT routed
+  // through mockQuery — these suites queue responses in order, and three
+  // extra statements would consume them. Mirrors the same convention
+  // already used in half-writes.test.ts / delete-revokes-tokens.test.ts.
+  withTransaction: async (fn: (c: unknown) => Promise<unknown>) => fn({ query: mockQuery }),
 }));
 
 jest.mock('../services/docker', () => ({

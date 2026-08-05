@@ -47,8 +47,13 @@ const mockQuery = jest.fn();
 /** Statements issued on the transactional client, in order. */
 const clientCalls: string[] = [];
 
-jest.mock('../db/pool', () => ({
-  getPool: () => ({
+jest.mock('../db/pool', () => {
+  // Everything here stays lazy (nested inside functions only called at
+  // request time) rather than evaluated when the factory itself runs —
+  // jest hoists jest.mock calls above this file's own `const mockQuery =
+  // jest.fn()`, so a direct top-level reference to mockQuery here would
+  // hit it before initialization.
+  const getMockedPool = () => ({
     query: mockQuery,
     connect: async () => ({
       query: (sql: unknown, params?: unknown) => {
@@ -57,8 +62,29 @@ jest.mock('../db/pool', () => ({
       },
       release: () => {},
     }),
-  }),
-}));
+  });
+  return {
+    getPool: getMockedPool,
+    // Reimplemented rather than jest.requireActual'd: the real
+    // withTransaction closes over the real module's own getPool, which
+    // would reach for an actual Postgres connection — this instead runs
+    // the identical BEGIN/COMMIT/ROLLBACK control flow against the SAME
+    // mocked client above, so the skills.ts tests below exercise real
+    // transaction control flow, not a passthrough stub.
+    withTransaction: async (fn: (c: unknown) => Promise<unknown>) => {
+      const client = await getMockedPool().connect();
+      try {
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('COMMIT');
+        return result;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      }
+    },
+  };
+});
 
 jest.mock('../services/docker', () => ({
   createAndStartContainer: jest.fn(),
@@ -74,6 +100,12 @@ const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKe
 
 const userToken = jwt.sign(
   { sub: 'user-1', resource_access: { 'hill90-ui': { roles: ['user'] } } },
+  privateKey,
+  { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '1h' },
+);
+
+const adminToken = jwt.sign(
+  { sub: 'admin-1', resource_access: { 'hill90-ui': { roles: ['admin', 'user'] } } },
   privateKey,
   { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '1h' },
 );
@@ -353,5 +385,91 @@ describe('POST /chat/threads — the three inserts are one transaction', () => {
     // A guard rail: a transaction that never commits is a different bug.
     expect(clientCalls.filter((c) => c === 'COMMIT')).toHaveLength(1);
     expect(clientCalls).not.toContain('ROLLBACK');
+  });
+});
+
+describe('POST /skills and PUT /skills/:id — the row write and skill_tools resync are one transaction (#424)', () => {
+  it('POST /skills rolls back and does not commit when a tool_id is invalid, so no phantom skill row survives', async () => {
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(s)) return Promise.resolve({ rows: [] });
+      if (/INSERT INTO skills/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'skill-1', name: 'Broken Skill', scope: 'container_local' }] });
+      }
+      // setSkillTools's own validation: the tool_id does not exist.
+      if (/SELECT id FROM tools/.test(s)) return Promise.resolve({ rows: [] });
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app)
+      .post('/skills')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Broken Skill', tool_ids: ['nonexistent-tool'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Tool\(s\) not found/);
+
+    // Control flow, not storage — see the file header. With a mocked pool
+    // this is the strongest available statement: the INSERT INTO skills
+    // ran inside a transaction that was opened and abandoned, never
+    // committed, so no phantom skill row can survive it.
+    expect(clientCalls).toContain('BEGIN');
+    expect(clientCalls).toContain('ROLLBACK');
+    expect(clientCalls).not.toContain('COMMIT');
+  });
+
+  it('POST /skills commits once when tool_ids are all valid', async () => {
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(s)) return Promise.resolve({ rows: [] });
+      if (/INSERT INTO skills/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'skill-1', name: 'Good Skill', scope: 'container_local' }] });
+      }
+      if (/SELECT id FROM tools/.test(s)) return Promise.resolve({ rows: [{ id: 'tool-1' }] });
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app)
+      .post('/skills')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Good Skill', tool_ids: ['tool-1'] });
+
+    expect(res.status).toBe(201);
+    expect(clientCalls.filter((c) => c === 'COMMIT')).toHaveLength(1);
+    expect(clientCalls).not.toContain('ROLLBACK');
+  });
+
+  it('PUT /skills/:id rolls back and does not commit when the resync fails mid-loop, so the row update does not partially survive', async () => {
+    let deleteRan = false;
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(s)) return Promise.resolve({ rows: [] });
+      if (/SELECT id, scope FROM skills/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'skill-1', scope: 'container_local' }] });
+      }
+      if (/UPDATE skills SET/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'skill-1', name: 'Renamed', scope: 'container_local' }] });
+      }
+      if (/SELECT id FROM tools/.test(s)) return Promise.resolve({ rows: [{ id: 'tool-1' }, { id: 'tool-2' }] });
+      if (/DELETE FROM skill_tools/.test(s)) { deleteRan = true; return Promise.resolve({ rowCount: 1 }); }
+      // The step-two failure: the resync loop's insert, after the delete.
+      if (deleteRan && /INSERT INTO skill_tools/.test(s)) return Promise.reject(new Error('connection reset'));
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app)
+      .put('/skills/skill-1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Renamed', tool_ids: ['tool-1', 'tool-2'] });
+
+    expect(res.status).toBe(500);
+
+    // Before this fix, the UPDATE skills row and the DELETE FROM
+    // skill_tools had already committed independently by the time the
+    // INSERT loop failed — a reported 500 that had, in fact, partially
+    // succeeded and wiped existing tool associations along the way.
+    expect(clientCalls).toContain('BEGIN');
+    expect(clientCalls).toContain('ROLLBACK');
+    expect(clientCalls).not.toContain('COMMIT');
   });
 });

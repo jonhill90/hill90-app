@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { getPool } from '../db/pool';
+import type { PoolClient } from 'pg';
+import { getPool, withTransaction } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { isAdmin, isElevatedScope } from '../helpers/elevated-scope';
 import { auditLog } from '../helpers/audit';
@@ -45,12 +46,24 @@ async function fetchToolsForSkills(skillIds: string[]): Promise<Record<string, a
   return map;
 }
 
-// Helper: validate and insert skill_tools rows
-async function setSkillTools(skillId: string, toolIds: string[]): Promise<void> {
+// Helper: validate and insert skill_tools rows.
+//
+// Takes a `db` (a transaction client, never the pool directly) so its
+// DELETE + INSERTs run on the SAME connection as the skills row write in
+// its caller — see #424: this used to always call getPool().query()
+// itself, a fresh possibly-different connection on every call, so it was
+// never actually atomic with the row write around it despite running
+// right after it in the same function. On POST /, a bad tool_id thrown
+// here left the skills row already committed while the client was told
+// creation failed — a phantom skill on refresh. On PUT /:id, a transient
+// failure mid-loop (after the DELETE, partway through re-inserting) left
+// only some of the intended tool associations, while the row's other
+// fields committed fine.
+async function setSkillTools(db: PoolClient, skillId: string, toolIds: string[]): Promise<void> {
   if (!toolIds || toolIds.length === 0) return;
 
   // Validate all tool_ids exist
-  const { rows: existingTools } = await getPool().query(
+  const { rows: existingTools } = await db.query(
     'SELECT id FROM tools WHERE id = ANY($1::uuid[])',
     [toolIds]
   );
@@ -61,9 +74,9 @@ async function setSkillTools(skillId: string, toolIds: string[]): Promise<void> 
   }
 
   // Delete existing and insert new
-  await getPool().query('DELETE FROM skill_tools WHERE skill_id = $1', [skillId]);
+  await db.query('DELETE FROM skill_tools WHERE skill_id = $1', [skillId]);
   for (const toolId of toolIds) {
-    await getPool().query(
+    await db.query(
       'INSERT INTO skill_tools (skill_id, tool_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
       [skillId, toolId]
     );
@@ -177,19 +190,23 @@ router.post('/', requireRole('admin'), async (req: Request, res: Response) => {
       return;
     }
 
-    const { rows } = await getPool().query(
-      `INSERT INTO skills (name, description, tools_config, instructions_md, scope, is_platform, created_by)
-       VALUES ($1, $2, $3, $4, $5, false, NULL)
-       RETURNING *`,
-      [name, description || '', JSON.stringify(resolvedConfig), instructions_md || '', scope || 'container_local']
-    );
+    // The row write and its tool associations are one transaction (#424):
+    // either both land or neither does, so a rejected create (a bad
+    // tool_id) never leaves a phantom skill row behind.
+    const skill = await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO skills (name, description, tools_config, instructions_md, scope, is_platform, created_by)
+         VALUES ($1, $2, $3, $4, $5, false, NULL)
+         RETURNING *`,
+        [name, description || '', JSON.stringify(resolvedConfig), instructions_md || '', scope || 'container_local']
+      );
 
-    const skill = rows[0];
+      if (tool_ids && tool_ids.length > 0) {
+        await setSkillTools(client, rows[0].id, tool_ids);
+      }
 
-    // Insert skill_tools if provided
-    if (tool_ids && tool_ids.length > 0) {
-      await setSkillTools(skill.id, tool_ids);
-    }
+      return rows[0];
+    });
 
     const toolsMap = await fetchToolsForSkills([skill.id]);
     res.status(201).json({ ...skill, tools: toolsMap[skill.id] || [] });
@@ -277,25 +294,40 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
       }
     }
 
-    const { rows } = await getPool().query(
-      `UPDATE skills SET
-        name = COALESCE($1, name),
-        description = COALESCE($2, description),
-        tools_config = COALESCE($3, tools_config),
-        instructions_md = COALESCE($4, instructions_md),
-        scope = COALESCE($5, scope),
-        updated_at = NOW()
-       WHERE id = $6
-       RETURNING *`,
-      [
-        name || null,
-        description ?? null,
-        tools_config ? JSON.stringify(tools_config) : null,
-        instructions_md ?? null,
-        scope || null,
-        req.params.id,
-      ]
-    );
+    // The row update and its tool-association resync are one transaction
+    // (#424): either both land or neither does. Before this fix, a
+    // transient failure partway through the resync loop (after the DELETE,
+    // partway through re-inserting) left only some of the intended tool
+    // associations while the row's other fields had already committed —
+    // a reported 500 that had, in fact, partially succeeded and wiped
+    // existing associations along the way.
+    const row = await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE skills SET
+          name = COALESCE($1, name),
+          description = COALESCE($2, description),
+          tools_config = COALESCE($3, tools_config),
+          instructions_md = COALESCE($4, instructions_md),
+          scope = COALESCE($5, scope),
+          updated_at = NOW()
+         WHERE id = $6
+         RETURNING *`,
+        [
+          name || null,
+          description ?? null,
+          tools_config ? JSON.stringify(tools_config) : null,
+          instructions_md ?? null,
+          scope || null,
+          req.params.id,
+        ]
+      );
+
+      if (tool_ids !== undefined) {
+        await setSkillTools(client, rows[0].id, tool_ids);
+      }
+
+      return rows[0];
+    });
 
     // Audit scope change if scope actually changed
     if (oldScope !== newScope) {
@@ -303,13 +335,8 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
       auditLog('skill_scope_change', req.params.id, user.sub, 'human', { old_scope: oldScope, new_scope: newScope });
     }
 
-    // Update skill_tools if provided
-    if (tool_ids !== undefined) {
-      await setSkillTools(rows[0].id, tool_ids);
-    }
-
-    const toolsMap = await fetchToolsForSkills([rows[0].id]);
-    res.json({ ...rows[0], tools: toolsMap[rows[0].id] || [] });
+    const toolsMap = await fetchToolsForSkills([row.id]);
+    res.json({ ...row, tools: toolsMap[row.id] || [] });
   } catch (err: any) {
     if (err.validationError) {
       res.status(400).json({ error: err.message });
