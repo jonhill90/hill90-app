@@ -20,6 +20,12 @@ class RevocationManager:
     def __init__(self) -> None:
         self.revoked_jtis: set[str] = set()
         self._cleanup_task: asyncio.Task | None = None
+        # app#133's Python twin: the cleanup loop already survives a raising
+        # cycle (try/except in _loop below), but nothing distinguished
+        # "working" from "failing every cycle" from outside. These are the
+        # observable trace — a caller (e.g. /health/ready) reads them.
+        self.last_cleanup_success: float | None = None
+        self.last_cleanup_error: str | None = None
 
     async def preload(self, conn: Any) -> None:
         """Load all non-expired revoked JTIs from DB into memory."""
@@ -71,7 +77,10 @@ class RevocationManager:
                 try:
                     async with pool.acquire() as conn:
                         await self.cleanup_expired(conn)
+                    self.last_cleanup_success = time.time()
+                    self.last_cleanup_error = None
                 except Exception as e:
+                    self.last_cleanup_error = str(e)
                     logger.warning("revocation_cleanup_error", error=str(e))
 
         self._cleanup_task = asyncio.create_task(_loop())

@@ -236,12 +236,28 @@ async def readiness_check():
         except Exception:
             errors.append("litellm_unreachable")
 
+    # app#133's Python twin: the revocation cleanup loop already survives a
+    # raising cycle, but nothing distinguished "working" from "failing every
+    # cycle" from outside. Informational only — a stale cleanup doesn't block
+    # readiness, since it doesn't stop inference from being served.
+    background_loops = {
+        "revocation_cleanup": {
+            "last_success": revocation_manager.last_cleanup_success,
+            "last_error": revocation_manager.last_cleanup_error,
+        }
+    }
+
     if errors:
         return JSONResponse(
             status_code=503,
-            content={"status": "not_ready", "service": "ai", "errors": errors},
+            content={
+                "status": "not_ready",
+                "service": "ai",
+                "errors": errors,
+                "background_loops": background_loops,
+            },
         )
-    return {"status": "ready", "service": "ai"}
+    return {"status": "ready", "service": "ai", "background_loops": background_loops}
 
 
 @dataclass
