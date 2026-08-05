@@ -195,4 +195,64 @@ describe('WorkflowsClient', () => {
       expect(screen.queryByText('Webhook URL — shown once')).not.toBeInTheDocument()
     })
   })
+
+  // Write-path silent-failure sweep: a failed DELETE must not close the
+  // detail pane or clear runs as though the workflow were gone.
+  it('does not clear the selected workflow when deleting it fails', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
+      if (url === '/api/workflows') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_WORKFLOWS) })
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      if (url === '/api/workflows/wf-1' && opts?.method === 'DELETE') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'db unavailable' }) })
+      }
+      if (url.includes('/runs')) return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+
+    render(<WorkflowsClient />)
+    await waitFor(() => expect(screen.getByText('Daily Health Check')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('Daily Health Check'))
+    const deleteButtons = screen.getAllByTitle('Delete')
+    fireEvent.click(deleteButtons[0])
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('db unavailable')
+    })
+    // The workflow row and its detail pane must still be present — a failed
+    // delete must not act as though the workflow were already gone.
+    expect(screen.getByText('Daily Health Check')).toBeInTheDocument()
+  })
+
+  it('shows an error, not a silent no-op, when creating a workflow fails', async () => {
+    vi.stubGlobal('alert', vi.fn())
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
+      if (url === '/api/workflows' && (!opts || !opts.method)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_WORKFLOWS) })
+      }
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      if (url === '/api/workflows' && opts?.method === 'POST') {
+        return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'invalid cron expression' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+
+    render(<WorkflowsClient />)
+    await waitFor(() => expect(screen.getByText('Daily Health Check')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('New Workflow'))
+    fireEvent.change(screen.getByPlaceholderText('Daily Health Check'), { target: { value: 'Bad Workflow' } })
+    fireEvent.change(screen.getByDisplayValue('Select agent...'), { target: { value: 'a-1' } })
+    fireEvent.change(screen.getByPlaceholderText('Check all service health endpoints and report any issues...'), { target: { value: 'do the thing' } })
+    fireEvent.click(screen.getByText('Create Workflow'))
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('invalid cron expression')
+    })
+    // The form must still be open with the entered data — it must not look
+    // like the workflow was created.
+    expect(screen.getByText('Trigger')).toBeInTheDocument()
+  })
 })

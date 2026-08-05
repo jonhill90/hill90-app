@@ -24,6 +24,7 @@ export default function McpServersClient() {
   const [serversError, setServersError] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [formError, setFormError] = useState('')
   const [form, setForm] = useState({
     name: '', description: '', transport: 'stdio',
     command: '', args: '', env: '', url: ''
@@ -74,6 +75,7 @@ export default function McpServersClient() {
       body.connection_config = connection_config
     }
 
+    setFormError('')
     const url = editingId ? `/api/mcp-servers/${editingId}` : '/api/mcp-servers'
     const method = editingId ? 'PUT' : 'POST'
     const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -82,13 +84,21 @@ export default function McpServersClient() {
       setEditingId(null)
       setForm({ name: '', description: '', transport: 'stdio', command: '', args: '', env: '', url: '' })
       fetchServers()
+    } else {
+      const data = await res.json()
+      setFormError(data.error || (editingId ? 'Failed to update server' : 'Failed to create server'))
     }
   }
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this MCP server?')) return
-    await fetch(`/api/mcp-servers/${id}`, { method: 'DELETE' })
-    fetchServers()
+    const res = await fetch(`/api/mcp-servers/${id}`, { method: 'DELETE' })
+    if (res.ok) {
+      fetchServers()
+    } else {
+      const data = await res.json()
+      alert(data.error || 'Failed to delete server')
+    }
   }
 
   const handleEdit = (s: McpServer) => {
@@ -106,6 +116,7 @@ export default function McpServersClient() {
       url: '',
     })
     setEditingId(s.id)
+    setFormError('')
     setShowForm(true)
   }
 
@@ -121,7 +132,7 @@ export default function McpServersClient() {
           <p className="text-mountain-400 text-sm mt-1">Manage Model Context Protocol servers for agent tools</p>
         </div>
         <button
-          onClick={() => { setShowForm(true); setEditingId(null); setForm({ name: '', description: '', transport: 'stdio', command: '', args: '', env: '', url: '' }) }}
+          onClick={() => { setShowForm(true); setEditingId(null); setFormError(''); setForm({ name: '', description: '', transport: 'stdio', command: '', args: '', env: '', url: '' }) }}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium cursor-pointer"
         >
           <Plus className="w-4 h-4" /> Add Server
@@ -192,13 +203,16 @@ export default function McpServersClient() {
               </div>
             )}
           </div>
+          {formError && (
+            <p className="text-sm text-red-400 mt-3">{formError}</p>
+          )}
           <div className="flex items-center gap-2 mt-4">
             <button onClick={handleSubmit}
               disabled={!form.name || (!editingId && (form.transport === 'stdio' ? !form.command : !form.url))}
               className="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium disabled:opacity-50 cursor-pointer">
               {editingId ? 'Save Changes' : 'Create Server'}
             </button>
-            <button onClick={() => { setShowForm(false); setEditingId(null) }}
+            <button onClick={() => { setShowForm(false); setEditingId(null); setFormError('') }}
               className="px-4 py-2 rounded-lg text-mountain-400 hover:text-white text-sm cursor-pointer">Cancel</button>
           </div>
         </div>

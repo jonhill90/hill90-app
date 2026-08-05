@@ -142,6 +142,40 @@ describe('TaskBoardClient', () => {
     })
   })
 
+  it('shows an error toast, not a silent no-op, when creating a task fails', async () => {
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (typeof url === 'string' && url === '/api/tasks' && (!opts || opts.method === undefined)) {
+        return { ok: true, json: async () => MOCK_TASKS }
+      }
+      if (typeof url === 'string' && url === '/api/agents') {
+        return { ok: true, json: async () => MOCK_AGENTS }
+      }
+      if (typeof url === 'string' && url === '/api/tasks' && opts?.method === 'POST') {
+        return { ok: false, status: 500, json: async () => ({ error: 'db unavailable' }) }
+      }
+      return { ok: false, json: async () => ({}) }
+    })
+
+    render(<TaskBoardClient />)
+    await waitFor(() => {
+      expect(screen.getAllByTestId('task-card')).toHaveLength(3)
+    })
+
+    fireEvent.click(screen.getByText('+ New Task'))
+    const form = screen.getByTestId('new-task-form')
+    fireEvent.change(form.querySelector('select')!, { target: { value: 'bot-1' } })
+    fireEvent.change(screen.getByPlaceholderText('Task title...'), { target: { value: 'Broken Task' } })
+    fireEvent.click(screen.getByText('Create Task'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('toast-error')).toHaveTextContent('Could not create the task: db unavailable')
+    })
+    // The task list must not have gained a phantom entry, and the form must
+    // still be open with the entered data — it must not look like it saved.
+    expect(screen.getAllByTestId('task-card')).toHaveLength(3)
+    expect(screen.getByTestId('new-task-form')).toBeInTheDocument()
+  })
+
   it('T6: shows loading state', () => {
     mockFetch.mockImplementation(() => new Promise(() => {}))
 
