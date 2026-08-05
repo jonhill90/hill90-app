@@ -52,6 +52,7 @@ function mockFetch(overrides: Record<string, unknown> = {}) {
           total_requests: '42',
           total_tokens: '100000',
           total_cost_usd: '1.230000',
+          distinct_models: '2',
         }),
       })
     }
@@ -129,11 +130,28 @@ describe('MonitoringClient', () => {
   // with each other and neither was ever checked against the real API.
   it('renders the actual total_cost_usd from a string-numeric API response, not a stale $0.0000', async () => {
     vi.stubGlobal('fetch', mockFetch({
-      usage: { total_requests: '7', total_tokens: '9000', total_cost_usd: '4.560000' },
+      usage: { total_requests: '7', total_tokens: '9000', total_cost_usd: '4.560000', distinct_models: '1' },
     }))
     render(<MonitoringClient />)
     await waitFor(() => {
       expect(screen.getByText('$4.5600')).toBeInTheDocument()
     })
+  })
+
+  // #370, second half: "Models Used" read usage.distinct_models, a field the
+  // /api/usage summary never returned — silently 0 forever, same shape and
+  // same `?? 0` as the Cost bug above. Fixed by having usage.ts compute it
+  // (COUNT(DISTINCT model_name), a bigint — arrives as a string like every
+  // other count/sum in this response).
+  it('renders the actual distinct_models count from a string-numeric API response, not a stale 0', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      usage: { total_requests: '7', total_tokens: '9000', total_cost_usd: '4.560000', distinct_models: '3' },
+    }))
+    render(<MonitoringClient />)
+    await waitFor(() => {
+      expect(screen.getByText('Models Used')).toBeInTheDocument()
+    })
+    const card = screen.getByText('Models Used').closest('div')
+    expect(card).toHaveTextContent('3')
   })
 })
