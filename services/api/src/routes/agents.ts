@@ -885,19 +885,34 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     }
 
     const user = (req as any).user;
-    const { name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id, autonomy_level, tags, env_vars } = req.body;
+    const { name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id, autonomy_level, tags, env_vars_set, env_vars_unset } = req.body;
 
-    // Validate env_vars if provided
-    if (env_vars !== undefined) {
-      if (typeof env_vars !== 'object' || env_vars === null || Array.isArray(env_vars)) {
-        res.status(400).json({ error: 'env_vars must be an object with string key-value pairs' });
+    // app#374/#386 review: env_vars is a DELTA contract, not a whole-map
+    // replace — env_vars_set (keys to add/update) and env_vars_unset (keys
+    // to remove), never a full object the caller is expected to already
+    // hold. The whole-map shape this replaced required the client to read
+    // back the current plaintext to safely modify one key; once the value
+    // is encrypted and withheld (a few lines below), that read-back is
+    // impossible, and a client that could no longer see the old values but
+    // still sent a "complete" replacement would silently delete every key
+    // it didn't know about. A delta removes the read-modify-write race
+    // entirely rather than requiring the client to get it right.
+    if (env_vars_set !== undefined) {
+      if (typeof env_vars_set !== 'object' || env_vars_set === null || Array.isArray(env_vars_set)) {
+        res.status(400).json({ error: 'env_vars_set must be an object with string key-value pairs' });
         return;
       }
-      for (const [k, v] of Object.entries(env_vars)) {
+      for (const [k, v] of Object.entries(env_vars_set)) {
         if (typeof v !== 'string') {
-          res.status(400).json({ error: `env_vars["${k}"] must be a string` });
+          res.status(400).json({ error: `env_vars_set["${k}"] must be a string` });
           return;
         }
+      }
+    }
+    if (env_vars_unset !== undefined) {
+      if (!Array.isArray(env_vars_unset) || !env_vars_unset.every((k: unknown) => typeof k === 'string')) {
+        res.status(400).json({ error: 'env_vars_unset must be an array of key names' });
+        return;
       }
     }
 
@@ -1062,23 +1077,25 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const effectiveModelPolicyId = model_names !== undefined ? resolvedModelPolicyId : model_policy_id;
     const containerProfileProvided = container_profile_id !== undefined;
 
-    // app#374: MERGE, not replace. The client can no longer read back the
-    // existing values (they're never returned as plaintext — see GET /:id
-    // above), so a naive full-replace of an encrypted whole-blob would wipe
-    // every key the caller doesn't already know about the instant it's
-    // called with anything less than the complete current set — a real
-    // data-loss regression, not just a display one. A shallow merge on top
-    // of the decrypted current value tolerates a caller that only knows the
-    // key(s) it's touching. This endpoint cannot yet express REMOVING a key
-    // (an empty env_vars object is indistinguishable from "no change"); a
-    // caller wanting deletion needs a dedicated mechanism, not built here —
-    // this fix's scope is closing the plaintext exposure, not redesigning
-    // the write contract beyond what correctness (no data loss) requires.
+    // app#374/#386 review: DELTA applied server-side. The client can no
+    // longer read back the existing values (never returned as plaintext —
+    // see GET /:id above), so it never holds the full current set and
+    // never needs to — env_vars_unset removes keys, env_vars_set adds or
+    // updates keys, both applied on top of the decrypted current value.
+    // unset runs before set, so set wins for any key named in both (a
+    // client asking to both remove and set the same key in one call is a
+    // contradictory request; "the thing you just set is still set" is the
+    // less surprising resolution).
     let envVarsEncrypted: Buffer | null = null;
     let envVarsNonce: Buffer | null = null;
     let finalEnvVars: Record<string, string> = decryptEnvVars(existing[0].env_vars_encrypted, existing[0].env_vars_nonce);
-    if (env_vars !== undefined) {
-      finalEnvVars = { ...finalEnvVars, ...env_vars };
+    if (env_vars_set !== undefined || env_vars_unset !== undefined) {
+      if (Array.isArray(env_vars_unset)) {
+        for (const key of env_vars_unset) delete finalEnvVars[key];
+      }
+      if (env_vars_set !== undefined) {
+        finalEnvVars = { ...finalEnvVars, ...env_vars_set };
+      }
       const encrypted = encryptEnvVars(finalEnvVars);
       envVarsEncrypted = encrypted.encrypted;
       envVarsNonce = encrypted.nonce;
@@ -1128,8 +1145,8 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
 
     const updatedAgent = rows[0];
     // app#374: never the plaintext, never the ciphertext — only the key
-    // names, same as GET /:id. finalEnvVars already reflects the merge
-    // above whether or not env_vars was provided this call.
+    // names, same as GET /:id. finalEnvVars already reflects the delta
+    // above whether or not env_vars_set/env_vars_unset was provided.
     updatedAgent.env_var_keys = envVarKeys(finalEnvVars);
 
     // Update agent_skills if skill_ids provided

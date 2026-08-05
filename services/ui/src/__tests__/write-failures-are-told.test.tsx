@@ -58,7 +58,7 @@ describe('AgentClaudeConfig — the path with no res.ok check at all', () => {
     vi.stubGlobal('confirm', () => true)
     const { default: AgentClaudeConfig } = await import('@/app/agents/[id]/AgentClaudeConfig')
 
-    render(<AgentClaudeConfig agentId="a1" envVars={{ ANTHROPIC_API_KEY: 'sk-x' }} onUpdate={vi.fn()} />)
+    render(<AgentClaudeConfig agentId="a1" envVarKeys={['ANTHROPIC_API_KEY']} agentStatus="stopped" onUpdate={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: /remove/i }))
 
     const toast = await screen.findByTestId('toast-error')
@@ -73,7 +73,7 @@ describe('AgentClaudeConfig — the path with no res.ok check at all', () => {
     const onUpdate = vi.fn()
     const { default: AgentClaudeConfig } = await import('@/app/agents/[id]/AgentClaudeConfig')
 
-    render(<AgentClaudeConfig agentId="a1" envVars={{ ANTHROPIC_API_KEY: 'sk-x' }} onUpdate={onUpdate} />)
+    render(<AgentClaudeConfig agentId="a1" envVarKeys={['ANTHROPIC_API_KEY']} agentStatus="stopped" onUpdate={onUpdate} />)
     fireEvent.click(screen.getByRole('button', { name: /remove/i }))
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalled())
@@ -86,7 +86,7 @@ describe('AgentClaudeConfig — the path with no res.ok check at all', () => {
     const onUpdate = vi.fn()
     const { default: AgentClaudeConfig } = await import('@/app/agents/[id]/AgentClaudeConfig')
 
-    render(<AgentClaudeConfig agentId="a1" envVars={{ ANTHROPIC_API_KEY: 'sk-x' }} onUpdate={onUpdate} />)
+    render(<AgentClaudeConfig agentId="a1" envVarKeys={['ANTHROPIC_API_KEY']} agentStatus="stopped" onUpdate={onUpdate} />)
     fireEvent.click(screen.getByRole('button', { name: /remove/i }))
 
     await screen.findByTestId('toast-error')

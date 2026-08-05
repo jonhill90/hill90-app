@@ -8,20 +8,23 @@
  * Same worst tier mcp_servers.connection_config was before #372: plaintext
  * AND returned on read.
  *
- * WHY THE WRITE PATH ALSO CHANGED, NOT JUST READ. Unlike connection_config
- * (always supplied whole by the caller), env_vars is used as a key-value
- * store with individual add/remove operations — the UI's generic env-var
- * editor and the Claude-key form both read back the existing plaintext
- * client-side and re-send the full merged object. Once GET stops returning
- * plaintext, that client-side merge sees an empty object and a naive
- * full-replace on the server would silently wipe every OTHER key the very
- * first time anyone touches one — a data-loss regression, not just an
- * exposure one. PUT now merges server-side on top of the decrypted current
- * value instead of replacing it, so a caller that only knows the key it's
- * touching cannot destroy the others. This does not yet support deleting a
- * key via this endpoint (an empty patch is indistinguishable from "no
- * change") — that is a real limitation, left for the paired UI work, not
- * silently pretended away.
+ * WHY PUT IS A DELTA (env_vars_set / env_vars_unset), NOT A WHOLE-MAP
+ * REPLACE — corrected in review of the first version of this fix, which
+ * shipped a server-side MERGE on top of a full-object `env_vars` field.
+ * That merge WAS safe at the API layer in isolation, but #386's review
+ * caught what it missed: the two consumers, AgentClaudeConfig.tsx and
+ * AgentDetailClient.tsx, both do client-side read-modify-write —
+ * `{ ...(envVars || {}), KEY: val }` — spreading the CURRENT map before
+ * applying one change and PUTing the whole result. With env_vars withheld
+ * from every response (this fix's whole point), `envVars` is always
+ * undefined client-side, so `...(undefined || {})` is `{}` — every existing
+ * key silently vanishes from what the client sends, every single save,
+ * with a success toast. A server-side merge does not fix this: the CLIENT
+ * is the one deciding what "the new full set" is, and it has no way to know
+ * anymore. Only a contract where the client never needs the full set closes
+ * this — env_vars_set/env_vars_unset name only the key(s) being touched,
+ * applied by the server on top of whatever is already there. unset runs
+ * before set, so set wins if a key is named in both.
  */
 import request from 'supertest';
 import * as crypto from 'crypto';
@@ -87,7 +90,7 @@ function decryptStored(encrypted: Buffer, nonce: Buffer): Record<string, string>
   return JSON.parse(decryptProviderKey(encrypted, nonce, TEST_ENCRYPTION_KEY));
 }
 
-describe('agents.env_vars encryption (#374)', () => {
+describe('agents.env_vars encryption (#374/#386)', () => {
   beforeEach(() => {
     mockQuery.mockReset();
     process.env.PROVIDER_KEY_ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
@@ -122,7 +125,11 @@ describe('agents.env_vars encryption (#374)', () => {
     expect(bodyStr).not.toMatch(/"env_vars_encrypted"|"env_vars_nonce"|"env_vars"[:\s]/);
   });
 
-  it('PUT /agents/:id merges a new key into the decrypted existing set, without losing the other keys', async () => {
+  // THE ASSERTION THAT MATTERS. A client that sends ONLY the key it is
+  // adding — exactly what a delta-contract UI does, and exactly what the
+  // OLD whole-map UI was accidentally reduced to once env_vars stopped
+  // being returned — must not lose a sibling key it never mentioned.
+  it('PUT env_vars_set with ONE key does not drop a DIFFERENT existing key', async () => {
     const existing = encryptedEnvVarsColumns({ ANTHROPIC_API_KEY: 'sk-ant-existing-secret' });
     mockQuery
       .mockResolvedValueOnce({
@@ -139,11 +146,12 @@ describe('agents.env_vars encryption (#374)', () => {
     const res = await request(app)
       .put('/agents/uuid-1')
       .set('Authorization', `Bearer ${userToken}`)
-      .send({ env_vars: { LOG_LEVEL: 'debug' } });
+      // Deliberately NOT sending ANTHROPIC_API_KEY — a delta-contract client
+      // never sends keys it isn't touching. If this drops ANTHROPIC_API_KEY,
+      // the contract has failed at the one thing it exists to prevent.
+      .send({ env_vars_set: { LOG_LEVEL: 'debug' } });
 
     expect(res.status).toBe(200);
-    // The response never carries plaintext, only key names — and BOTH keys,
-    // proving the merge kept the one this request never mentioned.
     expect(res.body.env_var_keys).toEqual(['ANTHROPIC_API_KEY', 'LOG_LEVEL']);
     expect(JSON.stringify(res.body)).not.toContain('sk-ant-existing-secret');
 
@@ -160,7 +168,60 @@ describe('agents.env_vars encryption (#374)', () => {
     expect(stored).toEqual({ ANTHROPIC_API_KEY: 'sk-ant-existing-secret', LOG_LEVEL: 'debug' });
   });
 
-  it('PUT /agents/:id without env_vars in the body leaves the encrypted columns untouched (COALESCE, not overwritten with null)', async () => {
+  it('PUT env_vars_unset removes exactly the named key and leaves the others', async () => {
+    const existing = encryptedEnvVarsColumns({ ANTHROPIC_API_KEY: 'sk-ant-keep-me', LOG_LEVEL: 'debug' });
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', status: 'stopped', created_by: 'regular-user', model_policy_id: null, ...existing }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', name: 'Test', status: 'stopped', created_by: 'regular-user' }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ env_vars_unset: ['LOG_LEVEL'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.env_var_keys).toEqual(['ANTHROPIC_API_KEY']);
+
+    const updateCall = mockQuery.mock.calls.find(
+      (c: any[]) => typeof c[0] === 'string' && c[0].includes('UPDATE agents SET')
+    );
+    const params = updateCall![1] as unknown[];
+    const stored = decryptStored(params[14] as Buffer, params[15] as Buffer);
+    expect(stored).toEqual({ ANTHROPIC_API_KEY: 'sk-ant-keep-me' });
+  });
+
+  it('env_vars_unset for a key that is also in env_vars_set: set wins (unset applied first)', async () => {
+    const existing = encryptedEnvVarsColumns({ ANTHROPIC_API_KEY: 'sk-ant-old' });
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', status: 'stopped', created_by: 'regular-user', model_policy_id: null, ...existing }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', name: 'Test', status: 'stopped', created_by: 'regular-user' }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ env_vars_set: { ANTHROPIC_API_KEY: 'sk-ant-new' }, env_vars_unset: ['ANTHROPIC_API_KEY'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.env_var_keys).toEqual(['ANTHROPIC_API_KEY']);
+    const updateCall = mockQuery.mock.calls.find(
+      (c: any[]) => typeof c[0] === 'string' && c[0].includes('UPDATE agents SET')
+    );
+    const params = updateCall![1] as unknown[];
+    const stored = decryptStored(params[14] as Buffer, params[15] as Buffer);
+    expect(stored).toEqual({ ANTHROPIC_API_KEY: 'sk-ant-new' });
+  });
+
+  it('PUT without env_vars_set or env_vars_unset in the body leaves the encrypted columns untouched (COALESCE, not overwritten with null)', async () => {
     const existing = encryptedEnvVarsColumns({ ANTHROPIC_API_KEY: 'sk-ant-unchanged' });
     mockQuery
       .mockResolvedValueOnce({
@@ -174,7 +235,7 @@ describe('agents.env_vars encryption (#374)', () => {
     const res = await request(app)
       .put('/agents/uuid-1')
       .set('Authorization', `Bearer ${userToken}`)
-      .send({ name: 'Renamed' }); // env_vars not mentioned at all
+      .send({ name: 'Renamed' }); // env_vars_set/env_vars_unset not mentioned at all
 
     expect(res.status).toBe(200);
     expect(res.body.env_var_keys).toEqual(['ANTHROPIC_API_KEY']);
@@ -188,17 +249,48 @@ describe('agents.env_vars encryption (#374)', () => {
     expect(params[14]).toBeNull();
     expect(params[15]).toBeNull();
   });
+
+  it('rejects a non-string value in env_vars_set', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'uuid-1', agent_id: 'test-agent', status: 'stopped', created_by: 'regular-user', model_policy_id: null }],
+    });
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ env_vars_set: { ANTHROPIC_API_KEY: 12345 } });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects env_vars_unset that is not an array of strings', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'uuid-1', agent_id: 'test-agent', status: 'stopped', created_by: 'regular-user', model_policy_id: null }],
+    });
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ env_vars_unset: 'ANTHROPIC_API_KEY' });
+    expect(res.status).toBe(400);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // POSITIVE CONTROL, run and captured before this shipped — see the PR that
 // added this file for the real failing output. Kept here as a permanent,
-// always-green record of what the mechanism checks; the red state itself was
-// produced by temporarily reverting the exclusion and is not committed.
+// always-green record of what the mechanism checks; the red states
+// themselves were produced by temporarily reverting the fix and are not
+// committed.
 // ---------------------------------------------------------------------------
 describe('CONTROL: proves the exclusion assertion actually has teeth', () => {
   it('a response that DID carry the raw value would fail the never-contains assertion', () => {
     const leakyResponseBody = { id: 'uuid-1', env_vars: { ANTHROPIC_API_KEY: 'sk-ant-should-not-be-here' } };
     expect(JSON.stringify(leakyResponseBody)).toContain('sk-ant-should-not-be-here');
+  });
+
+  it('a whole-map replace that dropped a sibling key would fail the "does not drop" assertion', () => {
+    // What the OLD (pre-#386-review) shape would have stored: the client,
+    // unable to read back ANTHROPIC_API_KEY, sends only LOG_LEVEL as if it
+    // were the complete set, and a naive replace stores exactly that.
+    const wholeMapReplaceResult = { LOG_LEVEL: 'debug' };
+    expect(wholeMapReplaceResult).not.toEqual({ ANTHROPIC_API_KEY: 'sk-ant-existing-secret', LOG_LEVEL: 'debug' });
   });
 });
