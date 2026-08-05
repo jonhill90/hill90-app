@@ -51,6 +51,13 @@ jest.mock('../services/notifications', () => ({
 const mockGenerateToken = jest.fn();
 jest.mock('../services/model-router-token', () => ({
   isModelRouterConfigured: () => true,
+  // #459: the handler now VERIFIES this token instead of base64-decoding it.
+  // Mocked here for the same reason generateAgentModelRouterToken already is —
+  // this suite is about escalation when a token goes unrenewed, not about token
+  // authenticity, and it hands the route hand-built fixtures. The real
+  // verifier is exercised in model-router-refresh-token-verification.test.ts.
+  verifyModelRouterToken: (token: string) =>
+    JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()),
   generateAgentModelRouterToken: (...args: unknown[]) => mockGenerateToken(...args),
 }));
 

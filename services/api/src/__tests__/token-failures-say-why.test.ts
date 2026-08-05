@@ -40,7 +40,28 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLen
 // so a beforeEach assignment would arrive after the module had already decided the
 // feature was unconfigured (and every request would 503 instead of reaching the code
 // under test — which is what the first run of this suite actually did).
-process.env.MODEL_ROUTER_SIGNING_PRIVATE_KEY = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+// #459: the model-router key must be Ed25519, because that is what production
+// uses and what the handler now VERIFIES against. It was an RSA key here only
+// because nothing checked — the fixtures below were RS256 tokens the service
+// could never have issued, and they passed because the handler base64-decoded
+// the payload and trusted it. The RSA pair above stays: it is the KEYCLOAK
+// signing key for the auth-middleware tests further down, a different subject.
+const mrKeys = crypto.generateKeyPairSync('ed25519');
+process.env.MODEL_ROUTER_SIGNING_PRIVATE_KEY = mrKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+
+/** A genuine model-router token: EdDSA, this service's key, real iss/aud. */
+function mintModelRouterToken(claims: Record<string, unknown>): string {
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const header = b64({ alg: 'EdDSA', typ: 'JWT' });
+  const payload = b64({
+    iss: 'hill90-api',
+    aud: 'hill90-model-router',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    ...claims,
+  });
+  const sig = crypto.sign(null, Buffer.from(`${header}.${payload}`), mrKeys.privateKey);
+  return `${header}.${payload}.${sig.toString('base64url')}`;
+}
 const { createApp } = require('../app');
 const TEST_ISSUER = 'https://test-issuer.example.com/realms/platform';
 const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
@@ -83,20 +104,20 @@ describe('POST /internal/model-router/refresh-token', () => {
   });
 
   it('a token with no sub is recorded as that, not as "invalid"', async () => {
-    const noSub = jwt.sign({ foo: 'bar' }, privateKey, { algorithm: 'RS256', expiresIn: '1h' });
+    const noSub = mintModelRouterToken({ foo: 'bar' });
     const res = await post(noSub);
     expect(res.status).toBe(401);
     expect(warned.join('\n')).toMatch(/sub/i);
   });
 
   it('never writes the token into the record', async () => {
-    const secret = jwt.sign({ sub: 'agent-1' }, privateKey, { algorithm: 'RS256', expiresIn: '1h' });
+    const secret = mintModelRouterToken({ sub: 'agent-1' });
     await post(`${secret}`.slice(0, 40));
     expect(warned.join('\n')).not.toContain(secret.slice(0, 40));
   });
 
   it('POSITIVE CONTROL: a well-formed token gets PAST the identity step', async () => {
-    const good = jwt.sign({ sub: 'agent-1' }, privateKey, { algorithm: 'RS256', expiresIn: '1h' });
+    const good = mintModelRouterToken({ sub: 'agent-1' });
     const res = await post(good);
 
     // It still ends in 401 — no agent row matches this refresh secret in the fake —

@@ -12,7 +12,7 @@
 import * as crypto from 'crypto';
 import { Request, Response } from 'express';
 import { getPool } from '../db/pool';
-import { generateAgentModelRouterToken, isModelRouterConfigured } from './model-router-token';
+import { generateAgentModelRouterToken, isModelRouterConfigured, verifyModelRouterToken } from './model-router-token';
 import { revokeAgentModelRouterToken } from './model-router-revoke';
 import { auditLog } from '../helpers/audit';
 
@@ -46,11 +46,23 @@ export async function modelRouterRefreshHandler(req: Request, res: Response): Pr
   const token = authHeader.slice(7);
   let sub: string;
   try {
-    // Decode JWT payload without verification (token may be expired)
-    const parts = token.split('.');
-    if (parts.length !== 3) throw new Error('malformed JWT: expected three segments');
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-    sub = payload.sub;
+    // VERIFIED, not merely decoded. This was a bare base64 decode of the
+    // payload — no signature, no alg, no iss/aud — so `sub` was whatever the
+    // caller wrote, and the comment said so ("the identity the caller
+    // claimed, not verified").
+    //
+    // That was never the authorization boundary: the refresh-secret hash
+    // match below is, and it still is. This is defence in depth, and it
+    // closes an unforced asymmetry — the knowledge service's equivalent
+    // refresh endpoint has always called the real verifier with
+    // `allow_expired=True`, and this file's own header says it mirrors that
+    // pattern. It did not. (#459)
+    //
+    // allowExpired is the whole point of a refresh flow and disables the
+    // `exp` check ONLY; signature, algorithm, issuer and audience are all
+    // enforced.
+    const payload = verifyModelRouterToken(token, { allowExpired: true });
+    sub = typeof payload.sub === 'string' ? payload.sub : '';
     if (!sub) throw new Error('no sub claim in the token payload');
   } catch (err) {
     // A REFUSAL SAYS WHY. This was `catch { … 'invalid token' }` with no binding and
