@@ -1,0 +1,42 @@
+-- app#374 tier two: agent_webhooks.secret stored the HMAC key used to sign
+-- outbound webhook deliveries (services/api/src/services/webhook-dispatch.ts)
+-- in plain VARCHAR(128), at rest. Unlike workflows.webhook_token (#341,
+-- hashed — only ever compared) this value must be recovered in PLAINTEXT to
+-- sign with crypto.createHmac, confirmed against the actual dispatch code,
+-- not assumed from the shape of the fix that preceded it — so encryption is
+-- the correct pattern here, the same as provider_connections.api_key and
+-- mcp_servers.connection_config (#372), not hashing.
+--
+-- The read path was already correctly defended before this migration: the
+-- only SELECT naming `secret` is webhook-dispatch.ts's own server-side
+-- query; every client-facing route (GET list, POST...RETURNING) uses an
+-- explicit column list that omits it, proven by #376's projection test with
+-- three control arms. This migration closes the remaining gap — at rest,
+-- not on read.
+--
+-- No consumer round-trips this value — checked before writing this
+-- migration, not assumed, because that is the trap #386 nearly shipped for
+-- agents.env_vars. There is no PUT/PATCH route for agent_webhooks at all
+-- (only GET list, POST create, DELETE), and AgentWebhooks.tsx never
+-- references `secret` in any form. The only write path is POST, which
+-- always takes a fresh value directly from the request body, never derived
+-- from a prior read. So there is no read-modify-write shape to break here,
+-- unlike env_vars — the API contract does not need to change, only storage.
+--
+-- agent_webhooks has ZERO rows in production (confirmed before this
+-- migration was written) — no ciphertext migration, no dual-read window,
+-- no rollback complexity, and the empty table is why NOT NULL is not
+-- needed on the new columns either: `secret` was itself nullable (a
+-- webhook can have no secret, meaning no signing), and the encrypted
+-- columns preserve that — both NULL together means "no secret configured",
+-- exactly as an absent `secret` did before.
+--
+-- The DROP followed by two ADD COLUMN is safe even hypothetically on a
+-- non-empty table for the same reason as migrations 067/069: migrate.ts:61
+-- wraps each migration file in BEGIN/COMMIT, so a failure partway through
+-- rolls back the whole file atomically. The safety is the runner's, not
+-- this SQL's — worth stating because the next reader of this file cannot
+-- see migrate.ts.
+ALTER TABLE agent_webhooks DROP COLUMN secret;
+ALTER TABLE agent_webhooks ADD COLUMN secret_encrypted BYTEA;
+ALTER TABLE agent_webhooks ADD COLUMN secret_nonce BYTEA;
