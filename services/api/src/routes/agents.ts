@@ -1256,12 +1256,28 @@ router.delete('/:id', requireRole('admin'), async (req: Request, res: Response) 
       }
     }
 
-    // Stop container if running
+    // Stop container if running.
+    //
+    // Non-blocking, same pre-existing convention as every other cleanup step
+    // in this route (#340's own comment above) — a failure here must not
+    // block the delete the admin asked for. But unlike the token revokes
+    // above it, this failure was ONLY console.error'd, never audited — the
+    // one cleanup step in this function where failure leaves a REAL running
+    // container with, after the DELETE below, NO row anywhere pointing back
+    // to it. #340's reasoning for the token revokes applies identically
+    // here: "the audit stream doesn't depend on the row surviving." This is
+    // that same telling-the-truth fix, not a behavior change — the delete
+    // still proceeds exactly as before on a stop failure.
     if (agent.status === 'running') {
       try {
         await stopAndRemoveContainer(agent.agent_id);
       } catch (err) {
         console.error(`[agents] Failed to stop container for ${agent.agent_id}:`, err);
+        auditLog('container_stop_failed', agent.agent_id, user.sub, 'human', {
+          principal_id: agent.id, container_id: agent.container_id, reason: 'delete',
+          owner_sub: agent.created_by, correlation_id: deleteCorrelationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -1592,12 +1608,27 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
     try {
       await ensureRequiredToolsInstalled(agent.id, agent.agent_id);
     } catch (installErr: any) {
+      let cleanupFailed = false;
       try {
         await stopAndRemoveContainer(agent.agent_id);
       } catch (cleanupErr) {
+        cleanupFailed = true;
         console.error('[agents] Cleanup failed after tool install error:', cleanupErr);
       }
-      throw new Error(`Tool installation failed: ${installErr?.message || installErr}`);
+      const detail = `Tool installation failed: ${installErr?.message || installErr}`;
+      // When cleanup ALSO fails, the outer catch below writes this message
+      // straight into the row's error_message — the row that is the only
+      // trace this request leaves, since the final UPDATE that sets
+      // container_id never runs. Naming the container here is the
+      // difference between an operator reading "why is this agent in
+      // error" and actually finding the real, still-running container that
+      // caused it, versus having to already know the agent-<agent_id>
+      // naming convention to go looking.
+      throw new Error(
+        cleanupFailed
+          ? `${detail} (container ${containerId} could not be removed and may still be running — manual cleanup required)`
+          : detail
+      );
     }
 
     // Store AKM JTI + exp for revocation on stop.

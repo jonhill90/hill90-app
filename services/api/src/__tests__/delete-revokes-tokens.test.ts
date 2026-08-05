@@ -208,3 +208,67 @@ describe('DELETE /agents/:id revokes both tokens before deleting the row (#340)'
     expect(order).toEqual(['revoke-akm', 'revoke-mr', 'remove-container', 'delete-row']);
   });
 });
+
+/**
+ * A failed container stop during DELETE /:id leaves a REAL running
+ * container with, after the DELETE below runs, NO row anywhere pointing
+ * back to it — the one cleanup step in this route where failure orphans a
+ * live resource rather than just a credential. Before this fix that
+ * failure was only console.error'd, never audited: strictly weaker than
+ * the token-revoke-failed handling right above it in the same function,
+ * whose own comment argues "the audit stream doesn't depend on the row
+ * surviving." This applies that same reasoning here.
+ *
+ * Non-blocking, deliberately, same as the revokes: the delete must still
+ * proceed on a stop failure, per this route's own pre-existing convention
+ * (#340's comment). This fix only makes the failure survive in the audit
+ * trail — it does not change whether the delete completes.
+ */
+describe('DELETE /agents/:id audits a container-stop failure instead of only logging it', () => {
+  it('THE ASSERTION THAT MATTERS: a failed stopAndRemoveContainer emits container_stop_failed naming the agent and container', async () => {
+    const { stopAndRemoveContainer } = require('../services/docker');
+    (stopAndRemoveContainer as jest.Mock).mockRejectedValue(new Error('docker daemon unreachable'));
+    mockQuery.mockResolvedValueOnce({
+      rows: [agentRow({ status: 'running', container_id: 'container-abc123' })],
+    });
+
+    const res = await del();
+
+    // The delete still completes — this is not a behavior change.
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(true);
+
+    const failed = mockAuditLog.mock.calls.find((c) => c[0] === 'container_stop_failed');
+    expect(failed).toBeDefined();
+    expect(failed![1]).toBe('scout');
+    expect(failed![4]).toMatchObject({ container_id: 'container-abc123', reason: 'delete' });
+    expect(String(failed![4]?.error)).toMatch(/docker daemon unreachable/);
+  });
+
+  it('does not emit container_stop_failed when the stop succeeds', async () => {
+    const { stopAndRemoveContainer } = require('../services/docker');
+    (stopAndRemoveContainer as jest.Mock).mockResolvedValue(undefined);
+    mockQuery.mockResolvedValueOnce({ rows: [agentRow({ status: 'running' })] });
+
+    await del();
+
+    const events = mockAuditLog.mock.calls.map((c) => c[0]);
+    expect(events).not.toContain('container_stop_failed');
+  });
+
+  it('does not attempt a stop at all — and cannot emit a stop failure — when the agent was not running', async () => {
+    const { stopAndRemoveContainer } = require('../services/docker');
+    // Earlier tests in this file also call stopAndRemoveContainer; jest.fn()
+    // call history is not auto-reset between tests without an explicit
+    // clear, and the shared beforeEach above does not clear this particular
+    // mock (only mockQuery/mockRevokeAkm/mockRevokeModelRouter/mockAuditLog).
+    (stopAndRemoveContainer as jest.Mock).mockClear();
+    mockQuery.mockResolvedValueOnce({ rows: [agentRow({ status: 'stopped' })] });
+
+    await del();
+
+    expect(stopAndRemoveContainer).not.toHaveBeenCalled();
+    const events = mockAuditLog.mock.calls.map((c) => c[0]);
+    expect(events).not.toContain('container_stop_failed');
+  });
+});
