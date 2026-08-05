@@ -18,6 +18,7 @@
 import * as http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { attachTerminalProxy } from '../services/terminal-proxy';
+import { expWithGuaranteedRunway } from '../testSupport/expiryRunway';
 
 const mockQuery = jest.fn();
 jest.mock('../db/pool', () => ({
@@ -84,28 +85,6 @@ beforeEach(() => {
 });
 afterEach(() => { jest.restoreAllMocks(); delete process.env.TERMINAL_ALLOWED_ORIGINS; });
 
-/**
- * An exp that leaves at least `bufferSeconds` of real runway no matter where
- * `nowMs` falls within its current second. See the 4002 test above for why
- * Math.floor(nowMs/1000)+N (the previous approach) could not promise that.
- */
-function expWithGuaranteedRunway(bufferSeconds: number, nowMs: number = Date.now()): number {
-  return Math.ceil(nowMs / 1000) + bufferSeconds;
-}
-
-/**
- * The instant that minimizes Math.floor(nowMs/1000)+N's real runway: 1ms
- * before nowMs's current second started, i.e. .999 of the PREVIOUS second.
- * floor() only depends on which whole second a value falls in, so nudging
- * within nowMs's OWN second changes nothing — floor(nowMs/1000) is already
- * identical whichever millisecond of that second you pick. Landing one
- * second earlier is what makes Math.floor(forced/1000)+1 resolve to nowMs's
- * current second, i.e. an exp already at or before nowMs itself.
- */
-function worstCaseInstantForOldFormula(nowMs: number = Date.now()): number {
-  return Math.floor(nowMs / 1000) * 1000 - 1;
-}
-
 /** Open a real client session and report how it ends. */
 function connect(): { ws: WebSocket; opened: Promise<void>; closed: Promise<{ code: number; reason: string }> } {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/chat/threads/${THREAD}/terminal`, [PROTO, 'hill90.bearer.tok'], {
@@ -130,16 +109,16 @@ describe('4002 — the session does not outlive the credential', () => {
     // product defect: verified directly against terminal-proxy.ts, which
     // refuses with 401 whenever `expiresAtMs <= Date.now()` at upgrade time.
     //
-    // expWithGuaranteedRunway uses Math.ceil instead: runway is always in
-    // [bufferSeconds, bufferSeconds + 1), never approaching 0 regardless of
-    // where "now" falls in its second. Forced here to the worst instant for
-    // the OLD formula (1ms before a second rolls over) so this test always
-    // exercises the boundary it exists to guard, rather than depending on
-    // being unlucky enough to hit it — the guarantee is proven every run.
+    // expWithGuaranteedRunway uses Math.ceil instead: runway from the real
+    // clock is always in [2000, 3000) ms, never approaching 0 regardless of
+    // where "now" falls in its second — see expiry-runway-arithmetic.test.ts
+    // for the proof, kept separate from this real-socket test on purpose (a
+    // forced worst-case instant fed in here would itself cut that runway
+    // roughly in half, on the one test that was flaky for lack of margin).
     verdict = {
       sub: 'user-1',
       roles: [],
-      exp: expWithGuaranteedRunway(2, worstCaseInstantForOldFormula()),
+      exp: expWithGuaranteedRunway(2, Date.now()),
     };
 
     const { opened, closed } = connect();
