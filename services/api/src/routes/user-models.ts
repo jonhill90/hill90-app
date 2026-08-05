@@ -3,6 +3,7 @@ import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { detectModelType } from '../helpers/model-type-detect';
 import { rolesFrom } from '../middleware/keycloak-config';
+import { auditLog } from '../helpers/audit';
 
 const router = Router();
 
@@ -454,7 +455,18 @@ router.delete('/:id', async (req: Request, res: Response) => {
     return;
   }
 
-  // Best-effort stale cleanup: scrub deleted model name from owner's policies
+  // Best-effort stale cleanup: scrub deleted model name from owner's policies.
+  //
+  // Deliberately best-effort, not blocking the delete: this cleanup is
+  // inert if it fails — validateAllowedModels only runs at policy
+  // create/update time, never at read/enforcement time, and nothing
+  // downstream resolves allowed_models names back to live user_models rows
+  // to grant capability, so a stale name is clutter, not a hazard (#424).
+  // What was missing was visibility: a console.error nobody reads was the
+  // ONLY trace of a failure here, so audited too now — same "the audit
+  // stream doesn't depend on the row surviving" reasoning already applied
+  // to the other best-effort cleanup steps in this sweep (agents.ts's
+  // container-stop and token-revoke failures).
   const deletedModelName = result.rows[0].name;
   const deletedOwner = result.rows[0].created_by;
   if (deletedOwner) {
@@ -466,6 +478,10 @@ router.delete('/:id', async (req: Request, res: Response) => {
       );
     } catch (err) {
       console.error('[user-models] Stale policy cleanup failed (non-fatal):', err);
+      auditLog('stale_policy_cleanup_failed', id, user.sub, 'human', {
+        model_name: deletedModelName, owner_sub: deletedOwner,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
