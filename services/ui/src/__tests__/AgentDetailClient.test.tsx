@@ -336,6 +336,84 @@ describe('AgentDetailClient', () => {
     })
   })
 
+  // app#374/#386 REVIEW: the shape this exists to catch. Before this fix,
+  // handleAddEnvVar built its PUT body from `{ ...(agent.env_vars || {}),
+  // [key]: envVal }` — a client-side read-modify-write. Once env_vars
+  // stopped being returned (values encrypted at rest, #386's first pass),
+  // `agent.env_vars` was always undefined, so that spread silently became
+  // `{}`: saving ONE variable sent a payload that, under the OLD
+  // full-replace server contract, would have deleted every other key —
+  // with a success path and no error. THE ASSERTION THAT MATTERS is that
+  // the request this component sends can no longer even express that: it
+  // must never carry any key this test didn't ask for, and it must never
+  // resemble a full replacement.
+  it('adding one environment variable sends ONLY that key — never a reconstructed full map that could drop others', async () => {
+    const agentWithTwoVars = { ...MOCK_AGENT, env_var_keys: ['ANTHROPIC_API_KEY', 'LOG_LEVEL'] }
+    mockFetchDefaults(agentWithTwoVars as any)
+    const defaultImpl = mockFetch.getMockImplementation()!
+    let putBody: any = null
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/agents/uuid-1' && opts?.method === 'PUT') {
+        putBody = JSON.parse(opts.body)
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(agentWithTwoVars) })
+      }
+      return defaultImpl(url, opts)
+    })
+
+    render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+    await waitFor(() => expect(screen.getByText('ResearchBot')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    await waitFor(() => expect(screen.getByText('Environment Variables')).toBeInTheDocument())
+
+    // An existing key is shown in the table (from env_var_keys, value
+    // masked) — confirms the fixture reflects "an agent that already has
+    // variables", the exact case a whole-map replace would have destroyed.
+    // (ANTHROPIC_API_KEY isn't queried here — it also appears in the
+    // separate Claude Code widget above this table, so LOG_LEVEL, unique
+    // to the generic env-var table, is the unambiguous check.)
+    expect(screen.getByText('LOG_LEVEL')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('KEY'), { target: { value: 'DEBUG_MODE' } })
+    const valueInput = screen.getByPlaceholderText('value')
+    fireEvent.change(valueInput, { target: { value: 'true' } })
+    // Scoped to this input's own row — the Tags section above it also has
+    // an "Add" button with the same accessible name.
+    fireEvent.click(within(valueInput.closest('div')!).getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(putBody).not.toBeNull())
+    expect(putBody).toEqual({ env_vars_set: { DEBUG_MODE: 'true' } })
+    // The specific regression this test exists for: the request must not
+    // even be SHAPED like a full replacement of the other two keys.
+    expect(putBody.env_vars).toBeUndefined()
+    expect(Object.keys(putBody.env_vars_set)).toEqual(['DEBUG_MODE'])
+  })
+
+  it('removing one environment variable sends only its key via env_vars_unset', async () => {
+    const agentWithTwoVars = { ...MOCK_AGENT, env_var_keys: ['ANTHROPIC_API_KEY', 'LOG_LEVEL'] }
+    mockFetchDefaults(agentWithTwoVars as any)
+    const defaultImpl = mockFetch.getMockImplementation()!
+    let putBody: any = null
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/agents/uuid-1' && opts?.method === 'PUT') {
+        putBody = JSON.parse(opts.body)
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(agentWithTwoVars) })
+      }
+      return defaultImpl(url, opts)
+    })
+
+    render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+    await waitFor(() => expect(screen.getByText('ResearchBot')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    await waitFor(() => expect(screen.getByText('LOG_LEVEL')).toBeInTheDocument())
+
+    // The × button next to LOG_LEVEL's row.
+    const row = screen.getByText('LOG_LEVEL').closest('tr')!
+    fireEvent.click(within(row).getByRole('button'))
+
+    await waitFor(() => expect(putBody).not.toBeNull())
+    expect(putBody).toEqual({ env_vars_unset: ['LOG_LEVEL'] })
+  })
+
   it('Model Access tab shows assigned models', async () => {
     render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
 

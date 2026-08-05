@@ -6,29 +6,37 @@ import { Bot, Key, Check } from 'lucide-react'
 
 interface Props {
   agentId: string
-  envVars: Record<string, string>
+  // app#374/#386: the api never returns env var VALUES (they're encrypted
+  // at rest) — only the key names that are set. `hasKey` and the two writes
+  // below are built entirely from that list; this component never held, and
+  // must never need, the actual key value once it's saved.
+  envVarKeys: string[]
   agentStatus: string
   onUpdate: () => void
 }
 
-export default function AgentClaudeConfig({ agentId, envVars, agentStatus, onUpdate }: Props) {
+export default function AgentClaudeConfig({ agentId, envVarKeys, agentStatus, onUpdate }: Props) {
   const [apiKey, setApiKey] = useState('')
   const { toast, showToast } = useToast()
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
-  const hasKey = !!envVars?.ANTHROPIC_API_KEY
+  const hasKey = envVarKeys.includes('ANTHROPIC_API_KEY')
   const isRunning = agentStatus === 'running'
 
   const handleSave = async () => {
     if (!apiKey.trim()) return
     setSaving(true)
     try {
-      const updated = { ...(envVars || {}), ANTHROPIC_API_KEY: apiKey.trim() }
+      // app#374/#386: env_vars_set names only the key being written — never
+      // a read-modify-write of the full map, which this component (and its
+      // sibling AgentDetailClient.tsx) cannot safely do once the api stops
+      // returning existing values. Sending only ANTHROPIC_API_KEY here
+      // cannot touch any other variable the operator has set.
       const res = await fetch(`/api/agents/${agentId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ env_vars: updated }),
+        body: JSON.stringify({ env_vars_set: { ANTHROPIC_API_KEY: apiKey.trim() } }),
       })
       if (res.ok) {
         setApiKey('')
@@ -49,8 +57,6 @@ export default function AgentClaudeConfig({ agentId, envVars, agentStatus, onUpd
 
   const handleRemove = async () => {
     if (!confirm('Remove Claude API key from this agent?')) return
-    const updated = { ...(envVars || {}) }
-    delete updated.ANTHROPIC_API_KEY
     // #217: this had NO res.ok check at all, four lines from handleSave which
     // does — the twin pattern CONTRIBUTING documents. On failure the key simply
     // reappeared after the refetch, with nothing saying why.
@@ -58,7 +64,7 @@ export default function AgentClaudeConfig({ agentId, envVars, agentStatus, onUpd
       const res = await fetch(`/api/agents/${agentId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ env_vars: updated }),
+        body: JSON.stringify({ env_vars_unset: ['ANTHROPIC_API_KEY'] }),
       })
       if (!res.ok) {
         showToast('error', await failureMessage('Could not remove the API key', res))

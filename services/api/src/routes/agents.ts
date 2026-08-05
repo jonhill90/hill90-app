@@ -23,6 +23,43 @@ import {
 } from '../services/docker';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
+import { encryptProviderKey, decryptProviderKey } from '../services/provider-key-crypto';
+
+// app#374: agents.env_vars stored operator-supplied environment variables —
+// including, per the UI's own AgentClaudeConfig.tsx form, a raw Anthropic
+// API key — in plain JSONB, at rest and on every read. Same class of secret
+// provider_connections already encrypts (AES-256-GCM via
+// encryptProviderKey/decryptProviderKey) and mcp_servers.connection_config
+// was fixed to encrypt in #372; this reuses that exact helper rather than
+// inventing a second scheme. WHOLE-BLOB, NOT PER-KEY, for the same reason
+// #372 gave for connection_config: env_vars is heterogeneous and has no
+// named secret field — an allowlist of "safe" keys would go stale silently.
+function getEnvVarsEncryptionKey(): string {
+  const key = process.env.PROVIDER_KEY_ENCRYPTION_KEY;
+  if (!key) throw new Error('PROVIDER_KEY_ENCRYPTION_KEY not configured');
+  return key;
+}
+
+function encryptEnvVars(envVars: Record<string, string>): { encrypted: Buffer; nonce: Buffer } {
+  return encryptProviderKey(JSON.stringify(envVars), getEnvVarsEncryptionKey());
+}
+
+// NULL columns (migration 069: nullable, unlike #372/#376's, since agents
+// had a real row rather than zero) decode as "nothing encrypted yet", i.e.
+// an empty object — not an error, and not a reason to fail a read.
+function decryptEnvVars(encrypted: Buffer | null | undefined, nonce: Buffer | null | undefined): Record<string, string> {
+  if (!encrypted || !nonce) return {};
+  return JSON.parse(decryptProviderKey(encrypted, nonce, getEnvVarsEncryptionKey()));
+}
+
+// The non-secret summary a response may carry instead of the plaintext —
+// key NAMES only, never values, mirroring mcp-servers.ts's
+// connection_display for the same reason: an operator managing an agent's
+// env vars needs to see WHICH are set to add or remove one, not their
+// values redisplayed.
+function envVarKeys(envVars: Record<string, string>): string[] {
+  return Object.keys(envVars).sort();
+}
 
 /**
  * How often the SSE handler polls for new inference rows.
@@ -569,7 +606,8 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const { rows } = await getPool().query(
       `SELECT a.id, a.agent_id, a.name, a.description, a.status, a.container_state, a.tools_config,
               cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-              model_policy_id, a.autonomy_level, a.avatar_key, a.tags, a.env_vars, a.container_profile_id,
+              model_policy_id, a.autonomy_level, a.avatar_key, a.tags,
+              a.env_vars_encrypted, a.env_vars_nonce, a.container_profile_id,
               a.schedule_cron, a.schedule_enabled,
               cp.name AS cp_name, cp.docker_image AS cp_docker_image,
               COALESCE(mp.allowed_models, '[]'::jsonb) AS models,
@@ -589,6 +627,12 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const agent = rows[0];
     agent.hasAvatar = !!agent.avatar_key;
     delete agent.avatar_key;
+
+    // app#374: the encrypted columns must never reach res.json — only the
+    // key names, decrypted server-side, never the values.
+    agent.env_var_keys = envVarKeys(decryptEnvVars(agent.env_vars_encrypted, agent.env_vars_nonce));
+    delete agent.env_vars_encrypted;
+    delete agent.env_vars_nonce;
 
     // #238/#239: see the list route.
     agent.status_verified = isStatusVerified(agent.agent_id);
@@ -841,19 +885,34 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     }
 
     const user = (req as any).user;
-    const { name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id, autonomy_level, tags, env_vars } = req.body;
+    const { name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id, autonomy_level, tags, env_vars_set, env_vars_unset } = req.body;
 
-    // Validate env_vars if provided
-    if (env_vars !== undefined) {
-      if (typeof env_vars !== 'object' || env_vars === null || Array.isArray(env_vars)) {
-        res.status(400).json({ error: 'env_vars must be an object with string key-value pairs' });
+    // app#374/#386 review: env_vars is a DELTA contract, not a whole-map
+    // replace — env_vars_set (keys to add/update) and env_vars_unset (keys
+    // to remove), never a full object the caller is expected to already
+    // hold. The whole-map shape this replaced required the client to read
+    // back the current plaintext to safely modify one key; once the value
+    // is encrypted and withheld (a few lines below), that read-back is
+    // impossible, and a client that could no longer see the old values but
+    // still sent a "complete" replacement would silently delete every key
+    // it didn't know about. A delta removes the read-modify-write race
+    // entirely rather than requiring the client to get it right.
+    if (env_vars_set !== undefined) {
+      if (typeof env_vars_set !== 'object' || env_vars_set === null || Array.isArray(env_vars_set)) {
+        res.status(400).json({ error: 'env_vars_set must be an object with string key-value pairs' });
         return;
       }
-      for (const [k, v] of Object.entries(env_vars)) {
+      for (const [k, v] of Object.entries(env_vars_set)) {
         if (typeof v !== 'string') {
-          res.status(400).json({ error: `env_vars["${k}"] must be a string` });
+          res.status(400).json({ error: `env_vars_set["${k}"] must be a string` });
           return;
         }
+      }
+    }
+    if (env_vars_unset !== undefined) {
+      if (!Array.isArray(env_vars_unset) || !env_vars_unset.every((k: unknown) => typeof k === 'string')) {
+        res.status(400).json({ error: 'env_vars_unset must be an array of key names' });
+        return;
       }
     }
 
@@ -1017,6 +1076,31 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const modelPolicyProvided = model_policy_id !== undefined || model_names !== undefined;
     const effectiveModelPolicyId = model_names !== undefined ? resolvedModelPolicyId : model_policy_id;
     const containerProfileProvided = container_profile_id !== undefined;
+
+    // app#374/#386 review: DELTA applied server-side. The client can no
+    // longer read back the existing values (never returned as plaintext —
+    // see GET /:id above), so it never holds the full current set and
+    // never needs to — env_vars_unset removes keys, env_vars_set adds or
+    // updates keys, both applied on top of the decrypted current value.
+    // unset runs before set, so set wins for any key named in both (a
+    // client asking to both remove and set the same key in one call is a
+    // contradictory request; "the thing you just set is still set" is the
+    // less surprising resolution).
+    let envVarsEncrypted: Buffer | null = null;
+    let envVarsNonce: Buffer | null = null;
+    let finalEnvVars: Record<string, string> = decryptEnvVars(existing[0].env_vars_encrypted, existing[0].env_vars_nonce);
+    if (env_vars_set !== undefined || env_vars_unset !== undefined) {
+      if (Array.isArray(env_vars_unset)) {
+        for (const key of env_vars_unset) delete finalEnvVars[key];
+      }
+      if (env_vars_set !== undefined) {
+        finalEnvVars = { ...finalEnvVars, ...env_vars_set };
+      }
+      const encrypted = encryptEnvVars(finalEnvVars);
+      envVarsEncrypted = encrypted.encrypted;
+      envVarsNonce = encrypted.nonce;
+    }
+
     const { rows } = await getPool().query(
       `UPDATE agents SET
         name = COALESCE($1, name),
@@ -1031,12 +1115,13 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
         container_profile_id = CASE WHEN $11::boolean THEN $12::uuid ELSE container_profile_id END,
         autonomy_level = COALESCE($13, autonomy_level),
         tags = COALESCE($14, tags),
-        env_vars = COALESCE($15, env_vars),
+        env_vars_encrypted = COALESCE($15, env_vars_encrypted),
+        env_vars_nonce = COALESCE($16, env_vars_nonce),
         updated_at = NOW()
-       WHERE id = $16
+       WHERE id = $17
        RETURNING id, agent_id, name, description, status, tools_config,
                  cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, autonomy_level, tags, env_vars, error_message, created_at, updated_at, created_by`,
+                 model_policy_id, container_profile_id, autonomy_level, tags, error_message, created_at, updated_at, created_by`,
       [
         name || null,
         description ?? null,
@@ -1052,12 +1137,17 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
         containerProfileProvided ? (container_profile_id ?? null) : null,
         autonomy_level || null,
         tags !== undefined ? JSON.stringify(tags) : null,
-        env_vars !== undefined ? JSON.stringify(env_vars) : null,
+        envVarsEncrypted,
+        envVarsNonce,
         req.params.id,
       ]
     );
 
     const updatedAgent = rows[0];
+    // app#374: never the plaintext, never the ciphertext — only the key
+    // names, same as GET /:id. finalEnvVars already reflects the delta
+    // above whether or not env_vars_set/env_vars_unset was provided.
+    updatedAgent.env_var_keys = envVarKeys(finalEnvVars);
 
     // Update agent_skills if skill_ids provided
     if (skill_ids !== undefined) {
