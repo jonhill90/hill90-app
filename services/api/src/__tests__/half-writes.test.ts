@@ -220,18 +220,10 @@ describe('POST /workflows/webhook/:token — a failed run labels itself (the pub
   it('POSITIVE CONTROL: marks the run error instead of leaving it running forever', async () => {
     failAfterRunInsert();
 
-    // Note: despite this route's own "PUBLIC — no auth, uses token" comment,
-    // it is mounted under app.use('/workflows', requireAuth, workflowsRouter)
-    // in app.ts, so it currently requires a valid Bearer token like every
-    // other route on this router — a real external webhook sender would not
-    // have one. That is a separate, pre-existing defect (a stale comment
-    // describing auth requirements that do not match the mount), out of
-    // scope for this fix (non-atomic writes). Noted here rather than fixed
-    // silently, and a Bearer token is supplied below so this test reaches
-    // the handler under test as the code actually behaves today.
+    // No Authorization header — this route is genuinely public (#425 split
+    // it into routes/workflows-webhook.ts, mounted ahead of requireAuth).
     const res = await request(app)
       .post('/workflows/webhook/some-token')
-      .set('Authorization', `Bearer ${userToken}`)
       .send({});
 
     expect(res.status).toBe(500);
@@ -278,7 +270,6 @@ describe('POST /workflows/webhook/:token — a failed run labels itself (the pub
 
     const res = await request(app)
       .post('/workflows/webhook/some-token')
-      .set('Authorization', `Bearer ${userToken}`)
       .send({});
 
     // A clean 500, not a hang and not a crash.
@@ -294,7 +285,6 @@ describe('POST /workflows/webhook/:token — a failed run labels itself (the pub
 
     await request(app)
       .post('/workflows/webhook/some-token')
-      .set('Authorization', `Bearer ${userToken}`)
       .send({});
 
     // Nothing was written, so there is nothing to label — and labelling a run id
