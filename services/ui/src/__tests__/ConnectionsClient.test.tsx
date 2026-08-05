@@ -275,6 +275,37 @@ describe('ConnectionsClient', () => {
     })
   })
 
+  it('shows an alert, not a silently-cleared spinner, when Check All fails', async () => {
+    vi.stubGlobal('alert', vi.fn())
+    mockFetch.mockImplementation((...args: any[]) => {
+      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || ''
+      if (url.includes('/validate-all')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'validation service unavailable' }) })
+      }
+      if (url.includes('/health')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_HEALTH) })
+      }
+      if (url.includes('/user-models')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_MODELS) })
+      }
+      if (url.includes('/provider-connections')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_CONNECTIONS) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    })
+
+    render(<ConnectionsClient session={session} />)
+    await waitFor(() => {
+      expect(screen.getByText('Check All')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Check All'))
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('validation service unavailable')
+    })
+  })
+
   it('shows tabs for Connections and Health', async () => {
     render(<ConnectionsClient session={session} />)
 
