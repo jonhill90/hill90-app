@@ -34,7 +34,17 @@ export function getLifecycleInfo(event: AgentEvent): LifecycleInfo | null {
   }
   if (event.tool === 'runtime') {
     if (event.type === 'work_received') return { label: 'Received', color: 'text-yellow-400', pulse: true }
-    if (event.type === 'work_completed') return { label: 'Completed', color: 'text-brand-400', pulse: false }
+    if (event.type === 'work_completed') {
+      // Matches command_complete's own branch above — work_completed used to
+      // map the TYPE alone to 'Completed', unconditionally, the one place
+      // this asymmetry mattered: it mirrored agentbox's runtime.py
+      // hardcoding success=True on this exact event (app#436), so this
+      // operator-facing timeline showed a green 'Completed' badge for a
+      // chat work item that had genuinely failed downstream.
+      return event.success === false
+        ? { label: 'Failed', color: 'text-red-400', pulse: false }
+        : { label: 'Completed', color: 'text-brand-400', pulse: false }
+    }
     if (event.type === 'work_failed') return { label: 'Failed', color: 'text-red-400', pulse: false }
   }
   return null

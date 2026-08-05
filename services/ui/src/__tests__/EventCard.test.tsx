@@ -71,6 +71,28 @@ describe('EventCard', () => {
     expect(screen.getByText('Failed')).toBeInTheDocument()
   })
 
+  // THE ASSERTION THAT MATTERS (app#436). command_complete, right above,
+  // already branches on event.success to distinguish 'Completed' from
+  // 'Failed' — work_completed did not check success at all, mapping the
+  // TYPE alone to 'Completed' unconditionally. Paired with agentbox's
+  // runtime.py hardcoding success=True on that same event (fixed
+  // separately), this operator-facing timeline showed a green 'Completed'
+  // badge for a chat work item that had genuinely failed downstream — the
+  // one place a human is meant to see whether an agent's work item
+  // actually succeeded.
+  it('shows Failed lifecycle label for work_completed with success=false', () => {
+    render(<EventCard event={makeEvent({ tool: 'runtime', type: 'work_completed', success: false })} />)
+    expect(screen.getByText('Failed')).toBeInTheDocument()
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument()
+  })
+
+  it('still shows Completed lifecycle label for work_completed with success=true', () => {
+    // POSITIVE CONTROL — a fix that always returned 'Failed' would also
+    // pass the test above for the wrong reason.
+    render(<EventCard event={makeEvent({ tool: 'runtime', type: 'work_completed', success: true })} />)
+    expect(screen.getByText('Completed')).toBeInTheDocument()
+  })
+
   it('shows exit code on command_complete', () => {
     render(<EventCard event={makeEvent({ tool: 'shell', type: 'command_complete', success: true, output_summary: 'exit 0, 6 bytes' })} />)
     expect(screen.getByText('exit 0')).toBeInTheDocument()
