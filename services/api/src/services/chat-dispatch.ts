@@ -25,6 +25,19 @@ interface DispatchResult {
   error?: string;
 }
 
+// agentbox's own handle_work() (runtime.py) does not wait on the chat
+// completing — it validates, emits an event, starts a background thread for
+// the actual work, and returns its ack immediately. This fetch is therefore
+// an ack round-trip, not a wait for the full response, so it can use the same
+// bound agentbox itself already chose for the mirrored direction: chat.py's
+// _deliver_callback (the callback POST back to this API) uses timeout=10.
+// Before this, this fetch carried no signal at all — every other
+// agentbox-facing fetch in this codebase (chat.ts's screenshot and
+// browser-action proxies) already had one, and a wedged/partitioned agentbox
+// container left this hanging up to Node's own undici default (~5 minutes)
+// with the thread and user-message rows already committed.
+export const DISPATCH_TIMEOUT_MS = 10_000;
+
 export async function dispatchChatWork(params: ChatDispatchParams): Promise<DispatchResult> {
   const { agentId, workToken, threadId, messageId, messages, model, callbackUrl, threadType, participants, isLead, collaborators } = params;
 
@@ -50,6 +63,14 @@ export async function dispatchChatWork(params: ChatDispatchParams): Promise<Disp
     correlation_id: messageId, // §8.5: correlation_id = message_id
   };
 
+  // A rejection here (including an abort) is not handled locally — it
+  // propagates to dispatchToAgents' Promise.allSettled in routes/chat.ts,
+  // which already turns a rejected dispatch into a recorded failure
+  // (chat_messages.status='error', a real error_message, and an entry in
+  // the `failed` array the caller sees) the same way a network error or a
+  // non-2xx response already is. Adding the timeout is what makes THAT
+  // existing mechanism reachable for a hang; it needed no changes of its
+  // own.
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -57,6 +78,7 @@ export async function dispatchChatWork(params: ChatDispatchParams): Promise<Disp
       'Authorization': `Bearer ${workToken}`,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
   });
 
   if (!response.ok) {
