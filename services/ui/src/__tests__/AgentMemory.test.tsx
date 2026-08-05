@@ -147,4 +147,21 @@ describe('AgentMemory', () => {
 
     expect(screen.getByText(/No memory entries/)).toBeInTheDocument()
   })
+
+  // app#410: fetchKnowledgePage throws on a failed fetch now, instead of
+  // returning the same shape as a genuinely-empty page.
+  it('shows an error, not the empty state, when the entries fetch fails', async () => {
+    mockFetch.mockImplementation(async () => ({
+      ok: false,
+      json: async () => ({ error: 'boom' }),
+    }))
+
+    render(<AgentMemory agentId="bot-error" />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('memory-error')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Could not load memory entries — try refreshing the page')).toBeInTheDocument()
+    expect(screen.queryByTestId('empty-state')).not.toBeInTheDocument()
+  })
 })

@@ -116,6 +116,10 @@ export default function AgentDetailClient({
   const router = useRouter()
   const [agent, setAgent] = useState<Agent | null>(null)
   const [loading, setLoading] = useState(true)
+  // A non-404 fetch failure used to leave `agent` at null with no trace of
+  // why, and the page rendered nothing at all — worse than an empty state,
+  // a blank one. 404 is handled separately (redirects away, below).
+  const [loadError, setLoadError] = useState(false)
   const [actionLoading, setActionLoading] = useState(false)
   const [activeTab, setActiveTab] = useState<TabId>('overview')
 
@@ -213,11 +217,15 @@ export default function AgentDetailClient({
         setAgent(data)
         setScheduleCron(data.schedule_cron || '')
         setScheduleEnabled(data.schedule_enabled || false)
+        setLoadError(false)
       } else if (res.status === 404) {
         router.push('/agents')
+      } else {
+        setLoadError(true)
       }
     } catch (err) {
       console.error('Failed to fetch agent:', err)
+      if (currentAgentId.current === requestedId) setLoadError(true)
     } finally {
       setLoading(false)
     }
@@ -446,7 +454,19 @@ export default function AgentDetailClient({
     )
   }
 
-  if (!agent) return null
+  if (!agent) {
+    if (loadError) {
+      return (
+        <div
+          className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3 m-6"
+          data-testid="agent-detail-error"
+        >
+          <p className="text-sm text-red-400">Could not load this agent — try refreshing the page</p>
+        </div>
+      )
+    }
+    return null
+  }
 
   const modelNames = agent.models || []
   const agentSkills = agent.skills || []

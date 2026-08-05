@@ -933,4 +933,42 @@ describe('AgentDetailClient', () => {
     })
   })
 
+  // app#410: a non-404 failure used to leave the page blank (`return null`)
+  // — worse than an empty state, a blank one with zero explanation.
+  describe('a failed agent fetch renders an error, not a blank page', () => {
+    it('shows an error message on a 500', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/agents/uuid-1') {
+          return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      const { container } = render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-detail-error')).toBeInTheDocument()
+      })
+      expect(screen.getByText('Could not load this agent — try refreshing the page')).toBeInTheDocument()
+      // Not blank: the error message is real content, not an empty body.
+      expect(container.textContent).not.toBe('')
+      expect(mockPush).not.toHaveBeenCalled()
+    })
+
+    it('still redirects on a genuine 404, unchanged', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/agents/uuid-1') {
+          return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'not found' }) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(mockPush).toHaveBeenCalledWith('/agents')
+      })
+      expect(screen.queryByTestId('agent-detail-error')).not.toBeInTheDocument()
+    })
+  })
 })
