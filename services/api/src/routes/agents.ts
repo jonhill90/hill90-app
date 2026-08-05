@@ -23,7 +23,7 @@ import {
 } from '../services/docker';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
-import { encryptProviderKey, decryptProviderKey } from '../services/provider-key-crypto';
+import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
 
 // app#374: agents.env_vars stored operator-supplied environment variables —
 // including, per the UI's own AgentClaudeConfig.tsx form, a raw Anthropic
@@ -660,7 +660,14 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
 
     res.json(agent);
   } catch (err) {
-    console.error('[agents] Get error:', err);
+    // app#396: same distinction as mcp-servers.ts's routes — a decrypt
+    // failure here means PROVIDER_KEY_ENCRYPTION_KEY doesn't match what
+    // encrypted this agent's env_vars, not that anything else broke.
+    if (err instanceof ProviderKeyDecryptionError) {
+      console.error('[agents] Get error — decryption key mismatch:', err);
+    } else {
+      console.error('[agents] Get error:', err);
+    }
     res.status(500).json({ error: 'Failed to get agent' });
   }
 });
@@ -1174,7 +1181,12 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
 
     res.json(updatedAgent);
   } catch (err) {
-    console.error('[agents] Update error:', err);
+    // app#396: see the Get route's identical branch above.
+    if (err instanceof ProviderKeyDecryptionError) {
+      console.error('[agents] Update error — decryption key mismatch:', err);
+    } else {
+      console.error('[agents] Update error:', err);
+    }
     res.status(500).json({ error: 'Failed to update agent' });
   }
 });
