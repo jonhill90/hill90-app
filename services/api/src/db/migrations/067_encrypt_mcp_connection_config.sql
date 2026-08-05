@@ -21,6 +21,14 @@
 -- was written) — no ciphertext migration, no dual-read window, no rollback
 -- complexity, and the empty table is why NOT NULL can be added directly
 -- rather than backfilled.
+--
+-- The DROP followed immediately by two ADD COLUMN ... NOT NULL is safe even
+-- hypothetically against a non-empty table, but not because of anything in
+-- this SQL — migrate.ts:61 wraps each migration file in BEGIN/COMMIT, so a
+-- NOT NULL violation on either ADD COLUMN rolls back the DROP COLUMN in the
+-- same transaction. Worth stating here because the safety comes from the
+-- runner, not the SQL, and the next person reading this file cannot see
+-- migrate.ts.
 ALTER TABLE mcp_servers DROP COLUMN connection_config;
 ALTER TABLE mcp_servers ADD COLUMN connection_config_encrypted BYTEA NOT NULL;
 ALTER TABLE mcp_servers ADD COLUMN connection_config_nonce BYTEA NOT NULL;

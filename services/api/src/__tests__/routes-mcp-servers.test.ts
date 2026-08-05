@@ -2,7 +2,7 @@ import request from 'supertest';
 import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { createApp } from '../app';
-import { decryptProviderKey } from '../services/provider-key-crypto';
+import { decryptProviderKey, encryptProviderKey } from '../services/provider-key-crypto';
 
 const TEST_ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
 
@@ -35,9 +35,11 @@ const app = createApp({
   getSigningKey: async () => publicKey,
 });
 
-// No connection_config here — app#369 removed it from every route response.
-// A row that included it would be masking exactly the regression the tests
-// below exist to catch.
+// No plaintext connection_config here — app#369 removed it from every route
+// response. A row that included it would be masking exactly the regression
+// the tests below exist to catch. MOCK_SERVER represents what POST/PUT's
+// RETURNING ${PUBLIC_COLUMNS} actually returns — it never selects the
+// encrypted columns, so this fixture doesn't carry them either.
 const MOCK_SERVER = {
   id: 'mcp-1',
   name: 'GitHub MCP',
@@ -48,6 +50,19 @@ const MOCK_SERVER = {
   created_by: 'regular-user',
   created_at: '2026-04-19T00:00:00Z',
 };
+
+// GET / and GET /:id additionally SELECT connection_config_encrypted/_nonce
+// (to compute connection_display) and strip them before res.json — a row
+// used against those two routes needs real ciphertext, encrypted with the
+// same TEST_ENCRYPTION_KEY the route reads from PROVIDER_KEY_ENCRYPTION_KEY
+// in beforeEach, or decryption in the route itself will fail.
+const DEFAULT_CONNECTION_CONFIG = { command: 'npx', args: ['-y', 'server-github'] };
+function encryptedConnectionColumns(config: unknown = DEFAULT_CONNECTION_CONFIG) {
+  const { encrypted, nonce } = encryptProviderKey(JSON.stringify(config), TEST_ENCRYPTION_KEY);
+  return { connection_config_encrypted: encrypted, connection_config_nonce: nonce };
+}
+
+const MOCK_SERVER_ROW = { ...MOCK_SERVER, ...encryptedConnectionColumns() };
 
 describe('MCP Servers routes', () => {
   beforeEach(() => {
@@ -61,7 +76,7 @@ describe('MCP Servers routes', () => {
 
   describe('GET /mcp-servers', () => {
     it('lists servers for user', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER] });
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER_ROW] });
 
       const res = await request(app)
         .get('/mcp-servers')
@@ -73,7 +88,7 @@ describe('MCP Servers routes', () => {
     });
 
     it('admin sees all servers', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER] });
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER_ROW] });
 
       const res = await request(app)
         .get('/mcp-servers')
@@ -302,23 +317,26 @@ describe('MCP Servers routes', () => {
       }).toThrow();
     });
 
-    it('GET /mcp-servers never selects the encrypted columns', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER] });
+    // GET / and GET /:id necessarily SELECT the encrypted columns now — that's
+    // how connection_display gets computed. Naming them in the SELECT is not
+    // the leak; naming them in the RESPONSE would be. Never `SELECT ms.*`/
+    // `SELECT *` still holds, since that's what would sweep in every other
+    // sensitive column added to this table in the future without a decision.
+    it('GET /mcp-servers never uses SELECT * to reach the encrypted columns', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER_ROW] });
       await request(app).get('/mcp-servers').set('Authorization', `Bearer ${userToken}`);
       const queryText = mockQuery.mock.calls[0][0];
-      expect(queryText).not.toContain('connection_config_encrypted');
-      expect(queryText).not.toContain('connection_config_nonce');
       expect(queryText).not.toContain('SELECT ms.*');
       expect(queryText).not.toMatch(/SELECT \*/);
     });
 
-    it('GET /mcp-servers/:id never selects the encrypted columns', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER] });
+    it('GET /mcp-servers/:id never uses SELECT * to reach the encrypted columns', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER_ROW] });
       mockQuery.mockResolvedValueOnce({ rows: [] });
       await request(app).get('/mcp-servers/mcp-1').set('Authorization', `Bearer ${userToken}`);
       const queryText = mockQuery.mock.calls[0][0];
-      expect(queryText).not.toContain('connection_config_encrypted');
-      expect(queryText).not.toContain('connection_config_nonce');
+      expect(queryText).not.toContain('SELECT ms.*');
+      expect(queryText).not.toMatch(/SELECT \*/);
     });
 
     it('PUT /mcp-servers/:id RETURNING clause never names the encrypted columns', async () => {
@@ -337,11 +355,52 @@ describe('MCP Servers routes', () => {
       expect(returningClause).not.toContain('connection_config_nonce');
     });
 
-    it('the response body of every read never carries connection_config in any form', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER] });
+    it('the response body of every read never carries connection_config or the encrypted columns in any form', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER_ROW] });
       const res = await request(app).get('/mcp-servers').set('Authorization', `Bearer ${userToken}`);
       const bodyText = JSON.stringify(res.body);
       expect(bodyText).not.toContain('connection_config');
+      expect(res.body[0]).toHaveProperty('connection_display');
+    });
+
+    // Direction 1 of Jon's two-direction requirement: the API response must
+    // never contain the secret, proven end-to-end through real encryption —
+    // not by asserting on query text, but by decrypting a REAL ciphertext
+    // row through the actual route and inspecting what comes back.
+    it('GET /mcp-servers response never contains the secret, decrypted end-to-end through the real route', async () => {
+      const SERVER_ROW_WITH_SECRET = { ...MOCK_SERVER, ...encryptedConnectionColumns(REAL_CONFIG) };
+      mockQuery.mockResolvedValueOnce({ rows: [SERVER_ROW_WITH_SECRET] });
+
+      const res = await request(app).get('/mcp-servers').set('Authorization', `Bearer ${userToken}`);
+
+      const bodyText = JSON.stringify(res.body);
+      expect(bodyText).not.toContain(SECRET_ARG);
+      // Not just "no secret" — the masked summary must still be useful:
+      // command shown verbatim, args reduced to a count only.
+      expect(res.body[0].connection_display).toEqual({ command: 'npx', args_count: 3 });
+    });
+
+    // Direction 2: the list must not render an empty command for a server
+    // that has one — the API-side half of that guarantee is that
+    // connection_display.command is actually populated from the decrypted
+    // value, not left undefined. (The UI-side half — that the component
+    // renders it — is covered in services/ui's McpServersClient.test.tsx.)
+    it('connection_display.command is populated for a server with a real command, not left blank', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER_ROW] });
+      const res = await request(app).get('/mcp-servers').set('Authorization', `Bearer ${userToken}`);
+      expect(res.body[0].connection_display.command).toBe('npx');
+      expect(res.body[0].connection_display.command).not.toBe('');
+    });
+
+    // POSITIVE CONTROL for both directions above. Reverting buildConnectionDisplay
+    // to return {} unconditionally (the shape a naive "just redact everything"
+    // fix could produce) must break the "command is populated" assertion —
+    // proving that assertion can actually fail, not just that it happens to pass.
+    it('CONTROL: an empty connection_display would fail the "command is populated" assertion', () => {
+      const regressedDisplay: Record<string, unknown> = {};
+      expect(() => {
+        expect((regressedDisplay as any).command).toBe('npx');
+      }).toThrow();
     });
   });
 });

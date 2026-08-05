@@ -53,8 +53,11 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const admin = isAdmin(req);
 
+    // connection_config_encrypted/_nonce are selected here ONLY to compute
+    // connection_display below — they are deleted from every row before
+    // res.json, same guarantee PUBLIC_COLUMNS gives the rest of this file.
     const { rows } = await getPool().query(
-      `SELECT ${PUBLIC_COLUMNS},
+      `SELECT ${PUBLIC_COLUMNS}, connection_config_encrypted, connection_config_nonce,
               (SELECT count(*) FROM agent_mcp_servers ams WHERE ams.mcp_server_id = ms.id) AS agent_count
        FROM mcp_servers ms
        ${admin ? '' : 'WHERE ms.created_by = $1 OR ms.is_platform = true'}
@@ -62,7 +65,7 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
       admin ? [] : [user.sub]
     );
 
-    res.json(rows);
+    res.json(rows.map(withConnectionDisplay));
   } catch (err: any) {
     console.error('[mcp-servers] List error:', err);
     res.status(500).json({ error: 'Failed to list MCP servers' });
@@ -123,7 +126,7 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
 
     const { rows } = await getPool().query(
-      `SELECT ${PUBLIC_COLUMNS},
+      `SELECT ${PUBLIC_COLUMNS}, connection_config_encrypted, connection_config_nonce,
               (SELECT count(*) FROM agent_mcp_servers ams WHERE ams.mcp_server_id = ms.id) AS agent_count
        FROM mcp_servers ms
        WHERE ms.id = $1 ${admin ? '' : 'AND (ms.created_by = $2 OR ms.is_platform = true)'}`,
@@ -134,6 +137,8 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
       res.status(404).json({ error: 'MCP server not found' });
       return;
     }
+
+    const row = withConnectionDisplay(rows[0]);
 
     // Include assigned agents
     const { rows: agents } = await getPool().query(
@@ -152,7 +157,7 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     // mapping a payload nobody reads is nothing; the cost of the next reader
     // finding a raw status here is the whole of #238 again.
     res.json({
-      ...rows[0],
+      ...row,
       agents: agents.map((a: any) => ({
         ...a,
         status: reportedStatus(a.agent_id, a.status),
@@ -237,10 +242,60 @@ router.delete('/:id', requireRole('user'), async (req: Request, res: Response) =
 
 // Exported so tests/services that legitimately need the plaintext (a future
 // MCP gateway connecting to the actual server) can decrypt without
-// duplicating the key/algorithm choice. Not used by any route in this file —
+// duplicating the key/algorithm choice. Not used directly in any response —
 // no route ever returns the plaintext.
 export function decryptConnectionConfig(encrypted: Buffer, nonce: Buffer): unknown {
   return JSON.parse(decryptProviderKey(encrypted, nonce, getEncryptionKey()));
+}
+
+// The list/detail views need *something* to show — a credential-bearing
+// field the UI cannot read at all is #354/#370's shape again, just moved
+// server-side. This is structural stripping, not secret-pattern-matching:
+// it never inspects a value to guess whether it "looks like" a token, it
+// only ever keeps pieces of the shape that cannot themselves carry one.
+//   stdio  — command verbatim (a binary name, e.g. "npx"), plus COUNTS of
+//            args/env entries. A credential can land in args (a plain
+//            string, "--token ghp_xxx") or env (arbitrary key-value), so
+//            neither's VALUES are ever included — only how many there are.
+//   sse/http — the URL's origin only (scheme+host+port via the URL parser),
+//            never path or query, which is exactly where a token or
+//            signed URL parameter would live. An unparseable URL yields no
+//            origin at all rather than falling back to the raw string.
+// Built from the DECRYPTED value, computed here, never from anything the
+// client sends — the display can't be spoofed into showing something the
+// stored config doesn't actually have.
+export function buildConnectionDisplay(config: unknown): Record<string, unknown> {
+  const cfg = (config && typeof config === 'object' ? config : {}) as Record<string, unknown>;
+
+  if (Array.isArray(cfg.args) || typeof cfg.command === 'string' || cfg.env !== undefined) {
+    const display: Record<string, unknown> = {};
+    if (typeof cfg.command === 'string') display.command = cfg.command;
+    if (Array.isArray(cfg.args)) display.args_count = cfg.args.length;
+    if (cfg.env && typeof cfg.env === 'object') display.env_count = Object.keys(cfg.env).length;
+    return display;
+  }
+
+  if (typeof cfg.url === 'string') {
+    try {
+      return { url_origin: new URL(cfg.url).origin };
+    } catch {
+      return {};
+    }
+  }
+
+  return {};
+}
+
+// Decrypts a row's connection_config, replaces the encrypted columns with
+// the derived connection_display, and returns a NEW object — the encrypted
+// Buffers never survive into what gets passed to res.json.
+function withConnectionDisplay(row: Record<string, unknown>): Record<string, unknown> {
+  const { connection_config_encrypted, connection_config_nonce, ...rest } = row;
+  const config = decryptConnectionConfig(
+    connection_config_encrypted as Buffer,
+    connection_config_nonce as Buffer
+  );
+  return { ...rest, connection_display: buildConnectionDisplay(config) };
 }
 
 export default router;

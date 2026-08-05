@@ -43,6 +43,17 @@ jest.mock('../db/pool', () => ({
 import { createApp } from '../app';
 import { runReconcilePass } from '../services/agent-reconciler';
 import { resetStatusVerification } from '../services/agent-status-verification';
+import { encryptProviderKey } from '../services/provider-key-crypto';
+
+// GET /mcp-servers/:id decrypts connection_config_encrypted/_nonce to
+// compute connection_display (app#369) — a mock row for that route needs
+// real ciphertext or decryption throws before this describe block's
+// assertions are ever reached.
+const MCP_TEST_ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
+function mcpEncryptedColumns() {
+  const { encrypted, nonce } = encryptProviderKey(JSON.stringify({ command: 'npx' }), MCP_TEST_ENCRYPTION_KEY);
+  return { connection_config_encrypted: encrypted, connection_config_nonce: nonce };
+}
 
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -99,10 +110,12 @@ beforeEach(() => {
   mockContainerInspect.mockReset();
   resetStatusVerification();
   process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+  process.env.PROVIDER_KEY_ENCRYPTION_KEY = MCP_TEST_ENCRYPTION_KEY;
 });
 
 afterEach(() => {
   delete process.env.DATABASE_URL;
+  delete process.env.PROVIDER_KEY_ENCRYPTION_KEY;
 });
 
 describe('GET /workflows', () => {
@@ -185,7 +198,7 @@ describe('GET /mcp-servers/:id — the payload with no reader', () => {
     await reconcileWith(() => Promise.reject(proxyUnreachable()));
 
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'mcp-1', name: 'files' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'mcp-1', name: 'files', ...mcpEncryptedColumns() }] })
       .mockResolvedValueOnce({
         rows: [{ id: 'uuid-1', name: 'Test Agent', agent_id: 'test-agent', status: 'running', enabled: true }],
       });
@@ -202,7 +215,7 @@ describe('GET /mcp-servers/:id — the payload with no reader', () => {
     await reconcileWith(() => Promise.resolve(runningContainer()));
 
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'mcp-1', name: 'files' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'mcp-1', name: 'files', ...mcpEncryptedColumns() }] })
       .mockResolvedValueOnce({
         rows: [{ id: 'uuid-1', name: 'Test Agent', agent_id: 'test-agent', status: 'running', enabled: true }],
       });
