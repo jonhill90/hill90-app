@@ -86,7 +86,13 @@ function inferencePollMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 3000;
 }
 
-import { createBoundedSseWriter, SSE_DEFAULTS } from '../services/sse-writer';
+import {
+  createBoundedSseWriter,
+  SSE_DEFAULTS,
+  createPollFailureSignal,
+  failureThresholdFor,
+  sseErrorFrame,
+} from '../services/sse-writer';
 import {
   generateAgentAkmToken,
   getAkmEnvVars,
@@ -2267,6 +2273,22 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
 
         // Phase 3: inference poll
         const pollMs = inferencePollMs();
+        // app#443: this catch used to be silent, leaving the client seeing
+        // only heartbeats for as long as the failure lasted — inconsistent
+        // with this route's OWN one-shot branch below, which 502s explicitly
+        // on the identical getRecentInference query failing rather than
+        // returning a response that looks complete.
+        const pollFailureSignal = createPollFailureSignal(
+          failureThresholdFor(pollMs),
+          () => {
+            if (res.writableEnded || res.destroyed) return;
+            sse.write(sseErrorFrame(
+              'Updates may be delayed',
+              'This stream has been unable to reach the inference log for a while. ' +
+              'It is still connected and will resume automatically once the problem clears.',
+            ));
+          },
+        );
         pollInterval = setInterval(async () => {
           if (res.writableEnded || res.destroyed) return;
           try {
@@ -2283,8 +2305,10 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
               cursorCreatedAt = last.created_at.toISOString();
               cursorId = last.id;
             }
+            pollFailureSignal.recordSuccess();
           } catch (err) {
             console.error('[agents] SSE inference poll failed (continuing):', err);
+            pollFailureSignal.recordFailure();
           }
         }, pollMs);
 

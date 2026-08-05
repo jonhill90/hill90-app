@@ -27,7 +27,16 @@ const EVENTS = SRC.slice(
 
 describe('the thread event stream adopts the bounded SSE writer, like its DB-polled twin', () => {
   it('imports it', () => {
-    expect(SRC).toContain("import { createBoundedSseWriter, SSE_DEFAULTS } from '../services/sse-writer'");
+    // Not an exact-line match: app#443 added more named imports from the same
+    // module (createPollFailureSignal, failureThresholdFor, sseErrorFrame),
+    // which is a legitimate reason for this import to span multiple lines.
+    // The claim this test makes is narrower — these two names come from this
+    // module — and should not break every time that module gains a new export
+    // this route also starts using.
+    const importMatch = SRC.match(/import\s*\{([^}]*)\}\s*from\s*'\.\.\/services\/sse-writer'/);
+    expect(importMatch).not.toBeNull();
+    expect(importMatch![1]).toContain('createBoundedSseWriter');
+    expect(importMatch![1]).toContain('SSE_DEFAULTS');
   });
 
   it('constructs it with the shared hard cap before opening any agent stream', () => {
