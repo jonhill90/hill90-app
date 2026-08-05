@@ -1,0 +1,33 @@
+-- app#374: agents.env_vars stored operator-supplied environment variables —
+-- confirmed by the UI's own AgentClaudeConfig.tsx form, which exists
+-- specifically to collect a raw Anthropic API key into this column — in
+-- plain JSONB, at rest and on every read (agents.ts:572, GET /:id; the
+-- RETURNING clause on PUT /:id). Same worst tier mcp_servers.connection_config
+-- was before #372.
+--
+-- ENCRYPTED, NOT WITHHELD-ONLY, using the SAME already-established pattern
+-- (encryptProviderKey/decryptProviderKey, AES-256-GCM) rather than inventing
+-- a second scheme — matching #372's mcp_servers fix and #369's
+-- provider_connections reference exactly. WHOLE-BLOB, NOT PER-KEY, for the
+-- same reason #372 gave for connection_config: env_vars is an arbitrary
+-- operator-supplied string map with no named secret field — it might hold
+-- ANTHROPIC_API_KEY or it might hold LOG_LEVEL=debug — and an allowlist of
+-- "safe" cleartext keys would have to be maintained forever and would be
+-- exactly the kind of assumption that goes stale silently.
+--
+-- NULLABLE, UNLIKE #372/#376's encrypted columns, and that difference is
+-- deliberate: mcp_servers and workflows had ZERO rows when those migrations
+-- ran, so NOT NULL could be added directly. agents has ONE row (confirmed on
+-- production immediately before this migration was written), with env_vars
+-- at the default '{}' — not zero rows, so a blind NOT NULL is not free here,
+-- and the migration runner executes raw SQL, which cannot itself perform
+-- AES-256-GCM to backfill that row's (empty) value into ciphertext. NULL in
+-- env_vars_encrypted/env_vars_nonce means "nothing encrypted yet" and the
+-- application treats that as an empty object — accurate for the one row
+-- that exists today, since '{}' carries no secret to lose — and gets
+-- populated the next time that agent's env_vars is written. A genuinely
+-- populated column would need an app-level backfill step this file
+-- deliberately does not attempt.
+ALTER TABLE agents DROP COLUMN env_vars;
+ALTER TABLE agents ADD COLUMN env_vars_encrypted BYTEA;
+ALTER TABLE agents ADD COLUMN env_vars_nonce BYTEA;
