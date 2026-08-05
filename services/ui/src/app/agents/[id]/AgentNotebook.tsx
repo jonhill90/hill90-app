@@ -38,6 +38,9 @@ export default function AgentNotebook({ agentId }: Props) {
   const [total, setTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
+  // fetchKnowledgePage now throws on a failed fetch (app#410) instead of
+  // returning the same shape as a genuinely-empty page.
+  const [loadError, setLoadError] = useState(false)
   const [selectedEntry, setSelectedEntry] = useState<NotebookEntry | null>(null)
   const [selectedContent, setSelectedContent] = useState<string | null>(null)
   const [contentLoading, setContentLoading] = useState(false)
@@ -60,8 +63,9 @@ export default function AgentNotebook({ agentId }: Props) {
       list.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
       setEntries(list)
       setTotal(page.total)
+      setLoadError(false)
     } catch {
-      // Non-fatal
+      if (!append) setLoadError(true)
     } finally {
       setLoading(false)
       setLoadingMore(false)
@@ -139,6 +143,13 @@ export default function AgentNotebook({ agentId }: Props) {
       {loading ? (
         <div className="flex items-center justify-center py-8" data-testid="loading">
           <div className="h-6 w-6 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" />
+        </div>
+      ) : loadError ? (
+        <div
+          className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+          data-testid="notebook-error"
+        >
+          <p className="text-sm text-red-400">Could not load notebook entries — try refreshing the page</p>
         </div>
       ) : entries.length > 0 ? (
         <div className="space-y-2" data-testid="entry-list">
