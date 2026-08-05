@@ -41,11 +41,31 @@ async def save_memory(request: Request, body: SaveMemoryRequest) -> dict[str, An
     if len(content) > 2000:
         raise HTTPException(status_code=400, detail="memory too long (max 2000 chars)")
 
-    # Generate embedding
-    try:
-        embedding = await generate_embedding(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate embedding: {e}")
+    # NO try/except AROUND THIS CALL — same reasoning as recall_memories'
+    # identical comment: generate_embedding catches every exception
+    # internally and returns None, so it never raises. A try/except here
+    # was dead code that could never fire.
+    embedding = await generate_embedding(content)
+
+    if embedding is None:
+        # The write-side half of the defect recall_memories' own docstring
+        # already fixed the read-side half of: memory_store.save_memory no
+        # longer swallows the resulting Postgres error (there is no
+        # try/except around its INSERT), but nothing here ever stopped
+        # embedding=None from reaching it in the first place. json.dumps(None)
+        # is the string "null", bound as $4::vector — verified directly
+        # against a real pgvector/pgvector:pg16 container: `'null'::vector`
+        # raises "invalid input syntax for type vector", an unhandled
+        # exception with no relation to what actually went wrong. The honest
+        # answer, same as recall's, is a failure — not an attempt.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cannot save memory: the embedding service is unavailable. "
+                "This is not the same as a save that was rejected — retry, "
+                "or check the AI service."
+            ),
+        )
 
     result = await memory_store.save_memory(pool, agent_id, content, embedding)
     return {"saved": True, "memory": result}
