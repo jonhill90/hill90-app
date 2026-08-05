@@ -6,7 +6,17 @@ import '@testing-library/jest-dom/vitest'
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
 
+// #380: KnowledgeGraph reads the session (to resolve a `user` node's own
+// sub to "You") and throws without a SessionProvider unless mocked. The
+// "You"/fallback resolution itself is exercised directly against labelFor()
+// below, not through this mock — a fixed value that matches nothing is
+// enough to let the component mount for the other tests in this file.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({ data: { user: { sub: 'no-such-sub-matches-a-fixture' } }, status: 'authenticated' }),
+}))
+
 import SharedKnowledgeClient from '@/app/harness/shared-knowledge/SharedKnowledgeClient'
+import { colorForType, baseRadiusForType, labelFor, legendTypes, type GraphNode } from '@/app/harness/shared-knowledge/KnowledgeGraph'
 
 /**
  * The graph must render the shape the SERVICE actually sends.
@@ -162,5 +172,107 @@ describe('KnowledgeGraph — the live response contract', () => {
     expect(screen.getByTestId('graph-counts')).toHaveTextContent('1 collections')
     expect(screen.getByTestId('knowledge-graph-canvas')).toBeInTheDocument()
     expect(screen.queryByText(/Failed to load graph/)).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * #380: the knowledge service (#379) started emitting a `user` node type —
+ * requester_type='user' from shared_retrievals, id `user-{sub}`, label the
+ * RAW sub, meta.retrieval_count. This renderer had only ever seen collection/
+ * source/agent. `user` fell through every lookup to the shared '#6b7280'
+ * grey and the raw-UUID label — on the node that is structurally the hub
+ * connecting all three collections into one component.
+ *
+ * Transcribed verbatim from Jon's report of the live response, not composed
+ * from this component's own assumptions — the file's own docstring above
+ * already explains why a fixture the test author writes cannot catch this
+ * class: it would just re-encode whatever the component already believes.
+ */
+const LIVE_USER_NODE: GraphNode = {
+  id: 'user-95f7362e-8918-485f-aba2-0e7684270003',
+  type: 'user',
+  label: '95f7362e-8918-485f-aba2-0e7684270003',
+  meta: { retrieval_count: 11 },
+}
+
+const LIVE_WITH_USER = {
+  ...LIVE,
+  nodes: [...LIVE.nodes, LIVE_USER_NODE],
+  edges: [
+    ...LIVE.edges,
+    {
+      source: LIVE_USER_NODE.id,
+      target: 'src-6b0e7f22-84f7-4dc7-82df-1c25745054b4',
+      label: 'retrieved',
+    },
+  ],
+}
+
+describe('KnowledgeGraph — a producer-added node type (#380)', () => {
+  beforeEach(() => mockFetch.mockReset())
+  afterEach(() => cleanup())
+
+  it('mounts and renders counts with a user node present, same as any other type', async () => {
+    mockGraph(LIVE_WITH_USER)
+    await openGraphTab()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-counts')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('knowledge-graph-canvas')).toBeInTheDocument()
+    expect(screen.queryByText(/Failed to load graph/)).not.toBeInTheDocument()
+  })
+
+  // The mount-level test above cannot reach the actual bug: jsdom's
+  // HTMLCanvasElement.getContext returns undefined (no `canvas` npm package
+  // installed), so the component's `if (!ctx) return` guard exits before
+  // colorForType/baseRadiusForType/labelFor/legendTypes are ever called —
+  // a component test would pass here whether or not the fix is real. These
+  // assert the actual decision functions directly, against the transcribed
+  // fixture, which is the only way this class of defect is catchable in
+  // this test environment.
+  it('gives `user` its own colour, not the shared unknown-type grey', () => {
+    const color = colorForType('user')
+    expect(color).not.toBe('#6b7280')
+    expect(color).toBe('#c026d3')
+    expect(color).not.toBe(colorForType('collection'))
+    expect(color).not.toBe(colorForType('source'))
+    expect(color).not.toBe(colorForType('agent'))
+  })
+
+  it('gives `user` a base radius larger than `source` — it is a hub, not a leaf', () => {
+    expect(baseRadiusForType('user')).toBeGreaterThan(baseRadiusForType('source'))
+  })
+
+  it('labels the current session user "You" instead of their raw sub', () => {
+    expect(labelFor(LIVE_USER_NODE, LIVE_USER_NODE.label)).toBe('You')
+  })
+
+  it('labels a DIFFERENT user with a short fragment, never the full UUID, and never fabricates a name', () => {
+    const label = labelFor(LIVE_USER_NODE, 'some-other-users-sub')
+    expect(label).not.toBe(LIVE_USER_NODE.label)
+    expect(label.length).toBeLessThan(LIVE_USER_NODE.label.length)
+    expect(label).not.toBe('You')
+  })
+
+  it('leaves non-user node labels untouched', () => {
+    expect(labelFor(LIVE.nodes[0] as GraphNode, 'anything')).toBe(LIVE.nodes[0].label)
+  })
+
+  it('includes `user` in the legend once it is actually present in the data', () => {
+    expect(legendTypes(LIVE_WITH_USER.nodes as GraphNode[])).toContain('user')
+  })
+
+  it('does not include `user` in the legend when no user node is present', () => {
+    expect(legendTypes(LIVE.nodes as GraphNode[])).not.toContain('user')
+  })
+
+  it('CONTROL: a type this component has truly never seen still gets a real colour and a legend entry', () => {
+    // Proves the fallback path itself, not just the now-known `user` case —
+    // the whole point of #380 is that the NEXT unseen type must not repeat
+    // this exact defect.
+    const mysteryNode: GraphNode = { id: 'mystery-1', type: 'widget', label: 'A Widget' }
+    expect(colorForType('widget')).not.toBe('#6b7280')
+    expect(legendTypes([mysteryNode])).toContain('widget')
   })
 })
