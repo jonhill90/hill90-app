@@ -149,6 +149,14 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
   const [stats, setStats] = useState<SharedStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
   const [timeRange, setTimeRange] = useState<string>('')
+  // app#383: which source row a graph-node click landed on, so the row can
+  // be visibly highlighted rather than just "the right tab is now showing".
+  // No auto-clear timer, deliberately — cleared only on the next collection
+  // selection (below), same as #383's own review flagged: a timer means a
+  // setState-after-unmount risk to guard against for a highlight that isn't
+  // worth that complexity. A highlight that persists until you click
+  // something else is not worse than one that vanishes on its own.
+  const [highlightedSourceId, setHighlightedSourceId] = useState<string | null>(null)
 
   // Form state
   const [collectionForm, setCollectionForm] = useState({ name: '', description: '', visibility: 'private' })
@@ -561,7 +569,16 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
       </div>
 
       {/* Knowledge Graph Tab */}
-      {activeTab === 'graph' && <KnowledgeGraph />}
+      {activeTab === 'graph' && (
+        <KnowledgeGraph
+          onNavigate={target => {
+            setActiveTab('collections')
+            const col = collections.find(c => c.id === target.collectionId) ?? null
+            setSelectedCollection(col)
+            setHighlightedSourceId(target.sourceId ?? null)
+          }}
+        />
+      )}
 
       {/* Collections & Sources Tab */}
       {activeTab === 'collections' && (
@@ -648,7 +665,7 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
                 {collections.map(col => (
                   <div
                     key={col.id}
-                    onClick={() => setSelectedCollection(col)}
+                    onClick={() => { setSelectedCollection(col); setHighlightedSourceId(null) }}
                     className={`rounded-lg border p-3 cursor-pointer transition-colors ${
                       selectedCollection?.id === col.id
                         ? 'border-brand-600 bg-navy-800'
@@ -844,7 +861,15 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
                       </thead>
                       <tbody className="divide-y divide-navy-700">
                         {sources.map(src => (
-                          <tr key={src.id} className="bg-navy-900 hover:bg-navy-800 transition-colors">
+                          <tr
+                            key={src.id}
+                            data-testid={`source-row-${src.id}`}
+                            className={`transition-colors ${
+                              src.id === highlightedSourceId
+                                ? 'bg-navy-800 border-l-2 border-l-brand-500'
+                                : 'bg-navy-900 hover:bg-navy-800'
+                            }`}
+                          >
                             <td className="px-4 py-3">
                               <div className="text-white font-medium">{src.title}</div>
                               {src.source_url && (
