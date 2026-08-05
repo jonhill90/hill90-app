@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { getPool } from '../db/pool';
-import { decryptProviderKey } from './provider-key-crypto';
+import { decryptProviderKey, ProviderKeyDecryptionError } from './provider-key-crypto';
 
 export type WebhookEvent = 'start' | 'stop' | 'error';
 
@@ -72,7 +72,20 @@ async function dispatchAsync(
     });
 
     const deliveries = rows.map((hook) => deliverWebhook(hook, body));
-    await Promise.allSettled(deliveries);
+    // app#396: this used to be `await Promise.allSettled(deliveries)` with the
+    // result thrown away — the ENTIRE reason allSettled exists here (one bad
+    // webhook must not sink the others) also meant a decrypt failure inside
+    // deliverWebhook rejected silently into a value nothing ever read. That
+    // specific case is now caught inside deliverWebhook itself (see below) and
+    // never reaches here as a rejection — but this loop stays as a backstop
+    // for any OTHER way deliverWebhook might reject, so this file cannot
+    // regress to the same silent-swallow shape for a different reason later.
+    const results = await Promise.allSettled(deliveries);
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        console.error(`[webhooks] Unexpected delivery failure for hook ${rows[i].id}:`, result.reason);
+      }
+    });
   } catch (err) {
     console.error(`[webhooks] Failed to dispatch ${event} for ${agentId}:`, err);
   }
@@ -125,7 +138,38 @@ async function deliverWebhook(hook: WebhookRow, body: string): Promise<void> {
     'User-Agent': 'Hill90-Webhooks/1.0',
   };
 
-  const secret = decryptWebhookSecret(hook);
+  // app#396: a webhook that HAS a secret configured must never be delivered
+  // UNSIGNED — a decrypt failure is not the same thing as "no secret was
+  // ever set", and treating it that way would silently downgrade a signed
+  // webhook to unsigned the moment PROVIDER_KEY_ENCRYPTION_KEY drifts from
+  // whatever encrypted this row. So decrypt is resolved BEFORE any network
+  // call, and a failure here skips delivery entirely — loudly, via the log
+  // line below, not by falling through to an unsigned POST.
+  //
+  // This used to be `const secret = decryptWebhookSecret(hook);` with no
+  // try/catch of its own, sitting inside deliverWebhook but OUTSIDE its one
+  // try/catch (which only ever wrapped the fetch call below). A thrown
+  // decrypt error rejected this function's returned promise, which
+  // dispatchAsync fed straight into `Promise.allSettled` and never
+  // inspected — the exact defect family this estate spent tonight closing
+  // elsewhere (a failure that reports nothing), newly shipped by #390 the
+  // same night, found while auditing the very key #390 introduced a fourth
+  // consumer of (#396).
+  let secret: string | null;
+  try {
+    secret = decryptWebhookSecret(hook);
+  } catch (err) {
+    const reason = err instanceof ProviderKeyDecryptionError
+      ? err.message
+      : 'unexpected error decrypting the stored secret';
+    console.error(
+      `[webhooks] SECRET DECRYPTION FAILED for hook ${hook.id} (${hook.url}) — ` +
+      `webhook NOT delivered (would have been unsigned). ${reason}`,
+      err,
+    );
+    return;
+  }
+
   if (secret && !isDiscord) {
     const signature = crypto
       .createHmac('sha256', secret)
