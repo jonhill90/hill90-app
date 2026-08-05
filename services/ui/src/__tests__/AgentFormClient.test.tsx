@@ -126,6 +126,20 @@ describe('AgentFormClient', () => {
     expect(screen.queryAllByRole('checkbox').filter(cb => cb.closest('label')?.closest('[class*="max-h-48"]'))).toHaveLength(0)
   })
 
+  it('shows an error banner, not a silently-empty picker, when a dropdown-data fetch fails', async () => {
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/user-models') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      if (url === '/api/model-policies') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_POLICIES) })
+      if (url === '/api/skills') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_SKILLS) })
+      if (url === '/api/container-profiles') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_CONTAINER_PROFILES) })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    })
+    render(<AgentFormClient />)
+    await waitFor(() => {
+      expect(screen.getByTestId('form-data-error')).toBeInTheDocument()
+    })
+  })
+
   // M2: One owned active user-model → only that model appears
   it('shows only owned active user models in picker', async () => {
     mockFetch.mockImplementation((url: string, opts?: any) => {
