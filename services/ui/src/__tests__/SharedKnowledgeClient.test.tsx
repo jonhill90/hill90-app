@@ -473,6 +473,90 @@ describe('SharedKnowledgeClient', () => {
     expect(screen.queryByText('No sources in this collection')).not.toBeInTheDocument()
   })
 
+  it('reports a partial-failure count, not silence, when some error-source deletes fail during cleanup', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    const SOURCES_WITH_TWO_ERRORS = [
+      ...MOCK_SOURCES,
+      {
+        id: 'src-4',
+        collection_id: 'col-1',
+        title: 'Also Failed',
+        source_type: 'web_page',
+        source_url: 'https://example.com/also-broken',
+        status: 'error',
+        error_message: 'Timed out',
+        content_hash: '',
+        created_at: '2026-02-28T15:00:00Z',
+      },
+    ]
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/shared-knowledge/collections') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_COLLECTIONS) })
+      }
+      if (typeof url === 'string' && url.startsWith('/api/shared-knowledge/sources?')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(SOURCES_WITH_TWO_ERRORS) })
+      }
+      if (url === '/api/shared-knowledge/sources/src-3' && opts?.method === 'DELETE') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      if (url === '/api/shared-knowledge/sources/src-4' && opts?.method === 'DELETE') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'db unavailable' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<SharedKnowledgeClient />)
+    await waitFor(() => {
+      expect(screen.getByText('Engineering Docs')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Engineering Docs'))
+    await waitFor(() => {
+      expect(screen.getByText('Clean Up Errors')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Clean Up Errors'))
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('Deleted 1 of 2 error sources — 1 could not be deleted.')
+    })
+  })
+
+  it('shows no alert when every error-source delete in a cleanup succeeds', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/shared-knowledge/collections') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_COLLECTIONS) })
+      }
+      if (typeof url === 'string' && url.startsWith('/api/shared-knowledge/sources?')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_SOURCES) })
+      }
+      if (url === '/api/shared-knowledge/sources/src-3' && opts?.method === 'DELETE') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<SharedKnowledgeClient />)
+    await waitFor(() => {
+      expect(screen.getByText('Engineering Docs')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Engineering Docs'))
+    await waitFor(() => {
+      expect(screen.getByText('Clean Up Errors')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Clean Up Errors'))
+
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith('/api/shared-knowledge/sources/src-3', expect.objectContaining({ method: 'DELETE' }))
+    })
+    expect(window.alert).not.toHaveBeenCalled()
+  })
+
   it('shows collection filter in search tab', async () => {
     render(<SharedKnowledgeClient />)
 
