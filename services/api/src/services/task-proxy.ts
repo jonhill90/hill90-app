@@ -3,12 +3,26 @@
  * internal admin task endpoints. Authenticated with AKM_INTERNAL_SERVICE_TOKEN.
  */
 
+import { totalFrom } from '../helpers/upstream-total';
+
 const AKM_SERVICE_URL = process.env.AKM_SERVICE_URL || 'http://knowledge:8002';
 const AKM_INTERNAL_SERVICE_TOKEN = process.env.AKM_INTERNAL_SERVICE_TOKEN;
 
 export interface ProxyResponse {
   status: number;
   data: unknown;
+  /**
+   * The real row count upstream, from `X-Total-Count` — NOT `data.length`.
+   *
+   * `list_tasks` bounds at 500 by default (`internal_admin_tasks.py`) and this
+   * proxy never overrides that, so a board with more than 500 tasks was
+   * silently cut with nothing to say so: `TaskBoardClient` rendered
+   * `tasks.length` as if it were the count of every task, agreeing with
+   * itself in exactly the shape #180 and #215 already named. `totalFrom` is
+   * reused rather than reimplemented — see its own header comment for why a
+   * second copy of "a page length is not a total" is the defect, not a fix.
+   */
+  total: number | null;
 }
 
 async function proxyRequest(
@@ -18,7 +32,7 @@ async function proxyRequest(
   body?: unknown,
 ): Promise<ProxyResponse> {
   if (!AKM_INTERNAL_SERVICE_TOKEN) {
-    return { status: 503, data: { error: 'Knowledge service not configured' } };
+    return { status: 503, data: { error: 'Knowledge service not configured' }, total: null };
   }
 
   const url = new URL(`${AKM_SERVICE_URL}${path}`);
@@ -45,11 +59,11 @@ async function proxyRequest(
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    return { status: 502, data: { error: 'Knowledge service unavailable' } };
+    return { status: 502, data: { error: 'Knowledge service unavailable' }, total: null };
   }
 
   const data = await resp.json();
-  return { status: resp.status, data };
+  return { status: resp.status, data, total: totalFrom(resp, data) };
 }
 
 export async function listTasks(agentId?: string, status?: string): Promise<ProxyResponse> {
