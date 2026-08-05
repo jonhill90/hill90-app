@@ -45,8 +45,14 @@ def handle_chat(
     tools_config: ToolsConfig | None = None,
     tool_loop_config: ToolLoopConfig | None = None,
     correlation_id: str | None = None,
-) -> None:
-    """Handle a chat work item: dispatch to terminal or legacy tool loop."""
+) -> bool:
+    """Handle a chat work item: dispatch to terminal or legacy tool loop.
+
+    Returns whether a real answer was delivered to the caller (a "complete"
+    callback), as opposed to an "error" one or no dispatch being attempted
+    at all. runtime.py's _run_chat uses this for an honest work_completed
+    success field — previously hardcoded True regardless (app#436).
+    """
     thread_id = payload.get("thread_id", "unknown")
     message_id = payload.get("message_id", "unknown")
     model = payload.get("model", "gpt-4o-mini")
@@ -69,7 +75,7 @@ def handle_chat(
             correlation_id=correlation_id,
             metadata={"work_id": work_id},
         )
-        return
+        return False
 
     if not chat_callback_token:
         emitter.emit(
@@ -82,7 +88,7 @@ def handle_chat(
             correlation_id=correlation_id,
             metadata={"work_id": work_id},
         )
-        return
+        return False
 
     # Dispatch: direct commands go to tmux, everything else goes through
     # the tool-use loop (LLM reasoning with tool calls visible in terminal)
@@ -97,7 +103,7 @@ def handle_chat(
                 break
 
         if user_message and _classify_message(user_message) == "command":
-            _run_terminal_task(
+            return _run_terminal_task(
                 api_messages=api_messages,
                 soul=soul,
                 rules=rules,
@@ -109,7 +115,6 @@ def handle_chat(
                 emitter=emitter,
                 correlation_id=correlation_id,
             )
-            return
 
     # ── Tool-use loop: LLM reasons and executes via tools ──
     if not model_router_token:
@@ -118,7 +123,7 @@ def handle_chat(
             status="error", error_message="MODEL_ROUTER_TOKEN not configured",
             emitter=emitter, work_id=work_id, correlation_id=correlation_id,
         )
-        return
+        return False
 
     # Assemble system prompt (agentbox is sole owner — §7.5)
     system_content = ""
@@ -184,7 +189,7 @@ def handle_chat(
     loop_config = tool_loop_config or ToolLoopConfig()
 
     # Run the tool-calling loop
-    _run_tool_loop(
+    return _run_tool_loop(
         messages=final_messages,
         tool_definitions=tool_defs,
         loop_config=loop_config,
@@ -363,11 +368,14 @@ def _run_terminal_task(
     work_id: str,
     emitter: EventEmitter,
     correlation_id: str | None = None,
-) -> None:
+) -> bool:
     """Run a direct shell command in the visible tmux terminal.
 
     Only called for messages classified as 'command' (ls, git, etc.).
     Complex tasks go through the tool-use loop instead.
+
+    Returns whether a real ("complete") answer was delivered, as opposed to
+    an "error" callback — see app#436.
     """
     start_time = time.monotonic()
 
@@ -384,7 +392,7 @@ def _run_terminal_task(
             status="error", error_message="No user message found",
             emitter=emitter, work_id=work_id, correlation_id=correlation_id,
         )
-        return
+        return False
 
     emitter.emit(
         type="terminal_task_start",
@@ -429,6 +437,7 @@ def _run_terminal_task(
             duration_ms=duration_ms,
             emitter=emitter, work_id=work_id, correlation_id=correlation_id,
         )
+        return True
 
     except Exception as exc:
         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -450,6 +459,7 @@ def _run_terminal_task(
             duration_ms=duration_ms,
             emitter=emitter, work_id=work_id, correlation_id=correlation_id,
         )
+        return False
 
 
 def _run_direct_command(user_message: str) -> str:
@@ -778,8 +788,14 @@ def _run_tool_loop(
     work_id: str,
     emitter: EventEmitter,
     correlation_id: str | None = None,
-) -> None:
-    """Iterative tool-calling loop. Calls LLM, executes tools, repeats."""
+) -> bool:
+    """Iterative tool-calling loop. Calls LLM, executes tools, repeats.
+
+    Returns whether the loop ended by delivering a real ("complete") answer,
+    as opposed to an "error" callback. The caller (handle_chat, and above it
+    runtime.py's _run_chat) uses this to report an honest work_completed
+    success — see app#436.
+    """
     inference_url = f"{ai_service_url}/v1/chat/completions"
     total_input_tokens = 0
     total_output_tokens = 0
@@ -801,7 +817,7 @@ def _run_tool_loop(
                 duration_ms=int(elapsed * 1000),
                 emitter=emitter, work_id=work_id, correlation_id=correlation_id,
             )
-            return
+            return False
 
         emitter.emit(
             type="chat_inference_start",
@@ -846,7 +862,7 @@ def _run_tool_loop(
                 duration_ms=duration_ms,
                 emitter=emitter, work_id=work_id, correlation_id=correlation_id,
             )
-            return
+            return False
         except Exception as exc:
             duration_ms = int((time.monotonic() - loop_start) * 1000)
             logger.error("Chat inference error on iteration %d: %s", iteration, exc, exc_info=True)
@@ -859,7 +875,7 @@ def _run_tool_loop(
                 duration_ms=duration_ms,
                 emitter=emitter, work_id=work_id, correlation_id=correlation_id,
             )
-            return
+            return False
 
         call_duration = int((time.monotonic() - call_start) * 1000)
 
@@ -875,7 +891,7 @@ def _run_tool_loop(
                 duration_ms=int((time.monotonic() - loop_start) * 1000),
                 emitter=emitter, work_id=work_id, correlation_id=correlation_id,
             )
-            return
+            return False
 
         result = resp.json()
 
@@ -903,7 +919,7 @@ def _run_tool_loop(
                 duration_ms=int((time.monotonic() - loop_start) * 1000),
                 emitter=emitter, work_id=work_id, correlation_id=correlation_id,
             )
-            return
+            return False
 
         choice = choices[0]
         message = choice.get("message", {})
@@ -958,7 +974,7 @@ def _run_tool_loop(
                 error_message=truncation_note,
                 emitter=emitter, work_id=work_id, correlation_id=correlation_id,
             )
-            return
+            return True
 
         # Append the assistant message with tool_calls to the conversation
         assistant_msg: dict = {"role": "assistant"}
@@ -1072,6 +1088,7 @@ def _run_tool_loop(
         duration_ms=total_duration,
         emitter=emitter, work_id=work_id, correlation_id=correlation_id,
     )
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -235,7 +235,16 @@ class AgentRuntime:
     def _run_chat(self, payload: dict, work_id: str, summary: str, correlation_id: str | None = None) -> None:
         """Execute chat handler in background thread."""
         try:
-            handle_chat(
+            # handle_chat now returns whether it actually delivered a real
+            # answer (app#436) — this mirrors _run_shell's own
+            # `success=result.get("success", False)` a few lines below,
+            # rather than assuming success whenever no exception was raised.
+            # Before this, a chat work item that handle_chat's OWN validation
+            # rejected (e.g. missing callback_url, which emits its own
+            # work_failed and returns normally) still produced a SECOND,
+            # contradicting work_completed/success=true event for the same
+            # work item.
+            success = handle_chat(
                 payload,
                 soul=self.soul,
                 rules=self.rules,
@@ -251,7 +260,7 @@ class AgentRuntime:
                 input_summary=summary,
                 output_summary=f"work_id={work_id}",
                 duration_ms=None,
-                success=True,
+                success=success,
                 correlation_id=correlation_id,
                 metadata={"work_id": work_id},
             )
