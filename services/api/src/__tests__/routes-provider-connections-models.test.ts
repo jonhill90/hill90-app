@@ -127,6 +127,44 @@ describe('Provider Connections — Model Listing', () => {
     expect(res.body.error).toBe('Invalid API key');
   });
 
+  // Wrong-record sweep (app#470): `errorMsg = err.response?.data?.error ||
+  // err.message` has no final `|| ''` fallback, unlike its two siblings in
+  // this same file (the /validate route, and the bulk-validate loop), which
+  // both end `... || err.message || ''`. A rejection with neither
+  // `response.data.error` nor `.message` — a plain object, the shape axios
+  // itself is not the only thing capable of throwing here — made errorMsg
+  // undefined, and JSON.stringify DROPS an undefined `error` key entirely.
+  // That is the exact bug this route's own B7 test above says #396 fixed
+  // one layer up (a decrypt failure rendering as "no models" instead of a
+  // reason): a caller checking `if (data.error)` saw neither a models list
+  // nor an explanation — worse than an empty string, because the key
+  // wasn't there to check at all. Matches the sibling `|| ''` fallback
+  // exactly, not a stronger guarantee: an empty string is still what a
+  // truly informationless rejection produces, same as its siblings.
+  it('THE ASSERTION THAT MATTERS: a rejection with neither response.data.error nor .message still keeps the error key present', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'conn-1', provider: 'openai',
+        api_key_encrypted: Buffer.from('enc'), api_key_nonce: Buffer.from('nonce'),
+        api_base_url: null,
+      }],
+    });
+
+    mockAxiosPost.mockRejectedValueOnce({ code: 'ECONNREFUSED' });
+
+    const res = await request(app)
+      .get('/provider-connections/conn-1/models')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.models).toEqual([]);
+    // Present and a string — not dropped by JSON.stringify(undefined) —
+    // even though its value can legitimately be '' when truly nothing is
+    // available, matching this file's own established sibling fallback.
+    expect('error' in res.body).toBe(true);
+    expect(typeof res.body.error).toBe('string');
+  });
+
   // POSITIVE CONTROL for #361: this route used `WHERE id = $1 AND
   // created_by = $2` with no admin branch, unlike DELETE /:id in
   // routes/provider-connections.ts, which already has one. A platform

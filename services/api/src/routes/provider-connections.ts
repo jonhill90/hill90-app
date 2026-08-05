@@ -491,7 +491,13 @@ router.get('/:id/models', async (req: Request, res: Response) => {
       provider: row.provider,
     });
   } catch (err: any) {
-    const errorMsg = err.response?.data?.error || err.message;
+    // Same fallback as this file's own /validate route and bulk-validate
+    // loop — a rejection with neither response.data.error nor .message
+    // makes errorMsg undefined, and JSON.stringify drops an undefined
+    // `error` key entirely, so a caller checking `if (data.error)` sees
+    // neither a models list nor an explanation. The exact shape #396 fixed
+    // one layer up in this same route's 200-with-error branch just above.
+    const errorMsg = (err.response?.data?.error || err.message || '').slice(0, 500);
     res.json({
       models: [],
       error: errorMsg,
