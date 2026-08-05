@@ -316,6 +316,41 @@ describe('Provider Connections CRUD', () => {
     expect(updateCall[1][2]).toBe('Incorrect API key provided'); // last_validation_error param
   });
 
+  // POSITIVE CONTROL for #361 — see the PUT test above for the full context.
+  it('admin can validate a platform connection (created_by IS NULL) — #361', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'platform-conn', provider: 'openai',
+        api_key_encrypted: Buffer.from('encrypted-data'),
+        api_key_nonce: Buffer.from('nonce-data'),
+        api_base_url: null,
+      }],
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE
+
+    mockAxiosPost.mockResolvedValueOnce({ data: { valid: true } });
+
+    const res = await request(app)
+      .post('/provider-connections/platform-conn/validate')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.is_valid).toBe(true);
+    const fetchCall = mockQuery.mock.calls[0];
+    expect(fetchCall[0]).not.toContain('created_by');
+    expect(fetchCall[1]).toEqual(['platform-conn']);
+  });
+
+  it('non-admin still gets 404 validating a platform connection they do not own — #361', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .post('/provider-connections/platform-conn/validate')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(404);
+  });
+
   it('update re-encrypts key', async () => {
     // Verify ownership query
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'uuid-1' }] });
@@ -339,6 +374,50 @@ describe('Provider Connections CRUD', () => {
     expect(updateCall[0]).toContain('api_key_encrypted');
     expect(updateCall[0]).toContain('api_key_nonce');
     expect(updateCall[0]).toContain('is_valid = NULL');
+  });
+
+  // POSITIVE CONTROL for #361: PUT /:id, GET /:id/models and POST
+  // /:id/validate all used `WHERE id = $1 AND created_by = $2` with no admin
+  // branch — unlike DELETE /:id, which already has one. A platform
+  // connection (created_by IS NULL) could never match that predicate for
+  // ANYONE, admin included, so it was visible on the Connections page
+  // (#359) with fully clickable "Test" and "Edit" buttons that always 404'd.
+  it('admin can update a platform connection (created_by IS NULL) — #361', async () => {
+    // Ownership query, admin branch: must not bind created_by, or it could
+    // never match a NULL-owned row.
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'platform-conn' }] });
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'platform-conn', name: 'Platform OpenAI (renamed)', provider: 'openai',
+        api_base_url: null, is_valid: null,
+        created_at: '2026-01-01', updated_at: '2026-01-01',
+      }],
+    });
+
+    const res = await request(app)
+      .put('/provider-connections/platform-conn')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Platform OpenAI (renamed)' });
+
+    expect(res.status).toBe(200);
+    const ownershipCall = mockQuery.mock.calls[0];
+    expect(ownershipCall[0]).not.toContain('created_by');
+    expect(ownershipCall[1]).toEqual(['platform-conn']);
+  });
+
+  // The arm that stops this fix becoming a privilege bug: a non-admin must
+  // still be refused a platform connection, not merely an admin be let in.
+  it('non-admin still gets 404 updating a platform connection they do not own — #361', async () => {
+    // Non-admin branch binds created_by = user.sub, which a NULL-owned row
+    // can never match — the query itself returns nothing to update.
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .put('/provider-connections/platform-conn')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ name: 'Hijacked name' });
+
+    expect(res.status).toBe(404);
   });
 
   it('requires user role', async () => {

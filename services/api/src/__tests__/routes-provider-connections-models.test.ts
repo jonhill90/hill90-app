@@ -49,6 +49,7 @@ function makeToken(sub: string, roles: string[]) {
 
 const userToken = makeToken('regular-user', ['user']);
 const userBToken = makeToken('user-b', ['user']);
+const adminToken = makeToken('admin-user', ['admin', 'user']);
 
 describe('Provider Connections — Model Listing', () => {
   beforeEach(() => {
@@ -124,6 +125,54 @@ describe('Provider Connections — Model Listing', () => {
     expect(res.status).toBe(200);
     expect(res.body.models).toEqual([]);
     expect(res.body.error).toBe('Invalid API key');
+  });
+
+  // POSITIVE CONTROL for #361: this route used `WHERE id = $1 AND
+  // created_by = $2` with no admin branch, unlike DELETE /:id in
+  // routes/provider-connections.ts, which already has one. A platform
+  // connection (created_by IS NULL) could never match that predicate for
+  // ANYONE — admin included — so listing a platform connection's available
+  // models always 404'd, even though the connection is visible on the
+  // Connections page (#359) with a fully clickable button that reaches this
+  // route.
+  it('B5: admin can list models for a platform connection (created_by IS NULL) — #361', async () => {
+    // Ownership query, admin branch: must not bind created_by, or it could
+    // never match a NULL-owned row.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'platform-conn', provider: 'openai',
+        api_key_encrypted: Buffer.from('enc'), api_key_nonce: Buffer.from('nonce'),
+        api_base_url: null,
+      }],
+    });
+    mockAxiosPost.mockResolvedValueOnce({
+      data: {
+        models: [
+          { id: 'openai/gpt-4o', display_name: 'gpt-4o', detected_type: 'chat', capabilities: ['chat'] },
+        ],
+      },
+    });
+
+    const res = await request(app)
+      .get('/provider-connections/platform-conn/models')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.models).toHaveLength(1);
+    const fetchCall = mockQuery.mock.calls[0];
+    expect(fetchCall[0]).not.toContain('created_by');
+    expect(fetchCall[1]).toEqual(['platform-conn']);
+  });
+
+  // The arm that stops this fix becoming a privilege bug.
+  it('B6: non-admin still gets 404 listing models for a platform connection they do not own — #361', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get('/provider-connections/platform-conn/models')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(404);
   });
 
   // B4: AI service timeout

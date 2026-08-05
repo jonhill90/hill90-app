@@ -22,6 +22,34 @@ function isAdmin(req: Request): boolean {
   return roles.includes('admin');
 }
 
+/**
+ * Fetch a connection by id the way `DELETE /:id` already does — an admin
+ * reaches ANY connection, including a platform one (`created_by IS NULL`);
+ * everyone else only their own. `created_by = $1` alone can never match a
+ * NULL owner, so without the admin branch a platform connection is a 404
+ * dead end no matter who asks — the same coupling GET / had before #359,
+ * on a single row instead of a list (#361).
+ *
+ * `DELETE /:id` is not routed through this — it already had the correct
+ * branch and is left as it was, working, rather than folded into a helper
+ * it doesn't need touched.
+ */
+async function fetchOwnedConnection(
+  pool: ReturnType<typeof getPool>,
+  req: Request,
+  id: string,
+  columns: string,
+): Promise<{ rows: any[] }> {
+  if (isAdmin(req)) {
+    return pool.query(`SELECT ${columns} FROM provider_connections WHERE id = $1`, [id]);
+  }
+  const user = (req as any).user;
+  return pool.query(
+    `SELECT ${columns} FROM provider_connections WHERE id = $1 AND created_by = $2`,
+    [id, user.sub],
+  );
+}
+
 // GET /provider-connections — list own connections, plus platform-wide ones
 //
 // `created_by = $1` alone can never match a platform connection: SQL NULL
@@ -233,15 +261,11 @@ router.put('/:id', async (req: Request, res: Response) => {
     return;
   }
 
-  const user = (req as any).user;
   const { id } = req.params;
   const { name, provider, api_key, api_base_url } = req.body;
 
-  // Verify ownership
-  const existing = await pool.query(
-    'SELECT id FROM provider_connections WHERE id = $1 AND created_by = $2',
-    [id, user.sub]
-  );
+  // Verify ownership — admin reaches a platform connection too (#361)
+  const existing = await fetchOwnedConnection(pool, req, id, 'id');
   if (existing.rows.length === 0) {
     res.status(404).json({ error: 'Connection not found' });
     return;
@@ -411,15 +435,11 @@ router.get('/:id/models', async (req: Request, res: Response) => {
     return;
   }
 
-  const user = (req as any).user;
   const { id } = req.params;
 
-  // Fetch connection (owner-scoped)
-  const conn = await pool.query(
-    `SELECT id, provider, api_key_encrypted, api_key_nonce, api_base_url
-     FROM provider_connections
-     WHERE id = $1 AND created_by = $2`,
-    [id, user.sub]
+  // Fetch connection — admin reaches a platform connection too (#361)
+  const conn = await fetchOwnedConnection(
+    pool, req, id, 'id, provider, api_key_encrypted, api_key_nonce, api_base_url',
   );
 
   if (conn.rows.length === 0) {
@@ -476,15 +496,11 @@ router.post('/:id/validate', async (req: Request, res: Response) => {
     return;
   }
 
-  const user = (req as any).user;
   const { id } = req.params;
 
-  // Fetch encrypted key (owner-scoped)
-  const conn = await pool.query(
-    `SELECT id, provider, api_key_encrypted, api_key_nonce, api_base_url
-     FROM provider_connections
-     WHERE id = $1 AND created_by = $2`,
-    [id, user.sub]
+  // Fetch encrypted key — admin reaches a platform connection too (#361)
+  const conn = await fetchOwnedConnection(
+    pool, req, id, 'id, provider, api_key_encrypted, api_key_nonce, api_base_url',
   );
 
   if (conn.rows.length === 0) {
