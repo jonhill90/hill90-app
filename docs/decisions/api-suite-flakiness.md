@@ -3655,8 +3655,10 @@ session, shows `conclusion: success`. Since a guard violation fails the job by
 construction, a clean job conclusion is decisive: the guard would have failed the run.
 Confirmed further by downloading and inspecting 4 of those runs' `api-flake-evidence`
 artifacts directly — `identityguard.jsonl` is absent from all 4 (it writes only on a
-real violation, so absence means zero, not "didn't execute"). This session's own 80
-fresh local full-suite runs (three 20-run batches, below) add zero further violations.
+real violation, so absence means zero, not "didn't execute"). This session's own 60
+fresh local full-suite runs (three 20-run batches, below — the earlier "80" here was a
+same-session arithmetic error, corrected once noticed: three batches of 20 is 60, not
+80) add zero further violations.
 **A single captured instance would have settled more than the rest of this round put
 together; there isn't one yet.** The guard stays armed on every future run — this is a
 negative result with its sample size stated, not a claim the underlying anomaly doesn't
@@ -3679,12 +3681,35 @@ generic, failures should scatter roughly evenly across the real-listener files,
 weighted by each file's socket volume — not concentrate in one.
 
 **That's not what happened.** A 20-run full-suite batch (`--maxWorkers=10`, local
-default) failed 11/20 (55%). `agents-events-poll-failure-signal.test.ts` alone
-accounted for 14 of the batch's roughly 30 individual test-failure instances — present
-in 5/20 runs overall (25%) and 5/11 failing runs (45%) — while every other failing test
-in the batch appeared at most twice. **The generic contention theory is falsified as
-stated**: it does not predict one file dominating this hard while thirteen other
-real-listener files barely register.
+default) failed 10/20 (50%). `agents-events-poll-failure-signal.test.ts` alone
+accounted for 7 of the batch's 17 distinct test-failure instances — present in 5/20 runs
+overall (25%) and 5/10 failing runs (50%) — while every other failing file in the batch
+appeared exactly once, in exactly one run. **The generic contention theory is falsified
+as stated**: it does not predict one file dominating this hard while ten other files —
+several of them among the thirteen other real-listener files — appear only once each.
+
+*(CORRECTION, same session: this paragraph originally read "failed 11/20 (55%)... 14 of
+the batch's roughly 30 individual test-failure instances... 5/11 failing runs (45%)...
+every other failing test in the batch appeared at most twice." Two separate mechanical
+errors, not a different methodology on either count. First: `grep`-counting jest's
+`● test name` lines double-counts, because jest prints every failing test's block twice
+per run (once inline as it completes, once more in the end-of-run summary), and the
+first pass over these logs summed both — the true instance count is 7, not 14, and
+every other file appears exactly once, not "at most twice." Second, independent error:
+the overall batch's failing-run count (11/20) was also wrong by one — the batch log's
+own `exit=1` lines, cross-checked against each run's own "Test Suites: N failed"
+summary line, both say 10/20, not 11 — an arithmetic slip while reading the batch log
+by eye, unrelated to the double-counting bug above. Re-derived by parsing each run's
+`FAIL`/`●` structure directly and deduplicating per run, and cross-checked against the
+independent `exit=1` and "Test Suites" counts: 10/20 runs failed overall, 7
+instances/5 runs for the target file, 1 instance/1 run for every other file in this
+specific batch, 17 total instances, not ~30. The qualitative finding — one file
+dominating far past what even scatter across real-listener files would predict — still
+holds under the corrected numbers; the magnitude was overstated by roughly 2x. **Not**
+caught before it was quoted elsewhere: PR #462's description and the round's own
+comment on issue #432 both carried the wrong figure and were corrected separately, in
+place, once this was found — see this round's own handoff section for the same
+correction restated where a reader of just the PR or the issue would see it.)*
 
 **The mechanism, found by reading the file's own docstring against its code — the same
 method as always: read the claim, then check it.** The file deliberately mocks
@@ -3703,11 +3728,12 @@ test's own margin, not the app, not generic contention.
 
 **Diagnostic experiment, not shipped, confirming the mechanism before touching the real
 fix.** Patched all six waits in a scratch copy to a real `setTimeout(r, 15)` (reverted
-immediately after), reran 20 more full-suite runs at the same worker count: 0/20 runs
-failed this file (vs. 5/20 baseline), and the two batches' failure sets did not overlap
-at all — the patched batch's 9 failures were spread one-or-two-deep across unrelated
-files, consistent with the general background population this investigation has
-already characterized. Fisher's exact on the 5/20 vs. 0/20 split: **p ≈ 0.047**. This
+immediately after), reran 20 more full-suite runs at the same worker count: 7/20 runs
+failed overall (35%), 0/20 for this file specifically (vs. 5/20 baseline), and the two
+batches' failure sets did not overlap at all — the patched batch's 9 distinct failing
+tests were spread across 9 different files, each appearing exactly once, consistent
+with the general background population this investigation has already characterized.
+Fisher's exact on the 5/20 vs. 0/20 split for the target file: **p ≈ 0.047**. This
 confirmed the mechanism. It was never proposed as the fix — see below.
 
 ### The fix: wait on the condition, not a fixed delay — and why the fixed delay was rejected even though it "worked"
@@ -3756,12 +3782,13 @@ turn out to be that case.
 
 **Verified, not asserted:** the test passes solo, fast, with no artificial delay
 (17ms/6ms/20ms per test, 3/3 pass). A fresh 20-run full-suite batch at the same
-`--maxWorkers=10` this file failed 5/20 times at: **0/20 failures for this file**,
-overall batch rate 8/20 (40%, ordinary noise against the 30-55% range this
-investigation has measured throughout — not a general fix, and not read as one). The
-8 failures that did occur were 7 different, unrelated tests, none repeating, consistent
-with the already-characterized background population. `tsc --noEmit` clean, `eslint`
-clean (0 errors, pre-existing `any`-typing warnings only).
+`--maxWorkers=10` this file previously failed 5/20 times at: **0/20 failures for this
+file**, overall batch rate 6/20 (30%, ordinary noise against the 30-55% range this
+investigation has measured throughout — not a general fix, and not read as one). Those
+6 failing runs produced 7 distinct failing tests across 6 different files (one run had
+two separate files fail, the other five had one each), none repeating, consistent with
+the already-characterized background population. `tsc --noEmit` clean, `eslint` clean
+(0 errors, pre-existing `any`-typing warnings only).
 
 ### Honesty about scope, stated because it is why this result is trustworthy
 
@@ -3771,7 +3798,7 @@ outrunning a single-tick wait under contention) is not machine-specific in kind,
 its trigger rate is; CI may see this file fail less often in absolute terms for the same
 underlying reason, or the same margin-per-tick issue could exist elsewhere and simply
 not have surfaced in twenty runs.** This does not explain the branch-shaped majority —
-the 8 failures in the fixed batch are exactly as unexplained as before this round
+the 7 failures in the fixed batch are exactly as unexplained as before this round
 started. It closes one real, mechanistically-verified, now-fixed contributor to what
 this session observed as timing-shaped flakiness; it is not a general fix for the
 suite's flake rate, and the correction above means it may not even be fully accounted
@@ -3792,3 +3819,125 @@ for under the "timing" label it would previously have been filed under.
 
 Full writeup, both batches' raw data, and the diagnostic-vs-real-fix distinction:
 issue #432.
+
+## Round twenty-two (2026-08-05, same day) — looking for the next target, and not finding one that fits the recipe
+
+Round twenty-one's method — find what dominates a batch's failures, read what it
+actually waits on, check whether each wait guards anything, replace fixed delays with
+condition polls — worked once. This round applied it to the next candidate. It did not
+produce a second fix, and that result is reported as directly as the one that did.
+
+### The counts this round is working from, pooled across all three round-twenty-one
+batches (60 runs total: `w10`/baseline-`setImmediate`, `w10patched`/diagnostic-15ms,
+`w10fixed`/shipped-fix — all three logged and re-parsed with the corrected,
+deduplicated method from round twenty-one's own correction), **excluding**
+`agents-events-poll-failure-signal.test.ts` itself, since it behaves differently across
+the three batches by design (that's the point of `w10patched`/`w10fixed`) and pooling it
+in would just re-measure the fix already shipped:
+
+```
+ 4 instances, 4 runs   routes-chat.test.ts
+ 2 instances, 2 runs   routes-storage.test.ts
+ 2 instances, 2 runs   routes-agents.test.ts
+ 2 instances, 2 runs   docs.test.ts
+ 2 instances, 2 runs   half-writes.test.ts
+ 2 instances, 2 runs   routes-skills.test.ts
+ 1 instance,  1 run    (eleven further files, one instance each)
+```
+
+`routes-chat.test.ts` is the nominal leader — 4 of 60 runs, roughly 7% — but that is a
+materially weaker signal than round twenty-one's target had (7 of 20 runs in ONE batch,
+25-50% by either measure). This round's target was chosen anyway, as the best available
+candidate, and the weakness of the signal is exactly why the outcome below turned out
+the way it did.
+
+### What `routes-chat.test.ts`'s four instances actually are
+
+Pulled the specific failure for each of the four occurrences rather than assuming they
+share a cause because they share a file:
+
+- `routes-chat.test.ts:357`, `POST /chat/threads rejects missing message`: `Expected:
+  400, Received: 501`. **This is the already-documented, already-closed 501 artifact**
+  from earlier in this document — a third-party daemon (`LogiPluginService`, serving
+  `websocket-sharp`) on this machine listens in the ephemeral port range supertest binds
+  from and answers 501 for a request that never reached this app at all. This document's
+  own standing instruction is not to re-litigate it. Re-flagged here only to name it, not
+  to reopen it.
+- `routes-chat.test.ts:507`, `asks the database for the newest rows, not the oldest`:
+  `TypeError: Cannot read properties of undefined (reading '0')` on
+  `mockQuery.mock.calls[3][0]` — the test expected a 4th mock call and only 3 (or fewer)
+  happened. A wrong CALL COUNT, not a late arrival — structurally different from the
+  round-twenty-one mechanism, where the write happened but hadn't been delivered yet.
+- `Chat multi-agent dispatch › ... @-mention routes to single agent (I9)`: a routing
+  assertion failure, no error text captured beyond the mismatch itself.
+- `Group broadcast dispatch › partial dispatch failure marks only failed placeholders as
+  error (T2)`: same shape as the previous — an assertion mismatch on dispatch outcome,
+  not a timeout or transport error.
+
+**Four different tests, four different describe blocks, no shared assertion shape.** The
+common thread is the FILE, not a mechanism — `routes-chat.test.ts` has 95 tests, the
+largest file in this batch's failure set by a wide margin, so it has more combinatorial
+exposure to whatever the general background rate is. That is a plausible, sufficient
+explanation on its own for why a 95-test file shows up more than a 10-test file, without
+needing any single defect at all.
+
+### Applying the two carried-over rules, as instructed
+
+**Rule one — delete a wait that guards nothing, and say so.** Checked for exactly the
+round-twenty-one shape: a fixed `setImmediate()`/`setTimeout()` standing in for a
+condition. `routes-chat.test.ts` has no such wait anywhere relevant to these four
+failures — grepped the whole file for `setTimeout`/`setImmediate`/`app.listen`/
+`createServer`/`waitUntil`: one incidental `setTimeout` at line 2056, inside an unrelated
+mock (`res.destroy()` callback timing for a different test entirely), not touching any
+of the four failing tests. **There is no wait to convert here, weak or otherwise — this
+file's failures are not wait-margin-shaped.**
+
+**Rule two — if the condition is not observable, say what would make it observable,
+because that is a finding about the code, not the test.** Does not apply either, in the
+sense the rule anticipates: these aren't cases of an unobservable condition being
+awaited badly. The 501 is an OS-level artifact with nothing to observe from inside the
+app or test — no code change here would fix a foreign process on the port. The
+call-count mismatch (`mock.calls[3]` undefined) is a **wrong number of calls**, which is
+either a genuine app-behavior question (did a request short-circuit before its 4th
+query, correctly or not?) or shared-mock-state carryover between tests — both real
+questions, but neither is "the test needs to wait longer for a value to become true."
+Applying round twenty-one's recipe here would be a category error: forcing a
+wait-margin diagnosis onto a failure that isn't wait-margin-shaped.
+
+### The honest result: no second target found at this sample size
+
+Round twenty-one's method produced a fix because the target had an unambiguous,
+outsized signal — one file responsible for something like a third of one batch's
+distinct failures, with a specific, findable, single mechanism once the file's own
+docstring was read against its code. Round twenty-two's nominal target has none of
+that: a thin 4-of-60 signal, four unrelated failure shapes, no fixed wait anywhere near
+any of them, and one of the four already explained by a defect this document closed
+before this investigation even started. **Manufacturing a "fix" here would mean picking
+one of these four and inventing a mechanism for it that the evidence doesn't support.**
+That is not this round's finding.
+
+What IS this round's finding, stated as a negative result with its basis: at 60 pooled
+runs, nothing in the population outside `agents-events-poll-failure-signal.test.ts`
+shows the signature that made round twenty-one's target legible — neither a dominant
+instance count nor a shared, findable mechanism across its failures. The branch-shaped
+majority remains exactly as unexplored as the last three rounds left it; this round
+looked at its most-frequent single member and found that "most frequent" at this
+sample size is not the same claim as "has one mechanism."
+
+### Handoff
+
+- Do not re-run this exact search at the same sample size expecting a different file to
+  emerge as clearly as round twenty-one's target did — 60 runs was not enough to
+  separate a second real signal from combinatorial noise across a 137-file suite. A
+  larger pooled batch (several hundred runs) would be the honest way to let a genuine
+  second cluster surface above the noise floor, if one exists.
+- `routes-chat.test.ts`'s four failures are not being carried forward as a lead. Three
+  of the four are singleton, unrelated assertion mismatches on a 95-test file; the
+  fourth is the already-closed 501 daemon artifact.
+- The recipe from round twenty-one (find what dominates, read what it waits on, check
+  whether the wait guards anything, replace fixed delays with condition polls) is
+  reusable, but it is not guaranteed to find something every time it's pointed at the
+  next-most-frequent file — this round is the record of it correctly finding nothing,
+  rather than being stretched to manufacture a result.
+
+No infra/secrets/sops/credential work.
