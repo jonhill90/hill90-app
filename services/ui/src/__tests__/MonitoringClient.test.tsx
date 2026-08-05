@@ -47,7 +47,7 @@ function mockFetch(overrides: Record<string, unknown> = {}) {
       // can't detect a component reading either wrong — this one deliberately
       // matches the API's actual response, not the component's assumption of it.
       return Promise.resolve({
-        ok: true,
+        ok: overrides.usageOk ?? true,
         json: () => Promise.resolve(overrides.usage ?? {
           total_requests: '42',
           total_tokens: '100000',
@@ -57,7 +57,7 @@ function mockFetch(overrides: Record<string, unknown> = {}) {
       })
     }
     if (url.includes('/api/shared-knowledge/stats')) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides.knowledge ?? {}) })
+      return Promise.resolve({ ok: overrides.knowledgeOk ?? true, json: () => Promise.resolve(overrides.knowledge ?? {}) })
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
   })
@@ -153,5 +153,32 @@ describe('MonitoringClient', () => {
     })
     const card = screen.getByText('Models Used').closest('div')
     expect(card).toHaveTextContent('3')
+  })
+
+  // app#410: a failed /api/usage or /api/shared-knowledge/stats fetch left
+  // these widgets showing "Loading..." forever — never resolving, never
+  // saying the request failed.
+  describe('a failed stats fetch resolves to an error, not permanent "Loading..."', () => {
+    it('UsageStats shows an error instead of loading forever', async () => {
+      vi.stubGlobal('fetch', mockFetch({ usageOk: false }))
+      render(<MonitoringClient />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('usage-stats-error')).toBeInTheDocument()
+      })
+      expect(screen.getByText('Unable to fetch usage data.')).toBeInTheDocument()
+      expect(screen.queryByText('Loading usage...')).not.toBeInTheDocument()
+    })
+
+    it('KnowledgeStats shows an error instead of loading forever', async () => {
+      vi.stubGlobal('fetch', mockFetch({ knowledgeOk: false }))
+      render(<MonitoringClient />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('knowledge-stats-error')).toBeInTheDocument()
+      })
+      expect(screen.getByText('Unable to fetch knowledge stats.')).toBeInTheDocument()
+      expect(screen.queryByText('Loading knowledge stats...')).not.toBeInTheDocument()
+    })
   })
 })

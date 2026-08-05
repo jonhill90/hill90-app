@@ -447,6 +447,32 @@ describe('SharedKnowledgeClient', () => {
     expect(screen.queryByText('No collections yet')).not.toBeInTheDocument()
   })
 
+  it('shows an error banner, not "No sources in this collection", when the sources fetch fails', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/shared-knowledge/collections') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_COLLECTIONS) })
+      }
+      if (typeof url === 'string' && url.startsWith('/api/shared-knowledge/sources?')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<SharedKnowledgeClient />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Engineering Docs')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Engineering Docs'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sources-error')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Could not load sources — try refreshing the page')).toBeInTheDocument()
+    expect(screen.queryByText('No sources in this collection')).not.toBeInTheDocument()
+  })
+
   it('shows collection filter in search tab', async () => {
     render(<SharedKnowledgeClient />)
 
