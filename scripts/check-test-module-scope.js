@@ -32,29 +32,48 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..', 'src');
+// REPO-WIDE, not services/api only. This started life guarding one service,
+// which was the sibling-drift shape it exists to prevent, applied to itself.
+//
+// services/ui is exposed MORE than services/api was, not less, and that is
+// measured rather than assumed: its tsconfig includes '**/*.ts'/'**/*.tsx'
+// with only node_modules excluded, so test files are inside `next build`'s
+// type program, and next.config.ts sets no `typescript.ignoreBuildErrors`.
+// Two colliding ui test files therefore break the PRODUCTION IMAGE BUILD on
+// the deploy path — not a test job. Demonstrated by planting a collision and
+// running ui's own typecheck:
+//
+//   src/__tests__/zz-collide-a.test.ts(1,7): error TS2451: Cannot redeclare
+//   src/__tests__/zz-collide-b.test.ts(1,7): error TS2451: Cannot redeclare
+//
+// vitest itself would NOT catch it — esbuild strips types per file and never
+// builds a cross-file program — so ui's first sight of the fault is the build.
+const REPO_ROOT = path.resolve(__dirname, '..');
+const SKIP = new Set(['node_modules', '.git', '.next', 'dist', 'build', '.worktrees']);
 
 function walk(dir) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory() && SKIP.has(entry.name)) continue;
     const p = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walk(p));
-    else if (/\.test\.tsx?$/.test(entry.name)) out.push(p);
+    else if (/\.(test|spec)\.tsx?$/.test(entry.name)) out.push(p);
   }
   return out;
 }
 
-if (!fs.existsSync(ROOT)) {
-  console.error(`CANNOT DETERMINE — ${ROOT} does not exist`);
+if (!fs.existsSync(REPO_ROOT)) {
+  console.error(`CANNOT DETERMINE — ${REPO_ROOT} does not exist`);
   process.exit(2);
 }
 
-const files = walk(ROOT);
+const files = walk(REPO_ROOT);
 if (files.length === 0) {
   console.error(
-    'CANNOT DETERMINE — found zero *.test.ts(x) files under src/. Either the ' +
-      'test layout moved and this check is looking at nothing, or something is ' +
-      'wrong with the checkout. Not reporting a clean run over an empty set.',
+    'CANNOT DETERMINE — found zero *.test.ts(x) / *.spec.ts(x) files in the ' +
+      'repository. Either the test layout moved and this check is looking at ' +
+      'nothing, or something is wrong with the checkout. Not reporting a clean ' +
+      'run over an empty set.',
   );
   process.exit(2);
 }
@@ -79,4 +98,4 @@ if (offenders.length > 0) {
   process.exit(1);
 }
 
-console.log(`PASS — all ${files.length} test files are modules; no global-scope collisions possible.`);
+console.log(`PASS — all ${files.length} TypeScript test files across the repo are modules; no global-scope collisions possible.`);
