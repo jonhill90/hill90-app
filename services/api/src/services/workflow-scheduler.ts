@@ -48,7 +48,14 @@ async function initializeNextRuns(): Promise<void> {
     );
 
     for (const row of rows) {
-      const next = computeNextRun(row.schedule_cron);
+      let next: Date | null;
+      try {
+        next = computeNextRun(row.schedule_cron);
+      } catch (err) {
+        console.error('[workflow-scheduler] Invalid cron for workflow %s:', row.id, err);
+        await recordCronFailure(pool, row.id, row.schedule_cron, err);
+        continue;
+      }
       if (next) {
         await pool.query(
           `UPDATE workflows SET next_run_at = $1 WHERE id = $2`,
@@ -115,10 +122,19 @@ export async function executeWorkflow(pool: any, wf: any): Promise<void> {
   if (wf.agent_status !== 'running') {
     console.warn('[workflow-scheduler] Skipping %s — agent %s is %s', wf.name, wf.agent_slug, wf.agent_status);
     // Still update next_run_at so we don't re-check every tick
-    const next = computeNextRun(wf.schedule_cron);
-    if (next) {
-      await pool.query(`UPDATE workflows SET next_run_at = $1, updated_at = NOW() WHERE id = $2`, [next, workflowId]);
+    let next: Date | null = null;
+    try {
+      next = computeNextRun(wf.schedule_cron);
+    } catch (err) {
+      console.error('[workflow-scheduler] Invalid cron for workflow %s:', workflowId, err);
+      await recordCronFailure(pool, workflowId, wf.schedule_cron, err);
     }
+    // Unconditional, not `if (next)`: on a cron failure `next` is null, and
+    // this row was only reachable here because it was already due
+    // (next_run_at <= NOW()). Leaving next_run_at at that past value would
+    // make it due again on every tick forever — this same skip branch,
+    // and a fresh failure row, every 60 seconds.
+    await pool.query(`UPDATE workflows SET next_run_at = $1, updated_at = NOW() WHERE id = $2`, [next, workflowId]);
     return;
   }
 
@@ -213,18 +229,46 @@ export async function executeWorkflow(pool: any, wf: any): Promise<void> {
   }
 
   // Update last_run_at and compute next_run_at
-  const next = computeNextRun(wf.schedule_cron);
+  let next: Date | null = null;
+  try {
+    next = computeNextRun(wf.schedule_cron);
+  } catch (err) {
+    console.error('[workflow-scheduler] Invalid cron for workflow %s after run %s:', workflowId, runId, err);
+    await recordCronFailure(pool, workflowId, wf.schedule_cron, err);
+  }
   await pool.query(
     `UPDATE workflows SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2`,
     [next, workflowId]
   );
 }
 
-function computeNextRun(cronExpr: string): Date | null {
+// Throws (does not swallow) on an unparseable cron — app#487. Its three
+// callers above are each responsible for deciding what "the cron I was
+// given can't be parsed" means for their own moment (skip a tick, abort
+// initialization for this row, or note it after a run), and each now
+// records that failure via recordCronFailure rather than letting `next`
+// silently become null with no trace of why. `cronExpr` falsy (a
+// webhook-triggered workflow, which stores no schedule_cron by design) is
+// not an error and returns null without throwing.
+function computeNextRun(cronExpr: string | null): Date | null {
+  if (!cronExpr) return null;
+  const interval = CronExpressionParser.parse(cronExpr);
+  return interval.next().toDate();
+}
+
+// Makes an unparseable cron visible the same way a dispatch failure
+// already is: a workflow_runs row with status='error' and a reason, so a
+// human looking at the workflow's history sees why it stopped running
+// instead of a workflow that just quietly never fires again.
+async function recordCronFailure(pool: any, workflowId: string, cronExpr: string, err: unknown): Promise<void> {
+  const message = err instanceof Error ? err.message : String(err);
   try {
-    const interval = CronExpressionParser.parse(cronExpr);
-    return interval.next().toDate();
-  } catch {
-    return null;
+    await pool.query(
+      `INSERT INTO workflow_runs (workflow_id, status, error, completed_at, duration_ms)
+       VALUES ($1, 'error', $2, NOW(), 0)`,
+      [workflowId, `Cannot schedule next run: cron expression "${cronExpr}" is invalid — ${message}`]
+    );
+  } catch (recordErr) {
+    console.error('[workflow-scheduler] Failed to record cron failure for workflow %s:', workflowId, recordErr);
   }
 }

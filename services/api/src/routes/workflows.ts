@@ -24,6 +24,7 @@ import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { isAdmin } from '../helpers/elevated-scope';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
+import { isValidCronExpression } from '../helpers/cron';
 
 const router = Router();
 
@@ -94,10 +95,15 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       return;
     }
 
-    // Validate cron expression (basic check)
-    const cronParts = schedule_cron.trim().split(/\s+/);
-    if (cronParts.length < 5 || cronParts.length > 6) {
-      res.status(400).json({ error: 'Invalid cron expression — must have 5 or 6 fields' });
+    // app#487: this used to be a field-count check only ("5 or 6
+    // whitespace-separated fields"), which accepted out-of-range values
+    // like "99 99 99 99 99" — the scheduler's own cron-parser call rejects
+    // those, but by then the row was already written with next_run_at left
+    // unset, so the workflow silently never ran. Parse with the same
+    // library the scheduler uses so a value accepted here is guaranteed to
+    // parse there too.
+    if (typeof schedule_cron !== 'string' || !isValidCronExpression(schedule_cron)) {
+      res.status(400).json({ error: 'Invalid cron expression' });
       return;
     }
 
@@ -187,12 +193,9 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
     const { name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled } = req.body;
 
-    if (schedule_cron) {
-      const cronParts = schedule_cron.trim().split(/\s+/);
-      if (cronParts.length < 5 || cronParts.length > 6) {
-        res.status(400).json({ error: 'Invalid cron expression' });
-        return;
-      }
+    if (schedule_cron && !isValidCronExpression(schedule_cron)) {
+      res.status(400).json({ error: 'Invalid cron expression' });
+      return;
     }
 
     const { rows } = await getPool().query(
