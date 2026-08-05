@@ -73,6 +73,14 @@ jobs:
       # services/api/scripts/verify-native-deps.js for why it is a script
       # and not an npm flag.
       - run: node scripts/verify-native-deps.js
+      # A test file with no top-level import/export is a global script to
+      # TypeScript, so its top-level consts collide with any other such file's
+      # — TS2451, and the whole jest run fails naming innocent files. This
+      # turned main red on 2026-08-05 (mockQuery/WORKFLOW) and had done it
+      # once before (OLD_ENV). The project typecheck does NOT catch it,
+      # because tsconfig does not put these files in one program, which is how
+      # it merged with a green PR.
+      - run: node scripts/check-test-module-scope.js
       - run: npm test
 
       # #350: jest.auth401.js writes test-artifacts/auth401.jsonl whenever
