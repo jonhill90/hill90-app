@@ -9,13 +9,19 @@ vi.stubGlobal('fetch', mockFetch)
 
 import UsageClient from '@/app/harness/usage/UsageClient'
 
+// #370: modeled as STRINGS deliberately. Postgres numeric (cost_usd) and the
+// bigint COUNT/SUM results (requests/tokens) both serialize as strings
+// through node-postgres — a fixture using real numbers exercises none of the
+// component's Number() guards and can't catch one being removed later
+// (the #354 lesson: a fixture written from the component's own assumptions
+// only tests the component agreeing with itself).
 const MOCK_SUMMARY = {
-  total_requests: 142,
-  successful_requests: 140,
-  total_input_tokens: 50000,
-  total_output_tokens: 25000,
-  total_tokens: 75000,
-  total_cost_usd: 1.2345,
+  total_requests: '142',
+  successful_requests: '140',
+  total_input_tokens: '50000',
+  total_output_tokens: '25000',
+  total_tokens: '75000',
+  total_cost_usd: '1.2345',
 }
 
 const MOCK_AGENTS = [
@@ -25,16 +31,16 @@ const MOCK_AGENTS = [
 
 const MOCK_GROUPED_BY_AGENT = {
   data: [
-    { agent_id: 'agent-uuid-1', total_requests: 100, total_tokens: 50000, total_cost_usd: 0.8 },
-    { agent_id: 'agent-uuid-2', total_requests: 42, total_tokens: 25000, total_cost_usd: 0.4345 },
+    { agent_id: 'agent-uuid-1', total_requests: '100', total_tokens: '50000', total_cost_usd: '0.8' },
+    { agent_id: 'agent-uuid-2', total_requests: '42', total_tokens: '25000', total_cost_usd: '0.4345' },
   ],
   group_by: 'agent',
 }
 
 const MOCK_GROUPED_BY_MODEL = {
   data: [
-    { model_name: 'gpt-4o-mini', total_requests: 120, total_tokens: 60000, total_cost_usd: 0.9 },
-    { model_name: 'claude-sonnet', total_requests: 22, total_tokens: 15000, total_cost_usd: 0.3345 },
+    { model_name: 'gpt-4o-mini', total_requests: '120', total_tokens: '60000', total_cost_usd: '0.9' },
+    { model_name: 'claude-sonnet', total_requests: '22', total_tokens: '15000', total_cost_usd: '0.3345' },
   ],
   group_by: 'model',
 }

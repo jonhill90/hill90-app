@@ -283,9 +283,13 @@ function UsageStats() {
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      <StatCard label="Requests" value={usage.total_requests ?? 0} color="text-white" />
-      <StatCard label="Tokens" value={usage.total_tokens ?? 0} color="text-brand-400" />
-      <StatCard label="Cost" value={`$${Number(usage.total_cost ?? 0).toFixed(4)}`} color="text-amber-400" isString />
+      <StatCard label="Requests" value={Number(usage.total_requests ?? 0)} color="text-white" />
+      <StatCard label="Tokens" value={Number(usage.total_tokens ?? 0)} color="text-brand-400" />
+      {/* #370: was `usage.total_cost` — the /usage response has no such field
+          (it's `total_cost_usd`), so this always rendered $0.0000 regardless of
+          the real total. Number()-wrapped either way since Postgres numeric
+          serializes as a string. */}
+      <StatCard label="Cost" value={`$${Number(usage.total_cost_usd ?? 0).toFixed(4)}`} color="text-amber-400" isString />
       <StatCard label="Models Used" value={usage.distinct_models ?? 0} color="text-blue-400" />
     </div>
   )
