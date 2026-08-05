@@ -760,6 +760,46 @@ describe('Agent container profile wiring', () => {
     expect(updateCall![0]).toContain('container_profile_id');
   });
 
+  // THE ASSERTION THAT MATTERS (app#212 family — sibling drift sweep).
+  // PUT /agents/:id used to write the model-policy update BEFORE
+  // validating skill_ids, which comes later in source order. A skill_ids
+  // validation failure (400/403) therefore still left the model-policy
+  // write committed — the caller was told the update failed while part of
+  // it had already happened. POST already had this exact class fixed
+  // under #212 (one transaction over the whole write sequence); PUT never
+  // got the same treatment. The fix defers the model-policy write until
+  // after ALL validation (including skill_ids) has passed, inside the
+  // same transaction as the main UPDATE and the skill reassignment.
+  it('PUT /agents/:id does not write the model policy when skill_ids validation fails afterward', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test', status: 'stopped', created_by: 'regular-user', model_policy_id: null }],
+      }) // SELECT existing agent
+      .mockResolvedValueOnce({ rows: [{ id: 'model-row' }] }) // validateModelNames: SELECT user_models — passes
+      // The fixed code never reaches these two: the model-policy write is
+      // deferred past skill_ids validation, and validation fails first —
+      // queued anyway so the OLD (unfixed) code has somewhere to land
+      // instead of crashing on an unmocked call and masking the real
+      // symptom (the write actually happening) behind an unrelated 500.
+      .mockResolvedValueOnce({ rows: [] }) // upsertAutoAgentModelsPolicy: SELECT existing policy — none
+      .mockResolvedValueOnce({ rows: [{ id: 'new-policy-id' }] }) // upsertAutoAgentModelsPolicy: INSERT
+      .mockResolvedValueOnce({ rows: [] }); // SELECT skills WHERE id = ANY([...]) — none found
+
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ model_names: ['gpt-4'], skill_ids: ['nonexistent-skill'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('One or more skills not found');
+
+    const modelPolicyWrite = mockQuery.mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string'
+        && (call[0].includes('UPDATE model_policies') || call[0].includes('INSERT INTO model_policies'))
+    );
+    expect(modelPolicyWrite).toBeUndefined();
+  });
+
   // RA-5: GET /agents/:id includes container_profile object
   it('GET /agents/:id includes container_profile object', async () => {
     mockQuery
