@@ -270,6 +270,16 @@ export default function AgentsClient({ session }: { session: Session }) {
     if (!confirm(`Stop ${targets.length} running agent${targets.length > 1 ? 's' : ''}?`)) return
 
     setBulkActioning('stop')
+    // Sibling of handleAction's and handleBulkStart's own clear (#408): a
+    // stale degraded-start warning on an agent being stopped here must not
+    // keep showing once it's no longer running. Missing from this bulk-stop
+    // path let #408's exact regression back in for the one action most
+    // likely to follow a degraded start.
+    setStartWarnings(prev => {
+      const next = { ...prev }
+      for (const agent of targets) delete next[agent.id]
+      return next
+    })
     const errors: string[] = []
     for (const agent of targets) {
       try {

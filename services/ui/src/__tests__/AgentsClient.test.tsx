@@ -384,6 +384,68 @@ describe('AgentsClient', () => {
       expect(screen.queryByTestId('start-warnings-agent-2')).not.toBeInTheDocument()
       expect(screen.queryByText(WARNING_TEXT)).not.toBeInTheDocument()
     })
+
+    // THE ASSERTION THAT MATTERS (sibling drift sweep). handleAction (single
+    // agent) and handleBulkStart both clear a stale startWarnings entry up
+    // front (#408) — handleBulkStop, the third sibling doing the identical
+    // "act on an agent, then refresh" job, did not. A degraded-start warning
+    // on an agent that is then bulk-stopped kept showing the stale badge
+    // even though the agent was no longer running — the exact regression
+    // #408 fixed for the single-agent and bulk-start paths, reintroduced in
+    // bulk-stop.
+    it('bulk-stopping an agent with a stale start warning clears the warning', async () => {
+      vi.stubGlobal('confirm', () => true)
+      let agent2Running = false
+
+      mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === '/api/agents') {
+          const agents = MOCK_AGENTS.map(a =>
+            a.id === 'agent-2' && agent2Running ? { ...a, status: 'running' } : a
+          )
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(agents) })
+        }
+        if (url === '/api/agents/agent-2/start' && opts?.method === 'POST') {
+          agent2Running = true
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                status: 'running', container_id: 'c1', principal_id: 'agent-2',
+                warnings: [WARNING_TEXT],
+              }),
+          })
+        }
+        if (opts?.method === 'POST' && url.endsWith('/stop')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'stopped' }) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<AgentsClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('WriterBot')).toBeInTheDocument()
+      })
+
+      // Start WriterBot (agent-2) with a degraded-start warning.
+      const writerCard = screen.getByTestId('agent-card-agent-2')
+      fireEvent.click(within(writerCard).getByText('Start'))
+      await waitFor(() => {
+        expect(screen.getByTestId('start-warnings-agent-2')).toBeInTheDocument()
+      })
+
+      // Now bulk-stop every running agent (agent-1 was already running;
+      // agent-2 just joined it) via "Stop All".
+      await waitFor(() => {
+        expect(screen.getByText(/Stop All/)).toBeInTheDocument()
+      })
+      fireEvent.click(screen.getByText(/Stop All/))
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('start-warnings-agent-2')).not.toBeInTheDocument()
+      })
+      expect(screen.queryByText(WARNING_TEXT)).not.toBeInTheDocument()
+    })
   })
 
   // Browser half of the silent-failure sweep: a failed /api/agents must not
