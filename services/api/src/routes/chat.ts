@@ -21,7 +21,13 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { getPool } from '../db/pool';
 import { armCredentialDeadline, endStreamForExpiredCredential } from '../helpers/stream-deadline';
-import { createBoundedSseWriter, SSE_DEFAULTS } from '../services/sse-writer';
+import {
+  createBoundedSseWriter,
+  SSE_DEFAULTS,
+  createPollFailureSignal,
+  failureThresholdFor,
+  sseErrorFrame,
+} from '../services/sse-writer';
 import { stillAuthorised, endStreamForRevokedAccess } from '../helpers/participation-watch';
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
@@ -1436,6 +1442,24 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
     });
     sse.setSource(source);
 
+    // app#443: a persistent DB error here used to leave the client seeing
+    // only heartbeats forever, indistinguishable from a quiet thread. Signal
+    // after enough consecutive failures to cover pollFailureSignalMs at this
+    // poll's own 1s cadence — see failureThresholdFor's docstring for why the
+    // threshold is derived rather than a shared round number.
+    const CHAT_STREAM_POLL_MS = 1000;
+    const pollFailureSignal = createPollFailureSignal(
+      failureThresholdFor(CHAT_STREAM_POLL_MS),
+      () => {
+        if (res.writableEnded || res.destroyed) return;
+        sse.write(sseErrorFrame(
+          'Updates may be delayed',
+          'This stream has been unable to reach the message store for a while. ' +
+          'It is still connected and will resume automatically once the problem clears.',
+        ));
+      },
+    );
+
     const poll = async () => {
       if (res.writableEnded || res.destroyed || pollPaused) return;
 
@@ -1467,8 +1491,10 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
           sse.write(`id: ${row.seq}\nevent: message\ndata: ${JSON.stringify(row)}\n\n`);
           cursor = row.seq;
         }
+        pollFailureSignal.recordSuccess();
       } catch (err) {
         console.error('[chat] SSE poll error:', err);
+        pollFailureSignal.recordFailure();
       }
     };
 
@@ -1505,7 +1531,7 @@ router.get('/threads/:id/stream', requireRole('user'), async (req: Request, res:
     if (closed || res.writableEnded || res.destroyed) return;
 
     // Poll loop
-    interval = setInterval(poll, 1000);
+    interval = setInterval(poll, CHAT_STREAM_POLL_MS);
 
     // Keep-alive heartbeat (every 30s)
     // The participation re-check rides THIS tick rather than arming a second timer
@@ -1793,6 +1819,22 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
 
         stream.on('error', (err: Error) => {
           console.error(`[chat-events] Stream error for ${agent.agent_id}:`, err);
+          // app#443: this used to be silent — if this was the thread's only
+          // running agent, the client saw heartbeats and nothing else once its
+          // log-tail died, with no way to tell that apart from the agent
+          // legitimately going quiet. Threshold 1, not derived from
+          // failureThresholdFor: unlike the interval-based polls below, a
+          // `tail -f` stream's 'error' is a one-time terminal event for THAT
+          // agent, not a recurring tick with a next chance to self-heal — there
+          // is no cadence to wait out, so waiting would only delay a signal
+          // that is already final. Does not end the overall connection: other
+          // agents in the thread may still be streaming fine.
+          if (res.writableEnded || res.destroyed) return;
+          sse.write(sseErrorFrame(
+            'An agent stream stopped',
+            `The event log for agent ${agent.agent_id} could not be read further. ` +
+            'Other agents in this thread, if any, are unaffected.',
+          ));
         });
       } catch (err) {
         console.error(`[chat-events] Failed to open stream for ${agent.agent_id}:`, err);
@@ -1820,6 +1862,26 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     // A stale-message reconcile reassigns seq via nextval, so a bumped message
     // can reappear above the watermark. Re-adding it is a no-op on a Set, and
     // nothing is ever missed because nextval only moves forward.
+    // app#443: this catch used to be silent, and it is worse than the other
+    // three sites this issue names — a persistent failure here does not just
+    // stall the client's view, it actively DROPS data. threadMessageIds stops
+    // learning about new message ids, so events a still-healthy agent
+    // legitimately emits fail the correlation check below and are filtered
+    // out as "uncorrelated", never delivered, with the connection looking
+    // exactly as healthy as ever.
+    const refreshMs = chatEventsRefreshMs();
+    const refreshFailureSignal = createPollFailureSignal(
+      failureThresholdFor(refreshMs),
+      () => {
+        if (res.writableEnded || res.destroyed) return;
+        sse.write(sseErrorFrame(
+          'New messages may not be detected',
+          'This stream has been unable to check for new messages in the thread for a while. ' +
+          'Events from agents replying to a message sent after this problem started may not ' +
+          'appear until it clears.',
+        ));
+      },
+    );
     messageRefreshInterval = setInterval(async () => {
       if (res.writableEnded || res.destroyed) return;
       try {
@@ -1832,8 +1894,11 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
           const seq = Number(r.seq);
           if (seq > lastSeenSeq) lastSeenSeq = seq;
         }
-      } catch { /* ignore */ }
-    }, chatEventsRefreshMs());
+        refreshFailureSignal.recordSuccess();
+      } catch {
+        refreshFailureSignal.recordFailure();
+      }
+    }, refreshMs);
 
     // Keep-alive heartbeat
     // The participation re-check rides THIS tick rather than arming a second timer
