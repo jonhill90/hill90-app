@@ -1961,7 +1961,7 @@ router.post('/:id/stop', requireRole('admin'), async (req: Request, res: Respons
     res.json({ status: 'stopped' });
   } catch (err: any) {
     console.error('[agents] Stop error:', err);
-    res.status(500).json({ error: 'Failed to stop agent', detail: err.message });
+    res.status(500).json({ error: 'Failed to stop agent', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -2048,7 +2048,7 @@ router.post('/:id/reconcile-tools', requireRole('admin'), async (req: Request, r
     res.json(result);
   } catch (err: any) {
     console.error('[agents] Reconcile tools error:', err);
-    res.status(500).json({ error: 'Failed to reconcile tools', detail: err.message });
+    res.status(500).json({ error: 'Failed to reconcile tools', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -2473,12 +2473,12 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
         } catch (err: any) {
           console.error('[agents] One-shot merge failed:', err);
           if (!res.headersSent) {
-            res.status(500).json({ error: 'Failed to merge events', detail: err.message });
+            res.status(500).json({ error: 'Failed to merge events', detail: err instanceof Error ? err.message : String(err) });
           }
         }
       })();
     } catch (err: any) {
-      res.status(500).json({ error: 'Failed to read events', detail: err.message });
+      res.status(500).json({ error: 'Failed to read events', detail: err instanceof Error ? err.message : String(err) });
     }
   } catch (err) {
     console.error('[agents] Events error:', err);
