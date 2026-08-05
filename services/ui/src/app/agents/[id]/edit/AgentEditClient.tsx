@@ -8,6 +8,7 @@ export default function AgentEditClient({ agentId, isAdmin = false, currentUserS
   const router = useRouter()
   const [agent, setAgent] = useState<any>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -15,11 +16,13 @@ export default function AgentEditClient({ agentId, isAdmin = false, currentUserS
         const res = await fetch(`/api/agents/${agentId}`)
         if (res.ok) {
           setAgent(await res.json())
-        } else {
+        } else if (res.status === 404) {
           router.push('/agents')
+        } else {
+          setLoadError(true)
         }
       } catch {
-        router.push('/agents')
+        setLoadError(true)
       } finally {
         setLoading(false)
       }
@@ -35,7 +38,16 @@ export default function AgentEditClient({ agentId, isAdmin = false, currentUserS
     )
   }
 
-  if (!agent) return null
+  if (!agent) {
+    if (loadError) {
+      return (
+        <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3 m-6" data-testid="agent-edit-error">
+          <p className="text-sm text-red-400">Could not load this agent — try refreshing the page</p>
+        </div>
+      )
+    }
+    return null
+  }
 
   return (
     <AgentFormClient

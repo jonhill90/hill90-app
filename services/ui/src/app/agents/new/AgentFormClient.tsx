@@ -116,10 +116,14 @@ export default function AgentFormClient({
   const [selectedProfileId, setSelectedProfileId] = useState<string>(initial?.container_profile_id || '')
   const [soulPreview, setSoulPreview] = useState(false)
   const [rulesPreview, setRulesPreview] = useState(false)
+  const [formDataError, setFormDataError] = useState(false)
 
   useEffect(() => {
     fetch('/api/user-models')
-      .then((res) => (res.ok ? res.json() : []))
+      .then((res) => {
+        if (!res.ok) { setFormDataError(true); return [] }
+        return res.json()
+      })
       .then((data: Array<{ name?: string; is_active?: boolean }>) => {
         setAvailableModels(
           data
@@ -128,19 +132,28 @@ export default function AgentFormClient({
             .sort((a, b) => a.name.localeCompare(b.name))
         )
       })
-      .catch(() => {})
+      .catch(() => setFormDataError(true))
     fetch('/api/skills')
-      .then((res) => (res.ok ? res.json() : []))
+      .then((res) => {
+        if (!res.ok) { setFormDataError(true); return [] }
+        return res.json()
+      })
       .then((data) => setSkills(data))
-      .catch(() => {})
+      .catch(() => setFormDataError(true))
     fetch('/api/container-profiles')
-      .then((res) => (res.ok ? res.json() : []))
+      .then((res) => {
+        if (!res.ok) { setFormDataError(true); return [] }
+        return res.json()
+      })
       .then((data) => setContainerProfiles(data))
-      .catch(() => {})
+      .catch(() => setFormDataError(true))
     fetch('/api/model-policies')
-      .then((res) => (res.ok ? res.json() : []))
+      .then((res) => {
+        if (!res.ok) { setFormDataError(true); return [] }
+        return res.json()
+      })
       .then((data) => setModelPolicies(data))
-      .catch(() => {})
+      .catch(() => setFormDataError(true))
   }, [])
 
   const handleProfileChange = (profileId: string) => {
@@ -265,6 +278,12 @@ export default function AgentFormClient({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-8">
+      {formDataError && (
+        <div className="rounded-lg border border-red-700 bg-red-900/30 p-4 text-sm text-red-400" data-testid="form-data-error">
+          Some form data (models, skills, container profiles, or policies) could not be loaded — try refreshing the page.
+        </div>
+      )}
+
       {error && (
         <div className="rounded-lg border border-red-700 bg-red-900/30 p-4 text-sm text-red-400">
           {error}
