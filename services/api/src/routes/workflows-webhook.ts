@@ -143,9 +143,14 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
       // Own handler, for the same reason as the `/:id/run` site: nothing
       // awaits this chain, so an unhandled rejection here would take the
       // process down on Node 20.
+      // Twin of routes/workflows.ts's identical dispatch-failure .catch(),
+      // which already falls back to a fixed string — err.message is
+      // undefined on a non-Error rejection, and pool.query binds that as
+      // NULL, recording "failed, no reason given" for a run that likely had
+      // a real cause.
       pool.query(
         `UPDATE workflow_runs SET status = 'error', error = $1, completed_at = NOW() WHERE id = $2`,
-        [err.message, runRows[0].id]
+        [err.message || 'Dispatch failed', runRows[0].id]
       ).catch((updateErr: any) => {
         console.error(`[workflows] Failed to record dispatch failure for run ${runRows[0].id}:`, updateErr);
       });
