@@ -841,8 +841,18 @@ async def get_shared_stats(
     pool: asyncpg.Pool,
     *,
     since: datetime | None = None,
+    owner: str | None = None,
 ) -> dict[str, Any]:
-    """Return aggregate quality/ops metrics. No PII, no raw queries."""
+    """Return aggregate quality/ops metrics. No PII, no raw queries.
+
+    top_collections/top_sources are the one place this "aggregate-only" file
+    header was not actually true: both return real collection/source names,
+    unconditionally, to any caller (cross-service sibling-drift sweep,
+    app#445 family — this route's own twin routes/shared.py scopes every
+    query it runs). owner=None (admin) is unchanged; a scoped caller now
+    only sees collections/sources they own or that are explicitly shared,
+    matching knowledge_graph's identical fix in this same file.
+    """
 
     # Search aggregates
     search_row = await pool.fetchrow(
@@ -928,21 +938,26 @@ async def get_shared_stats(
                   (SELECT COALESCE(SUM(token_estimate), 0) FROM shared_chunks) AS total_tokens"""
     )
 
-    # Usage analytics — top collections and sources by retrieval count
+    # Usage analytics — top collections and sources by retrieval count.
+    # Same owner/visibility predicate as knowledge_graph and
+    # list_collections/search_chunks: owner=None (admin) sees everything, a
+    # scoped caller only sees their own or explicitly-shared collections.
+    owner_clause = "" if owner is None else "AND (sc.created_by = $2 OR sc.visibility = 'shared')"
     top_collections = await pool.fetch(
-        """SELECT sc.id, sc.name, COUNT(*) AS retrieval_count
+        f"""SELECT sc.id, sc.name, COUNT(*) AS retrieval_count
            FROM shared_retrievals sr
            JOIN shared_collections sc ON sr.collection_id = sc.id
            WHERE ($1::timestamptz IS NULL OR sr.created_at >= $1)
              AND sr.collection_id IS NOT NULL
+             {owner_clause}
            GROUP BY sc.id, sc.name
            ORDER BY retrieval_count DESC
            LIMIT 10""",
-        since,
+        *((since,) if owner is None else (since, owner)),
     )
 
     top_sources = await pool.fetch(
-        """SELECT ss.id, ss.title, sc.name AS collection_name, COUNT(*) AS retrieval_count
+        f"""SELECT ss.id, ss.title, sc.name AS collection_name, COUNT(*) AS retrieval_count
            FROM shared_retrievals sr,
                 LATERAL unnest(sr.chunk_ids) AS cid
            JOIN shared_chunks sch ON sch.id = cid
@@ -950,10 +965,11 @@ async def get_shared_stats(
            JOIN shared_sources ss ON sd.source_id = ss.id
            JOIN shared_collections sc ON ss.collection_id = sc.id
            WHERE ($1::timestamptz IS NULL OR sr.created_at >= $1)
+             {owner_clause}
            GROUP BY ss.id, ss.title, sc.name
            ORDER BY retrieval_count DESC
            LIMIT 10""",
-        since,
+        *((since,) if owner is None else (since, owner)),
     )
 
     return {
@@ -1041,8 +1057,24 @@ GRAPH_NODE_TYPES: frozenset[str] = frozenset({
 })
 
 
-async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
+async def knowledge_graph(
+    pool: asyncpg.Pool, limit: int, *, owner: str | None = None
+) -> dict[str, Any]:
     """Nodes, edges and totals for the shared-knowledge graph (#300, #377).
+
+    OWNER SCOPING (cross-service sibling-drift sweep, app#445 family). Every
+    OTHER route in this file's api-side twin (routes/shared-knowledge.ts)
+    calls scopeToOwner before proxying — list_collections/search_chunks
+    apply `created_by = $owner OR visibility = 'shared'` for a non-admin
+    caller. This endpoint took no owner at all: a plain `user`-role caller
+    could see every OTHER user's private collection and source names (and,
+    via the retrieved-edge dangling rule below, could no longer reach
+    retrieval edges into collections/sources this filter now hides). Agent
+    knowledge_entries and retrieval-requester identity are DELIBERATELY NOT
+    scoped here — this service has no owner mapping for an agent_id, and
+    whether showing "who searched what" is a leak or an intended
+    transparency feature is a separate product/security judgment call, not
+    bundled into this fix (see the deferred issue this fix's PR links to).
 
     MOVED HERE FROM THE API, which queried `shared_collections`,
     `shared_sources` and `knowledge_entries` through its own pool — tables that
@@ -1074,20 +1106,34 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     encodes the same fact twice, and it is the one candidate with real
     quadratic-in-result-count blowup risk).
     """
+    # Same predicate as list_collections/search_chunks: an admin (owner=None)
+    # sees everything, a scoped caller sees their own collections plus
+    # anything explicitly shared. Sources are filtered by their PARENT
+    # collection's same predicate — a source cannot be visible if the
+    # collection containing it is not.
+    collections_where = "" if owner is None else "WHERE (created_by = $2 OR visibility = 'shared')"
+    sources_where = (
+        "WHERE ss.status = 'active'" if owner is None
+        else "WHERE ss.status = 'active' AND (sc.created_by = $2 OR sc.visibility = 'shared')"
+    )
+    collections_params = (limit,) if owner is None else (limit, owner)
+    sources_params = (limit,) if owner is None else (limit, owner)
+
     async with pool.acquire() as conn:
         collections = await conn.fetch(
-            "SELECT id, name, visibility FROM shared_collections ORDER BY name LIMIT $1",
-            limit,
+            f"SELECT id, name, visibility FROM shared_collections {collections_where} ORDER BY name LIMIT $1",
+            *collections_params,
         )
         sources = await conn.fetch(
-            """SELECT ss.id, ss.title, ss.source_type, ss.collection_id,
+            f"""SELECT ss.id, ss.title, ss.source_type, ss.collection_id,
                       (SELECT count(*) FROM shared_chunks sc
                         JOIN shared_documents sd ON sc.document_id = sd.id
                        WHERE sd.source_id = ss.id) AS chunk_count
                  FROM shared_sources ss
-                WHERE ss.status = 'active'
+                 JOIN shared_collections sc ON sc.id = ss.collection_id
+                {sources_where}
              ORDER BY ss.title LIMIT $1""",
-            limit,
+            *sources_params,
         )
         agent_entries = await conn.fetch(
             """SELECT agent_id, count(*) AS entry_count, max(updated_at) AS last_updated
@@ -1115,14 +1161,27 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
              ORDER BY r.requester_id, s.id LIMIT $1""",
             limit,
         )
+        # Scoped identically to collections/sources above — an unscoped total
+        # next to a scoped page would always read as "truncated" for a
+        # non-admin with any hidden private data, which conflates "there is
+        # more on the next page" with "there is more you cannot see". #215/
+        # #188 already established that total and shown must agree on the
+        # same predicate; this is that same discipline applied to the newly
+        # scoped query rather than a fresh defect introduced while fixing one.
+        totals_collections_where = "" if owner is None else "WHERE (created_by = $1 OR visibility = 'shared')"
+        totals_sources_where = (
+            "WHERE status = 'active'" if owner is None
+            else "WHERE status = 'active' AND collection_id IN (SELECT id FROM shared_collections WHERE created_by = $1 OR visibility = 'shared')"
+        )
         totals = await conn.fetchrow(
-            """SELECT
-                 (SELECT count(*) FROM shared_collections) AS collections,
-                 (SELECT count(*) FROM shared_sources WHERE status = 'active') AS sources,
+            f"""SELECT
+                 (SELECT count(*) FROM shared_collections {totals_collections_where}) AS collections,
+                 (SELECT count(*) FROM shared_sources {totals_sources_where}) AS sources,
                  (SELECT count(DISTINCT agent_id) FROM knowledge_entries WHERE status = 'active')
                    AS agents_with_knowledge,
                  (SELECT count(DISTINCT requester_id) FROM shared_retrievals)
-                   AS requesters_with_retrievals"""
+                   AS requesters_with_retrievals""",
+            *(() if owner is None else (owner,)),
         )
 
     nodes: list[dict[str, Any]] = []

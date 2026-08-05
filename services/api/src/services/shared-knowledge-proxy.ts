@@ -64,8 +64,10 @@ async function proxyRequest(
 
 // Graph
 
-export async function getGraph(limit: number): Promise<ProxyResponse> {
-  return proxyRequest('GET', '/internal/admin/shared/graph', { limit: String(limit) });
+export async function getGraph(limit: number, owner?: string): Promise<ProxyResponse> {
+  const params: Record<string, string> = { limit: String(limit) };
+  if (owner) params.owner = owner;
+  return proxyRequest('GET', '/internal/admin/shared/graph', params);
 }
 
 // Collections
@@ -142,8 +144,9 @@ export async function searchShared(params: {
 
 // Stats
 
-export async function getStats(since?: string): Promise<ProxyResponse> {
+export async function getStats(since?: string, owner?: string): Promise<ProxyResponse> {
   const params: Record<string, string> = {};
   if (since) params.since = since;
+  if (owner) params.owner = owner;
   return proxyRequest('GET', '/internal/admin/shared/stats', params);
 }
