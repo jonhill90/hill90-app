@@ -59,7 +59,7 @@ const STALE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 // just as easily as it may genuinely still be working. "Response timed out"
 // asserted the former cause specifically, which the code that writes this
 // message has no way to know is what actually happened.
-const NO_RESPONSE_MESSAGE = 'No response received within 2 minutes';
+const NO_RESPONSE_MESSAGE = `No response received within ${STALE_TIMEOUT_MS / 60000} minutes`;
 const MAX_AGENTS_PER_GROUP = 8;
 const MAX_CHAIN_HOPS = parseInt(process.env.MAX_CHAIN_HOPS || '5', 10);
 const MAX_CHAIN_DURATION_MS = parseInt(process.env.MAX_CHAIN_DURATION_MS || '60000', 10);
