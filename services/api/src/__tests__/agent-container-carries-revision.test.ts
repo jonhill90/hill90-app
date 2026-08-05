@@ -94,9 +94,9 @@ describe('the container carries the revision of the image it came from', () => {
     // The agent still starts, and the label is simply absent.
     mockImageInspect.mockRejectedValue(new Error('image inspect failed'));
 
-    const id = await createAndStartContainer(OPTS);
+    const result = await createAndStartContainer(OPTS);
 
-    expect(id).toBe('container-abc');
+    expect(result.containerId).toBe('container-abc');
     expect(labelsPassedToCreate()['com.hill90.revision']).toBeUndefined();
   });
 });

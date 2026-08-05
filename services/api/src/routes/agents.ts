@@ -1604,7 +1604,7 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
     }
 
     // Create and start container
-    const containerId = await createAndStartContainer({
+    const { containerId, edgeNetworkAttachFailed } = await createAndStartContainer({
       agentId: agent.agent_id,
       hostConfigPath: process.env.AGENTBOX_CONFIG_HOST_PATH!,
       cpus: agent.cpus,
@@ -1615,6 +1615,14 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
       image: profileImage,
       metadata: profileMetadata,
     });
+    // Same shape as the AKM/model-router warnings above: the container
+    // genuinely started, but a host_docker/vps_system-scope agent missing
+    // its edge-network attach has no outbound internet — previously caught,
+    // logged, and swallowed inside createAndStartContainer with nothing
+    // downstream (not this response, not the reconciler) ever noticing.
+    if (edgeNetworkAttachFailed) {
+      startWarnings.push('Edge network attach failed — agent started but has no outbound internet access until it is stopped and restarted');
+    }
 
     // #285's second half. Read Docker's own State.StartedAt for started_at,
     // HERE — immediately after createAndStartContainer returns, before any
