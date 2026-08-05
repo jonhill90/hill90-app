@@ -92,6 +92,9 @@ export default function KnowledgeClient() {
   const [isSearching, setIsSearching] = useState(false)
   const [loading, setLoading] = useState(true)
   const [entriesLoading, setEntriesLoading] = useState(false)
+  // fetchKnowledgePage now throws on a failed fetch (app#410) instead of
+  // returning the same shape as a genuinely-empty page.
+  const [entriesError, setEntriesError] = useState(false)
   const [contentLoading, setContentLoading] = useState(false)
   const [sortField, setSortField] = useState<SortField>('updated_at')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
@@ -133,8 +136,10 @@ export default function KnowledgeClient() {
       )
       setEntries(prev => (append ? [...prev, ...page.entries] : page.entries))
       setTotal(page.total)
+      setEntriesError(false)
     } catch (err) {
       console.error('Failed to fetch entries:', err)
+      if (!append) setEntriesError(true)
     } finally {
       setEntriesLoading(false)
       setLoadingMore(false)
@@ -426,6 +431,13 @@ export default function KnowledgeClient() {
                 {entriesLoading ? (
                   <div className="flex items-center justify-center py-12">
                     <div className="h-6 w-6 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" />
+                  </div>
+                ) : entriesError ? (
+                  <div
+                    className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+                    data-testid="entries-error"
+                  >
+                    <p className="text-sm text-red-400">Could not load entries — try refreshing the page</p>
                   </div>
                 ) : entries.length === 0 ? (
                   <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 text-center">

@@ -56,6 +56,10 @@ export default function AgentMemory({ agentId }: Props) {
   const [total, setTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
+  // fetchKnowledgePage now throws on a failed fetch (app#410) instead of
+  // returning the same shape as a genuinely-empty page — this is what lets
+  // "the request failed" render differently from "no memory entries yet".
+  const [loadError, setLoadError] = useState(false)
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null)
@@ -91,8 +95,9 @@ export default function AgentMemory({ agentId }: Props) {
 
       setEntries(prev => (append ? [...prev, ...page.entries] : page.entries))
       setTotal(page.total)
+      setLoadError(false)
     } catch {
-      // Non-fatal
+      if (!append) setLoadError(true)
     } finally {
       setLoading(false)
       setLoadingMore(false)
@@ -292,6 +297,13 @@ export default function AgentMemory({ agentId }: Props) {
       ) : loading ? (
         <div className="flex items-center justify-center py-8">
           <div className="h-6 w-6 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" />
+        </div>
+      ) : loadError ? (
+        <div
+          className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+          data-testid="memory-error"
+        >
+          <p className="text-sm text-red-400">Could not load memory entries — try refreshing the page</p>
         </div>
       ) : filtered.length > 0 ? (
         /* Entry list */

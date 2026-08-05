@@ -31,6 +31,16 @@ export interface KnowledgePage<T> {
  * Returns a bare array in `entries` even when the response is malformed — the
  * callers already guard with `Array.isArray`, and preserving that shape is why
  * the total travels in a header rather than in the body.
+ *
+ * THROWS on a non-ok response. It used to return `{ entries: [], total:
+ * null }` — the same shape a genuinely-empty, successful page produces
+ * (`total` is already `null` there too, for the unrelated reason that no
+ * `X-Total-Count` header was present) — so a caller had no way to tell "the
+ * request failed" from "there is nothing here" (app#410). All three callers
+ * already wrap this call in a try/catch; throwing lets each one render its
+ * own error state the way it already renders everything else, rather than
+ * this shared function inventing a fourth `KnowledgePage` shape to carry an
+ * error flag three different UIs would have to agree on how to use.
  */
 export async function fetchKnowledgePage<T>(
   path: string,
@@ -44,7 +54,7 @@ export async function fetchKnowledgePage<T>(
   })
 
   const res = await fetch(`${path}?${qs}`)
-  if (!res.ok) return { entries: [], total: null }
+  if (!res.ok) throw new Error(`fetchKnowledgePage: ${path} responded ${res.status}`)
 
   const data = await res.json()
   const entries: T[] = Array.isArray(data) ? data : []

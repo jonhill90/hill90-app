@@ -258,4 +258,35 @@ describe('KnowledgeClient', () => {
       expect(screen.getByText('No agents with knowledge entries yet')).toBeInTheDocument()
     })
   })
+
+  // app#410: fetchKnowledgePage throws on a failed fetch now, instead of
+  // returning the same shape as a genuinely-empty page.
+  it('shows an error, not "No entries found", when the entries fetch fails', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/knowledge/agents') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_KNOWLEDGE_AGENTS) })
+      }
+      if (url === '/api/agents') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      }
+      if (typeof url === 'string' && url.startsWith('/api/knowledge/entries?')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<KnowledgeClient />)
+
+    await waitFor(() => {
+      expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('ResearchBot'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('entries-error')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Could not load entries — try refreshing the page')).toBeInTheDocument()
+    expect(screen.queryByText('No entries found')).not.toBeInTheDocument()
+  })
 })
