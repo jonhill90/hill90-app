@@ -1003,6 +1003,100 @@ describe('Chat multi-agent dispatch', () => {
     expect(res.body.failed[0].message_id).toBe('ph-1');
   });
 
+  // The other lane's finding on this same file: the real dispatch-failure
+  // reason was computed (it's right there in the `reason` local) and then
+  // thrown away in favor of the fixed string 'Dispatch failed'. Assert the
+  // persisted error_message CONTAINS the distinctive cause, not that it
+  // equals some other fixed string — that would just be a different constant.
+  it('POST /chat/threads/:id/messages persists the actual dispatch failure reason, not a fixed string', async () => {
+    mockDispatchChatWork.mockRejectedValue(new Error('ECONNREFUSED agentbox-alpha:8054 (distinctive-marker-9f3a)'));
+
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1 }] })  // isParticipant
+      .mockResolvedValueOnce({ rows: [{ type: 'group', lead_agent_id: null }] })  // getThreadType
+      .mockResolvedValueOnce({ rows: [{ participant_id: 'agent-1' }] })  // getThreadAgents
+      .mockResolvedValueOnce({
+        rows: [{ id: 'agent-1', agent_id: 'alpha', name: 'Alpha', status: 'running', work_token: 'wt', models: ['gpt-4o-mini'] }],
+      })
+      .mockResolvedValueOnce({ rows: [] })  // elevated scope
+      .mockResolvedValueOnce({ rows: [] })  // concurrency guard
+      .mockResolvedValueOnce({ rows: [{ id: 'user-msg', seq: 10 }] })  // INSERT user message
+      .mockResolvedValueOnce({ rows: [] })  // UPDATE thread timestamp
+      .mockResolvedValueOnce({ rows: [] })  // message history
+      // getAgentForDispatch for participant list (group threads)
+      .mockResolvedValueOnce({ rows: [{ id: 'agent-1', agent_id: 'alpha', name: 'Alpha', status: 'running', work_token: 'wt', models: ['gpt-4o-mini'] }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'ph-1' }] })  // placeholder
+      .mockResolvedValueOnce({ rowCount: 1 });  // UPDATE placeholder to error
+
+    const res = await request(app)
+      .post('/chat/threads/thread-1/messages')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ message: 'Hello' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.failed).toHaveLength(1);
+
+    const updateCall = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes("SET status = 'error'") && sql.includes('error_message')
+    );
+    expect(updateCall).toBeDefined();
+    const params = updateCall![1] as unknown[];
+    expect(String(params[1])).toContain('distinctive-marker-9f3a');
+  });
+
+  // The fix must not trade a readable error for a leaked credential: the work
+  // token is sent as a Bearer header on the request that just failed, so it
+  // must never survive into a column a user can read.
+  it('POST /chat/threads/:id/messages redacts the agent work token from both the persisted AND the logged dispatch failure reason', async () => {
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    mockDispatchChatWork.mockResolvedValue({
+      accepted: false,
+      error: 'Agentbox returned 401: Authorization: Bearer super-secret-work-token-abc123 rejected',
+    });
+
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1 }] })  // isParticipant
+      .mockResolvedValueOnce({ rows: [{ type: 'group', lead_agent_id: null }] })  // getThreadType
+      .mockResolvedValueOnce({ rows: [{ participant_id: 'agent-1' }] })  // getThreadAgents
+      .mockResolvedValueOnce({
+        rows: [{ id: 'agent-1', agent_id: 'alpha', name: 'Alpha', status: 'running', work_token: 'super-secret-work-token-abc123', models: ['gpt-4o-mini'] }],
+      })
+      .mockResolvedValueOnce({ rows: [] })  // elevated scope
+      .mockResolvedValueOnce({ rows: [] })  // concurrency guard
+      .mockResolvedValueOnce({ rows: [{ id: 'user-msg', seq: 10 }] })  // INSERT user message
+      .mockResolvedValueOnce({ rows: [] })  // UPDATE thread timestamp
+      .mockResolvedValueOnce({ rows: [] })  // message history
+      // getAgentForDispatch for participant list (group threads)
+      .mockResolvedValueOnce({ rows: [{ id: 'agent-1', agent_id: 'alpha', name: 'Alpha', status: 'running', work_token: 'super-secret-work-token-abc123', models: ['gpt-4o-mini'] }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'ph-1' }] })  // placeholder
+      .mockResolvedValueOnce({ rowCount: 1 });  // UPDATE placeholder to error
+
+    const res = await request(app)
+      .post('/chat/threads/thread-1/messages')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ message: 'Hello' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.failed).toHaveLength(1);
+
+    const updateCall = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes("SET status = 'error'") && sql.includes('error_message')
+    );
+    expect(updateCall).toBeDefined();
+    const params = updateCall![1] as unknown[];
+    expect(String(params[1])).not.toContain('super-secret-work-token-abc123');
+    expect(String(params[1])).toContain('[REDACTED]');
+
+    // Container stdout/stderr is shipped to and retained in Loki — a token
+    // that survives into console.error is a leak there too, not "just a log".
+    const loggedCalls = consoleErrorSpy.mock.calls.map(args => args.join(' '));
+    expect(loggedCalls.some(line => line.includes('super-secret-work-token-abc123'))).toBe(false);
+    expect(loggedCalls.some(line => line.includes('Dispatch failed for agent=alpha') && line.includes('[REDACTED]'))).toBe(true);
+
+    consoleErrorSpy.mockRestore();
+  });
+
   // #364: agentbox's handle_chat() checks the same env var and, if unset,
   // emits a local work_failed event and returns WITHOUT ever calling back —
   // the placeholder would otherwise sit 'pending' until the stale sweeper
