@@ -3527,3 +3527,32 @@ Full writeup, batch data, and the suggested next instrumentation step:
 [issue #432](https://github.com/jonhill90/hill90-app/issues/432). Not fixed by serializing
 or by retries — both remain rejected for the reasons already established earlier in this
 document.
+
+## Round nineteen (2026-08-05, same day) — three leads closed, population split found, investigation paused
+
+Continuing round eighteen's batch, same day: the sibling-worker replacement lead
+(webhook-dispatch fire-and-forget racing the mock queue) was tested directly —
+instrumented call order (n=20) showed the specific failures never touch the mock at
+all, and draining the dispatch in `afterEach` (n=30 vs the n=30 baseline) did not move
+the rate (Fisher's exact p=0.35 file-specific, p=0.78 overall). **Disproven, not
+merely unconfirmed.**
+
+A second replacement lead — `process.env`/`global` not resetting between test files
+sharing a worker — was tested the same way (n=30): real, widespread leakage exists (six
+env keys, added and never cleaned up in ~68% of files), but the failing files' rate of
+having a dirty predecessor (84.6%) was **not** elevated above the general base rate
+(97.2% — nearly every file has one). Two of the thirteen failures had no possible
+predecessor at all. **Disproven.**
+
+Before spending a further lead on event-loop/GC contention, the 54 unique failures
+collected across all 110 runs so far were classified by SHAPE rather than by file, at
+no cost in new runs: 33 (61%) wrong-status, 9 (17%) timeout, 9 (17%) socket-hang-up, 2
+(4%) crash-exception, 1 other. Only the timeout+transport class (18/54, 33%) is
+plausibly timing/contention-shaped; the majority (36/54, 67%) is branch-shaped — a role
+check or route returning a different, internally-consistent wrong answer, which
+contention alone does not explain.
+
+**Investigation paused here, not concluded.** Three leads closed with evidence, the
+remaining population split into two shapes needing different instruments than anything
+tried so far. Full data, sample sizes, and the handoff note for whoever resumes this:
+[issue #432](https://github.com/jonhill90/hill90-app/issues/432).
