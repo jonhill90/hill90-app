@@ -2137,11 +2137,15 @@ export async function chatCallbackHandler(req: Request, res: Response): Promise<
   // Thinking callbacks are intermediate progress updates during tool loops.
   // They update content + advance seq (so SSE picks up) but stay non-terminal.
   if (status === 'thinking') {
+    // updated_at is what lets the stale sweeper tell a message still
+    // actively progressing through repeated thinking callbacks from one
+    // that has genuinely stalled — created_at alone cannot distinguish
+    // them, since it never changes after the row is inserted.
     const { rowCount } = await pool.query(
       `UPDATE chat_messages
        SET content = $2, status = 'thinking', model = $3,
            input_tokens = $4, output_tokens = $5, duration_ms = $6,
-           seq = nextval('chat_messages_seq')
+           seq = nextval('chat_messages_seq'), updated_at = NOW()
        WHERE id = $1 AND status IN ('pending', 'thinking')`,
       [message_id, content || '', model || null,
        input_tokens || null, output_tokens || null, duration_ms || null]
@@ -2180,7 +2184,7 @@ export async function chatCallbackHandler(req: Request, res: Response): Promise<
     `UPDATE chat_messages
      SET content = $2, status = $3, model = $4,
          input_tokens = $5, output_tokens = $6, duration_ms = $7,
-         error_message = $8, seq = nextval('chat_messages_seq')
+         error_message = $8, seq = nextval('chat_messages_seq'), updated_at = NOW()
      WHERE id = $1 AND status IN ('pending', 'thinking')`,
     [message_id, content || '', finalStatus, model || null,
      input_tokens || null, output_tokens || null, duration_ms || null,
@@ -2486,14 +2490,33 @@ export function startStaleSweeper(): void {
 
   staleSweepInterval = setInterval(async () => {
     try {
+      // chatCallbackHandler's own guarded UPDATE treats status IN ('pending',
+      // 'thinking') as the equivalence class of "still open" — a message sits
+      // at 'thinking' between an intermediate progress callback and the final
+      // complete/error one. This sweeper is the only thing that can terminate
+      // a message whose FINAL callback never arrives (agentbox's
+      // _deliver_callback is fire-and-forget, no retry), and a message that
+      // reached 'thinking' had strictly MORE done for it — the agent already
+      // sent at least one update — than one still at 'pending', so it must
+      // not have LESS of a safety net. Matching only 'pending' here left
+      // exactly that message permanently stuck with no error and no recovery.
+      // updated_at, not created_at: a 'thinking' message legitimately
+      // receives repeated progress callbacks during a long tool-use loop,
+      // each refreshing updated_at (see the callback handler above). Keying
+      // this off created_at would sweep a message still actively making
+      // progress the moment it turned 2 minutes old, which is a worse
+      // defect than the one this sweeper exists to fix. For a 'pending'
+      // message that never received any callback, updated_at still equals
+      // its insert-time default, so this is not a behavior change for the
+      // case the sweeper originally covered.
       const { rowCount } = await getPool().query(
         `UPDATE chat_messages
          SET status = 'error', error_message = 'Response timed out',
-             seq = nextval('chat_messages_seq')
-         WHERE status = 'pending' AND created_at < NOW() - INTERVAL '2 minutes'`
+             seq = nextval('chat_messages_seq'), updated_at = NOW()
+         WHERE status IN ('pending', 'thinking') AND updated_at < NOW() - INTERVAL '2 minutes'`
       );
       if (rowCount && rowCount > 0) {
-        console.log(`[chat-sweeper] Marked ${rowCount} stale pending message(s) as error`);
+        console.log(`[chat-sweeper] Marked ${rowCount} stale pending/thinking message(s) as error`);
       }
     } catch (err) {
       console.error('[chat-sweeper] Error:', err);
