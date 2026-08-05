@@ -1772,11 +1772,20 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
   } catch (err: any) {
     console.error('[agents] Start error:', err);
 
+    // Same fallback as this file's own container-stop-failure audit log
+    // (agents.ts:1279) — a rejection is not guaranteed to be an Error
+    // instance, and `err.message` on a plain-object/string throw is
+    // `undefined`, which every site below would otherwise have recorded:
+    // NULL in the DB (pg binds undefined as NULL), a dropped `error` key
+    // in the webhook payload (JSON.stringify omits undefined), and the
+    // literal substring "undefined" in the notify message and response.
+    const errorMessage = err instanceof Error ? err.message : String(err);
+
     // Update DB with error
     try {
       await getPool().query(
         `UPDATE agents SET status = 'error', error_message = $1, updated_at = NOW() WHERE id = $2`,
-        [err.message, req.params.id]
+        [errorMessage, req.params.id]
       );
       await getPool().query(
         `INSERT INTO agent_status_history (agent_id, old_status, new_status, changed_by) VALUES ($1, $2, 'error', $3)`,
@@ -1784,9 +1793,9 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
       );
     } catch { /* best effort */ }
 
-    dispatchWebhooks(agentSlug, req.params.id, 'error', { error: err.message });
-    notify((req as any).user?.sub, `Agent "${agentSlug}" failed to start: ${err.message}`, 'agent_error', { agent_id: req.params.id, agent_slug: agentSlug });
-    res.status(500).json({ error: 'Failed to start agent', detail: err.message });
+    dispatchWebhooks(agentSlug, req.params.id, 'error', { error: errorMessage });
+    notify((req as any).user?.sub, `Agent "${agentSlug}" failed to start: ${errorMessage}`, 'agent_error', { agent_id: req.params.id, agent_slug: agentSlug });
+    res.status(500).json({ error: 'Failed to start agent', detail: errorMessage });
   }
 });
 
