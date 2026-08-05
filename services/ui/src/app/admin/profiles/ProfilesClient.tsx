@@ -22,6 +22,7 @@ export default function ProfilesClient() {
   const [error, setError] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [formError, setFormError] = useState('')
   const [form, setForm] = useState({ name: '', description: '', docker_image: 'hill90/agentbox:latest', default_cpus: '1.0', default_mem_limit: '1g', default_pids_limit: '200' })
 
   const fetchProfiles = useCallback(async () => {
@@ -49,7 +50,7 @@ export default function ProfilesClient() {
     <div className="max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-white">Container Profiles</h1>
-        <button onClick={() => { setShowForm(true); setEditingId(null); setForm({ name: '', description: '', docker_image: 'hill90/agentbox:latest', default_cpus: '1.0', default_mem_limit: '1g', default_pids_limit: '200' }) }}
+        <button onClick={() => { setShowForm(true); setEditingId(null); setFormError(''); setForm({ name: '', description: '', docker_image: 'hill90/agentbox:latest', default_cpus: '1.0', default_mem_limit: '1g', default_pids_limit: '200' }) }}
           className="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium cursor-pointer">+ New Profile</button>
       </div>
 
@@ -72,15 +73,25 @@ export default function ProfilesClient() {
           </div>
           <div className="flex gap-2 mt-4">
             <button onClick={async () => {
+              setFormError('')
               const url = editingId ? `/api/container-profiles/${editingId}` : '/api/container-profiles'
               const method = editingId ? 'PUT' : 'POST'
               const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...form, default_pids_limit: parseInt(form.default_pids_limit) }) })
-              if (res.ok) { setShowForm(false); fetchProfiles() }
+              if (res.ok) {
+                setShowForm(false)
+                fetchProfiles()
+              } else {
+                const body = await res.json().catch(() => ({}))
+                setFormError(body.error || (editingId ? 'Failed to update profile' : 'Failed to create profile'))
+              }
             }} disabled={!form.name} className="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium disabled:opacity-50 cursor-pointer">
               {editingId ? 'Save' : 'Create'}
             </button>
-            <button onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-mountain-400 hover:text-white cursor-pointer">Cancel</button>
+            <button onClick={() => { setShowForm(false); setFormError('') }} className="px-4 py-2 text-sm text-mountain-400 hover:text-white cursor-pointer">Cancel</button>
           </div>
+          {formError && (
+            <p className="text-sm text-red-400 mt-3">{formError}</p>
+          )}
         </div>
       )}
 
@@ -142,10 +153,19 @@ export default function ProfilesClient() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex gap-1">
-                      <button onClick={() => { setForm({ name: profile.name, description: profile.description || '', docker_image: profile.docker_image, default_cpus: profile.default_cpus, default_mem_limit: profile.default_mem_limit, default_pids_limit: String(profile.default_pids_limit) }); setEditingId(profile.id); setShowForm(true) }}
+                      <button onClick={() => { setForm({ name: profile.name, description: profile.description || '', docker_image: profile.docker_image, default_cpus: profile.default_cpus, default_mem_limit: profile.default_mem_limit, default_pids_limit: String(profile.default_pids_limit) }); setEditingId(profile.id); setFormError(''); setShowForm(true) }}
                         className="text-xs text-mountain-400 hover:text-white cursor-pointer">Edit</button>
                       {!profile.is_platform && (
-                        <button onClick={async () => { if (!confirm('Delete?')) return; await fetch(`/api/container-profiles/${profile.id}`, { method: 'DELETE' }); fetchProfiles() }}
+                        <button onClick={async () => {
+                          if (!confirm('Delete?')) return
+                          const res = await fetch(`/api/container-profiles/${profile.id}`, { method: 'DELETE' })
+                          if (res.ok) {
+                            fetchProfiles()
+                          } else {
+                            const body = await res.json().catch(() => ({}))
+                            alert(body.error || 'Failed to delete profile')
+                          }
+                        }}
                           className="text-xs text-red-400 hover:text-red-300 cursor-pointer ml-2">Delete</button>
                       )}
                     </div>

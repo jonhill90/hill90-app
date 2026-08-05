@@ -155,23 +155,35 @@ export default function WorkflowsClient() {
       setEditingId(null)
       setForm({ name: '', description: '', agent_id: '', schedule_cron: '*/30 * * * *', prompt: '', output_type: 'none', output_config: '{}', trigger_type: 'cron' })
       fetchWorkflows()
+    } else {
+      const data = await res.json()
+      alert(data.error || (editingId ? 'Failed to update workflow' : 'Failed to create workflow'))
     }
   }
 
   const handleToggle = async (wf: Workflow) => {
-    await fetch(`/api/workflows/${wf.id}`, {
+    const res = await fetch(`/api/workflows/${wf.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: !wf.enabled }),
     })
+    if (!res.ok) {
+      const data = await res.json()
+      alert(data.error || 'Failed to update workflow')
+    }
     fetchWorkflows()
   }
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this workflow?')) return
-    await fetch(`/api/workflows/${id}`, { method: 'DELETE' })
-    if (selectedId === id) { setSelectedId(null); setRuns([]) }
-    fetchWorkflows()
+    const res = await fetch(`/api/workflows/${id}`, { method: 'DELETE' })
+    if (res.ok) {
+      if (selectedId === id) { setSelectedId(null); setRuns([]) }
+      fetchWorkflows()
+    } else {
+      const data = await res.json()
+      alert(data.error || 'Failed to delete workflow')
+    }
   }
 
   const handleRun = async (wf: Workflow) => {
@@ -191,18 +203,28 @@ export default function WorkflowsClient() {
 
   const handleAddStep = async () => {
     if (!selectedId || !stepForm.agent_id || !stepForm.prompt) return
-    await fetch(`/api/workflows/${selectedId}/steps`, {
+    const res = await fetch(`/api/workflows/${selectedId}/steps`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(stepForm),
     })
-    setStepForm({ agent_id: '', prompt: '' })
-    fetchSteps(selectedId)
+    if (res.ok) {
+      setStepForm({ agent_id: '', prompt: '' })
+      fetchSteps(selectedId)
+    } else {
+      const data = await res.json()
+      alert(data.error || 'Failed to add step')
+    }
   }
 
   const handleDeleteStep = async (stepId: string) => {
     if (!selectedId) return
-    await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, { method: 'DELETE' })
-    fetchSteps(selectedId)
+    const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, { method: 'DELETE' })
+    if (res.ok) {
+      fetchSteps(selectedId)
+    } else {
+      const data = await res.json()
+      alert(data.error || 'Failed to delete step')
+    }
   }
 
   const handleEdit = (wf: Workflow) => {

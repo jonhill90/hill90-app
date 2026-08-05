@@ -142,6 +142,62 @@ describe('McpServersClient', () => {
     expect(screen.getByPlaceholderText(/npx -y/)).toBeInTheDocument()
   })
 
+  it('shows an error, not a silently-closed form, when creating a server fails', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: any) => {
+      if (url === '/api/mcp-servers' && (!opts || !opts.method || opts.method === 'GET')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+      }
+      if (url === '/api/mcp-servers' && opts?.method === 'POST') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'db unavailable' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+    render(<McpServersClient />)
+    await waitFor(() => {
+      expect(screen.getByText(/no mcp servers configured/i)).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getAllByText('Add Server')[0])
+    fireEvent.change(screen.getByPlaceholderText(/GitHub MCP Server/), { target: { value: 'Broken Server' } })
+    fireEvent.change(screen.getByPlaceholderText(/npx -y/), { target: { value: 'npx broken' } })
+    fireEvent.click(screen.getByText('Create Server'))
+
+    await waitFor(() => {
+      expect(screen.getByText('db unavailable')).toBeInTheDocument()
+    })
+    // Form must still be open with the entered data — it must not look like
+    // the server was created.
+    expect(screen.getByText('New MCP Server')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('Broken Server')).toBeInTheDocument()
+  })
+
+  it('shows an alert, not a silent no-op, when deleting a server fails', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: any) => {
+      if (url === '/api/mcp-servers' && (!opts || !opts.method || opts.method === 'GET')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_SERVERS) })
+      }
+      if (url === '/api/mcp-servers/s1' && opts?.method === 'DELETE') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'db unavailable' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+    render(<McpServersClient />)
+    await waitFor(() => {
+      expect(screen.getByText('GitHub MCP')).toBeInTheDocument()
+    })
+    // The row's two icon buttons are Edit (0) then Delete (1) — neither has
+    // an accessible name, so locate them via the row containing the server name.
+    const row = screen.getByText('GitHub MCP').closest('.rounded-lg')!
+    const rowButtons = row.querySelectorAll('button')
+    fireEvent.click(rowButtons[rowButtons.length - 1])
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('db unavailable')
+    })
+    expect(screen.getByText('GitHub MCP')).toBeInTheDocument()
+  })
+
   it('shows URL field for SSE transport', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) })))
     render(<McpServersClient />)

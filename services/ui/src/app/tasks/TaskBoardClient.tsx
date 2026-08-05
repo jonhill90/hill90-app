@@ -164,9 +164,11 @@ export default function TaskBoardClient() {
         setTasks(prev => [...prev, created])
         setNewTask({ agent_id: '', title: '', description: '', priority: 3 })
         setShowNewForm(false)
+      } else {
+        showToast('error', await failureMessage('Could not create the task', res))
       }
     } catch {
-      // Non-fatal
+      showToast('error', 'Could not create the task: the request did not complete')
     } finally {
       setCreating(false)
     }
