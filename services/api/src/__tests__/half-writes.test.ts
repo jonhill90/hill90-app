@@ -189,6 +189,123 @@ describe('POST /workflows/:id/run — a failed run labels itself', () => {
   });
 });
 
+describe('POST /workflows/webhook/:token — a failed run labels itself (the public, unauthenticated sibling of /:id/run, same gap)', () => {
+  /** Everything up to the run insert succeeds; the NEXT statement throws. */
+  function failAfterRunInsert() {
+    let runInserted = false;
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/FROM workflows w/.test(s)) {
+        return Promise.resolve({
+          rows: [{
+            id: 'wf-1', agent_id: 'a-1', agent_slug: 'scout', agent_status: 'running',
+            work_token: 'wt', prompt: 'go', created_by: 'user-1', name: 'Nightly Scout',
+            allowed_models: ['m'],
+          }],
+        });
+      }
+      if (/INSERT INTO workflow_runs/.test(s)) {
+        runInserted = true;
+        return Promise.resolve({ rows: [{ id: 'run-1', workflow_id: 'wf-1', status: 'running' }] });
+      }
+      // The step-two failure: the thread insert that follows the run row.
+      if (runInserted && /INSERT INTO chat_threads/.test(s)) {
+        return Promise.reject(new Error('deadlock detected'));
+      }
+      if (/UPDATE workflow_runs/.test(s)) return Promise.resolve({ rows: [], rowCount: 1 });
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it('POSITIVE CONTROL: marks the run error instead of leaving it running forever', async () => {
+    failAfterRunInsert();
+
+    // Note: despite this route's own "PUBLIC — no auth, uses token" comment,
+    // it is mounted under app.use('/workflows', requireAuth, workflowsRouter)
+    // in app.ts, so it currently requires a valid Bearer token like every
+    // other route on this router — a real external webhook sender would not
+    // have one. That is a separate, pre-existing defect (a stale comment
+    // describing auth requirements that do not match the mount), out of
+    // scope for this fix (non-atomic writes). Noted here rather than fixed
+    // silently, and a Bearer token is supplied below so this test reaches
+    // the handler under test as the code actually behaves today.
+    const res = await request(app)
+      .post('/workflows/webhook/some-token')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({});
+
+    expect(res.status).toBe(500);
+
+    // The load-bearing assertion. Before the fix, NO such update was issued and
+    // the row stayed 'running' with nothing able to tell it from a live run.
+    const marking = mockQuery.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => /UPDATE workflow_runs/.test(s) && /status = 'error'/.test(s));
+
+    expect(marking.length).toBeGreaterThan(0);
+    expect(marking[0]).toMatch(/completed_at = NOW\(\)/);
+    // Guarded so it cannot resurrect a run that has since finished by another path.
+    expect(marking[0]).toMatch(/AND status = 'running'/);
+
+    const params = mockQuery.mock.calls.find(
+      (c) => /UPDATE workflow_runs/.test(String(c[0])) && /status = 'error'/.test(String(c[0])),
+    )![1] as unknown[];
+    expect(params[1]).toBe('run-1');
+    expect(String(params[0])).toMatch(/deadlock/);
+  });
+
+  it('recording the failure cannot itself take down the request', async () => {
+    let runInserted = false;
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/FROM workflows w/.test(s)) {
+        return Promise.resolve({
+          rows: [{
+            id: 'wf-1', agent_id: 'a-1', agent_slug: 'scout', agent_status: 'running',
+            work_token: 'wt', prompt: 'go', created_by: 'user-1', name: 'Nightly Scout',
+            allowed_models: ['m'],
+          }],
+        });
+      }
+      if (/INSERT INTO workflow_runs/.test(s)) {
+        runInserted = true;
+        return Promise.resolve({ rows: [{ id: 'run-1' }] });
+      }
+      if (runInserted && /INSERT INTO chat_threads/.test(s)) return Promise.reject(new Error('down'));
+      if (/UPDATE workflow_runs/.test(s)) return Promise.reject(new Error('still down'));
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app)
+      .post('/workflows/webhook/some-token')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({});
+
+    // A clean 500, not a hang and not a crash.
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/Webhook trigger failed/);
+  });
+
+  it('does not mark anything when the run never got created', async () => {
+    mockQuery.mockImplementation((sql: string) => {
+      if (/FROM workflows w/.test(String(sql))) return Promise.reject(new Error('early failure'));
+      return Promise.resolve({ rows: [] });
+    });
+
+    await request(app)
+      .post('/workflows/webhook/some-token')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({});
+
+    // Nothing was written, so there is nothing to label — and labelling a run id
+    // that does not exist would be its own confident-but-wrong write.
+    const marking = mockQuery.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => /UPDATE workflow_runs/.test(s) && /status = 'error'/.test(s));
+    expect(marking).toHaveLength(0);
+  });
+});
+
 describe('POST /chat/threads — the three inserts are one transaction', () => {
   it('rolls back and does not commit when a later insert fails', async () => {
     mockQuery.mockImplementation((sql: string) => {
