@@ -73,14 +73,6 @@ jobs:
       # services/api/scripts/verify-native-deps.js for why it is a script
       # and not an npm flag.
       - run: node scripts/verify-native-deps.js
-      # A test file with no top-level import/export is a global script to
-      # TypeScript, so its top-level consts collide with any other such file's
-      # — TS2451, and the whole jest run fails naming innocent files. This
-      # turned main red on 2026-08-05 (mockQuery/WORKFLOW) and had done it
-      # once before (OLD_ENV). The project typecheck does NOT catch it,
-      # because tsconfig does not put these files in one program, which is how
-      # it merged with a green PR.
-      - run: node scripts/check-test-module-scope.js
       - run: npm test
 
       # #350: jest.auth401.js writes test-artifacts/auth401.jsonl whenever
@@ -258,6 +250,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # A test file with no top-level import/export is a global SCRIPT to
+      # TypeScript, so its top-level consts share one scope with every other
+      # such file — TS2451. This turned main red on 2026-08-05
+      # (mockQuery/WORKFLOW) and had done it once before (OLD_ENV).
+      #
+      # Repo-wide, and run from the root, because services/ui is exposed MORE
+      # than services/api: ui's tsconfig includes '**/*.tsx' with only
+      # node_modules excluded and next.config.ts sets no ignoreBuildErrors, so
+      # a collision there fails `next build` — the PRODUCTION IMAGE, on the
+      # deploy path — while vitest never sees it (esbuild strips types per
+      # file and builds no cross-file program).
+      - name: Assert every TypeScript test file is a module, not a global script
+        run: node scripts/check-test-module-scope.js
 
       - name: Lint services/api (eslint)
         working-directory: services/api
