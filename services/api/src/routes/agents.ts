@@ -996,6 +996,13 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     }
 
     let resolvedModelPolicyId: string | null | undefined = undefined;
+    // The read (above) and the write (deferred here, executed inside the
+    // transaction below) are deliberately split — see the comment at the
+    // assignment site.
+    let pendingModelPolicyWrite:
+      | { kind: 'reuse'; reusePolicyId: string; normalizedModelNames: string[] }
+      | { kind: 'upsert'; normalizedModelNames: string[] }
+      | null = null;
     if (model_names !== undefined) {
       const normalizedModelNames = [...new Set((model_names as string[]).filter(Boolean))];
       const modelError = await validateModelNames(normalizedModelNames, existing[0].created_by);
@@ -1004,6 +1011,13 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
         return;
       }
 
+      // app#212 family, PUT's own version of the bug fixed once for POST:
+      // this READS reusePolicyId eligibility now (safe — reads never need
+      // rolling back) but does NOT write yet. The write moves inside the
+      // transaction below, alongside the main UPDATE and the skill
+      // reassignment, so a later validation failure (skill_ids, elevated
+      // scope) that still lay ahead in the old ordering can no longer leave
+      // this write committed while the request as a whole answers 400/403.
       if (normalizedModelNames.length === 0) {
         resolvedModelPolicyId = null;
       } else {
@@ -1017,24 +1031,9 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
             reusePolicyId = policyRows[0].id;
           }
         }
-
-        if (reusePolicyId) {
-          await getPool().query(
-            `UPDATE model_policies
-             SET allowed_models = $1, model_aliases = $2, updated_by = $3, updated_at = NOW()
-             WHERE id = $4`,
-            [JSON.stringify(normalizedModelNames), JSON.stringify({}), user.sub, reusePolicyId]
-          );
-          resolvedModelPolicyId = reusePolicyId;
-        } else {
-          resolvedModelPolicyId = await upsertAutoAgentModelsPolicy(
-            existing[0].id,
-            existing[0].agent_id,
-            existing[0].created_by,
-            user.sub,
-            normalizedModelNames
-          );
-        }
+        pendingModelPolicyWrite = reusePolicyId
+          ? { kind: 'reuse', reusePolicyId, normalizedModelNames }
+          : { kind: 'upsert', normalizedModelNames };
       }
     }
 
@@ -1081,7 +1080,6 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
 
     // Build SET clause: model_policy_id uses explicit flag to allow clearing to NULL
     const modelPolicyProvided = model_policy_id !== undefined || model_names !== undefined;
-    const effectiveModelPolicyId = model_names !== undefined ? resolvedModelPolicyId : model_policy_id;
     const containerProfileProvided = container_profile_id !== undefined;
 
     // app#374/#386 review: DELTA applied server-side. The client can no
@@ -1108,66 +1106,108 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
       envVarsNonce = encrypted.nonce;
     }
 
-    const { rows } = await getPool().query(
-      `UPDATE agents SET
-        name = COALESCE($1, name),
-        description = COALESCE($2, description),
-        tools_config = COALESCE($3, tools_config),
-        cpus = COALESCE($4, cpus),
-        mem_limit = COALESCE($5, mem_limit),
-        pids_limit = COALESCE($6, pids_limit),
-        soul_md = COALESCE($7, soul_md),
-        rules_md = COALESCE($8, rules_md),
-        model_policy_id = CASE WHEN $9::boolean THEN $10::uuid ELSE model_policy_id END,
-        container_profile_id = CASE WHEN $11::boolean THEN $12::uuid ELSE container_profile_id END,
-        autonomy_level = COALESCE($13, autonomy_level),
-        tags = COALESCE($14, tags),
-        env_vars_encrypted = COALESCE($15, env_vars_encrypted),
-        env_vars_nonce = COALESCE($16, env_vars_nonce),
-        updated_at = NOW()
-       WHERE id = $17
-       RETURNING id, agent_id, name, description, status, tools_config,
-                 cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, autonomy_level, tags, error_message, created_at, updated_at, created_by`,
-      [
-        name || null,
-        description ?? null,
-        resolvedToolsConfig,
-        cpus || null,
-        mem_limit || null,
-        pids_limit ?? null,
-        soul_md ?? null,
-        rules_md ?? null,
-        modelPolicyProvided,
-        modelPolicyProvided ? (effectiveModelPolicyId ?? null) : null,
-        containerProfileProvided,
-        containerProfileProvided ? (container_profile_id ?? null) : null,
-        autonomy_level || null,
-        tags !== undefined ? JSON.stringify(tags) : null,
-        envVarsEncrypted,
-        envVarsNonce,
-        req.params.id,
-      ]
-    );
-
-    const updatedAgent = rows[0];
-    // app#374: never the plaintext, never the ciphertext — only the key
-    // names, same as GET /:id. finalEnvVars already reflects the delta
-    // above whether or not env_vars_set/env_vars_unset was provided.
-    updatedAgent.env_var_keys = envVarKeys(finalEnvVars);
-
-    // Update agent_skills if skill_ids provided
-    if (skill_ids !== undefined) {
-      // Clear existing assignments
-      await getPool().query('DELETE FROM agent_skills WHERE agent_id = $1', [req.params.id]);
-      // Insert new assignments
-      for (const skillId of skill_ids) {
-        await getPool().query(
-          'INSERT INTO agent_skills (agent_id, skill_id, assigned_by) VALUES ($1, $2, $3)',
-          [req.params.id, skillId, user.sub]
-        );
+    // app#212 family: ONE transaction over the whole write sequence, the
+    // same fix POST /agents already has and PUT never got. All statements
+    // below used to run on the pool, each committing on its own — a
+    // failure partway through the skill re-insert loop (an FK violation on
+    // one skill after several had already landed, a connection drop) left
+    // the DELETE committed with only some of the new skills inserted,
+    // while the caller was told the update failed. The model-policy write
+    // deferred above is included here for the same reason: it used to
+    // commit before the (read-only, but later in source order) skill_ids
+    // validation, so a 400/403 from THAT check still left the model policy
+    // silently changed.
+    const updatedAgent = await withTransaction(async (tx) => {
+      if (pendingModelPolicyWrite) {
+        if (pendingModelPolicyWrite.kind === 'reuse') {
+          await tx.query(
+            `UPDATE model_policies
+             SET allowed_models = $1, model_aliases = $2, updated_by = $3, updated_at = NOW()
+             WHERE id = $4`,
+            [
+              JSON.stringify(pendingModelPolicyWrite.normalizedModelNames),
+              JSON.stringify({}),
+              user.sub,
+              pendingModelPolicyWrite.reusePolicyId,
+            ]
+          );
+          resolvedModelPolicyId = pendingModelPolicyWrite.reusePolicyId;
+        } else {
+          resolvedModelPolicyId = await upsertAutoAgentModelsPolicy(
+            existing[0].id,
+            existing[0].agent_id,
+            existing[0].created_by,
+            user.sub,
+            pendingModelPolicyWrite.normalizedModelNames,
+            tx
+          );
+        }
       }
-    }
+      const effectiveModelPolicyId = model_names !== undefined ? resolvedModelPolicyId : model_policy_id;
+
+      const { rows } = await tx.query(
+        `UPDATE agents SET
+          name = COALESCE($1, name),
+          description = COALESCE($2, description),
+          tools_config = COALESCE($3, tools_config),
+          cpus = COALESCE($4, cpus),
+          mem_limit = COALESCE($5, mem_limit),
+          pids_limit = COALESCE($6, pids_limit),
+          soul_md = COALESCE($7, soul_md),
+          rules_md = COALESCE($8, rules_md),
+          model_policy_id = CASE WHEN $9::boolean THEN $10::uuid ELSE model_policy_id END,
+          container_profile_id = CASE WHEN $11::boolean THEN $12::uuid ELSE container_profile_id END,
+          autonomy_level = COALESCE($13, autonomy_level),
+          tags = COALESCE($14, tags),
+          env_vars_encrypted = COALESCE($15, env_vars_encrypted),
+          env_vars_nonce = COALESCE($16, env_vars_nonce),
+          updated_at = NOW()
+         WHERE id = $17
+         RETURNING id, agent_id, name, description, status, tools_config,
+                   cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
+                   model_policy_id, container_profile_id, autonomy_level, tags, error_message, created_at, updated_at, created_by`,
+        [
+          name || null,
+          description ?? null,
+          resolvedToolsConfig,
+          cpus || null,
+          mem_limit || null,
+          pids_limit ?? null,
+          soul_md ?? null,
+          rules_md ?? null,
+          modelPolicyProvided,
+          modelPolicyProvided ? (effectiveModelPolicyId ?? null) : null,
+          containerProfileProvided,
+          containerProfileProvided ? (container_profile_id ?? null) : null,
+          autonomy_level || null,
+          tags !== undefined ? JSON.stringify(tags) : null,
+          envVarsEncrypted,
+          envVarsNonce,
+          req.params.id,
+        ]
+      );
+
+      const agent = rows[0];
+      // app#374: never the plaintext, never the ciphertext — only the key
+      // names, same as GET /:id. finalEnvVars already reflects the delta
+      // above whether or not env_vars_set/env_vars_unset was provided.
+      agent.env_var_keys = envVarKeys(finalEnvVars);
+
+      // Update agent_skills if skill_ids provided
+      if (skill_ids !== undefined) {
+        // Clear existing assignments
+        await tx.query('DELETE FROM agent_skills WHERE agent_id = $1', [req.params.id]);
+        // Insert new assignments
+        for (const skillId of skill_ids) {
+          await tx.query(
+            'INSERT INTO agent_skills (agent_id, skill_id, assigned_by) VALUES ($1, $2, $3)',
+            [req.params.id, skillId, user.sub]
+          );
+        }
+      }
+
+      return agent;
+    });
 
     // Fetch skills for response
     const { rows: agentSkills } = await getPool().query(
