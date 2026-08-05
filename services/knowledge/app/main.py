@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -52,6 +53,16 @@ def create_app(
         app.state.settings = settings
         revoked: set[str] = set()
         app.state.revoked_jtis = revoked
+
+        # app#133's Python twin: neither loop can die silently (each already
+        # catches Exception per cycle), but before this nothing distinguished
+        # "healthy" from "failing every cycle for an hour" — both looked
+        # identical from outside. These are the observable trace; /health
+        # reads them.
+        app.state.reconciler_last_success: float | None = None
+        app.state.reconciler_last_error: str | None = None
+        app.state.revocation_last_success: float | None = None
+        app.state.revocation_last_error: str | None = None
 
         # Check for private key (needed for refresh endpoint)
         if Path(settings.private_key_path).exists():
@@ -198,7 +209,10 @@ async def _revocation_refresh_loop(app: FastAPI) -> None:
                 await pool.execute(
                     "DELETE FROM revoked_tokens WHERE expires_at < NOW()"
                 )
-        except Exception:
+            app.state.revocation_last_success = time.time()
+            app.state.revocation_last_error = None
+        except Exception as exc:
+            app.state.revocation_last_error = str(exc)
             logger.exception("revocation_refresh_failed")
 
 
@@ -207,7 +221,10 @@ async def _reconciler_loop(app: FastAPI, settings: Settings) -> None:
     # Run once at startup
     try:
         await reconcile(app.state.pool, settings)
-    except Exception:
+        app.state.reconciler_last_success = time.time()
+        app.state.reconciler_last_error = None
+    except Exception as exc:
+        app.state.reconciler_last_error = str(exc)
         logger.exception("reconciler_startup_failed")
 
     # Then periodically
@@ -215,5 +232,8 @@ async def _reconciler_loop(app: FastAPI, settings: Settings) -> None:
         await asyncio.sleep(settings.reconciler_interval_seconds)
         try:
             await reconcile(app.state.pool, settings)
-        except Exception:
+            app.state.reconciler_last_success = time.time()
+            app.state.reconciler_last_error = None
+        except Exception as exc:
+            app.state.reconciler_last_error = str(exc)
             logger.exception("reconciler_cycle_failed")
