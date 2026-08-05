@@ -34,7 +34,9 @@ interface Agent {
   models: string[]
   skills: Array<{ id: string; name: string; scope: string; tools?: Array<{ id: string; name: string }>; instructions_md?: string }>
   tags: string[]
-  env_vars: Record<string, string>
+  // app#374/#386: the api encrypts env var values at rest and never returns
+  // them — only the key names that are set. Values are never held here.
+  env_var_keys: string[]
   autonomy_level: string | null
   schedule_cron: string | null
   schedule_enabled: boolean
@@ -601,13 +603,17 @@ export default function AgentDetailClient({
   const handleAddEnvVar = async () => {
     const key = envKey.trim()
     if (!key) return
-    const updated = { ...(agent.env_vars || {}), [key]: envVal }
+    // app#374/#386: env_vars_set names only the key being written. The api
+    // encrypts values at rest and never returns them, so this component
+    // cannot read back the current set to build a "complete" replacement —
+    // and does not need to; the server merges this onto whatever is
+    // already stored.
     setEnvSaving(true)
     try {
       const res = await fetch(`/api/agents/${agentId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ env_vars: updated }),
+        body: JSON.stringify({ env_vars_set: { [key]: envVal } }),
       })
       if (!res.ok) {
         const data = await res.json()
@@ -625,14 +631,12 @@ export default function AgentDetailClient({
   }
 
   const handleRemoveEnvVar = async (key: string) => {
-    const updated = { ...(agent.env_vars || {}) }
-    delete updated[key]
     setEnvSaving(true)
     try {
       const res = await fetch(`/api/agents/${agentId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ env_vars: updated }),
+        body: JSON.stringify({ env_vars_unset: [key] }),
       })
       if (!res.ok) {
         const data = await res.json()
@@ -1195,8 +1199,8 @@ export default function AgentDetailClient({
           {/* Environment Variables */}
           <div className="rounded-lg border border-navy-700 bg-navy-800 p-5">
             <h2 className="text-lg font-semibold text-white mb-1">Environment Variables</h2>
-            <p className="text-sm text-mountain-400 mb-3">Key-value pairs injected into the agent container at startup.</p>
-            {Object.keys(agent.env_vars || {}).length > 0 ? (
+            <p className="text-sm text-mountain-400 mb-3">Key-value pairs injected into the agent container at startup. Values are encrypted at rest and not shown once set.</p>
+            {(agent.env_var_keys || []).length > 0 ? (
               <div className="rounded-md border border-navy-700 overflow-hidden mb-3">
                 <table className="w-full text-sm">
                   <thead>
@@ -1207,10 +1211,14 @@ export default function AgentDetailClient({
                     </tr>
                   </thead>
                   <tbody>
-                    {Object.entries(agent.env_vars || {}).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => (
+                    {/* app#374/#386: only key NAMES ever reach this component
+                        — env_var_keys, not env_vars. There is no value to
+                        render; the column stays as a visual placeholder so an
+                        operator isn't left wondering whether a value exists. */}
+                    {[...(agent.env_var_keys || [])].sort((a, b) => a.localeCompare(b)).map((k) => (
                       <tr key={k} className="border-b border-navy-800 last:border-0">
                         <td className="px-3 py-2 font-mono text-brand-400">{k}</td>
-                        <td className="px-3 py-2 font-mono text-white break-all">{v}</td>
+                        <td className="px-3 py-2 font-mono text-mountain-500">••••••••</td>
                         {agent.status !== 'running' && (
                           <td className="px-3 py-2 text-center">
                             <button
@@ -1402,7 +1410,7 @@ export default function AgentDetailClient({
           <AgentMcpServers agentId={agent.id} agentStatus={agent.status} />
 
           {/* Claude Code */}
-          <AgentClaudeConfig agentId={agent.id} envVars={agent.env_vars || {}} agentStatus={agent.status} onUpdate={() => window.location.reload()} />
+          <AgentClaudeConfig agentId={agent.id} envVarKeys={agent.env_var_keys || []} agentStatus={agent.status} onUpdate={() => window.location.reload()} />
 
           {/* Webhooks & Discord */}
           <AgentWebhooks agentId={agent.id} />
