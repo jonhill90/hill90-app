@@ -15,7 +15,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 
-interface ActivityEvent {
+export interface ActivityEvent {
   id: string
   timestamp: string
   type: string
@@ -29,10 +29,19 @@ interface ActivityEvent {
 
 type DotVariant = 'success' | 'error' | 'info' | 'warning'
 
-function classifyEvent(event: ActivityEvent): DotVariant {
+export function classifyEvent(event: ActivityEvent): DotVariant {
   if (event.success === null && event.type === 'work_failed') return 'error'
   if (event.type === 'work_failed') return 'error'
   if (event.type === 'work_received' || event.type === 'command_start') return 'warning'
+  // 'work_completed'/'command_complete' used to map straight to 'success' by
+  // TYPE alone — the identical bug fixed in EventCard.tsx's getLifecycleInfo
+  // (app#436, app#441): a work item or command that itself reported
+  // success=false was still shown here as a green checkmark, the one place
+  // this timeline is supposed to tell an operator whether something actually
+  // worked. success===false must win over the type match.
+  if ((event.type === 'work_completed' || event.type === 'command_complete') && event.success === false) {
+    return 'error'
+  }
   if (event.success === true || event.type === 'work_completed' || event.type === 'command_complete') return 'success'
   return 'info'
 }
