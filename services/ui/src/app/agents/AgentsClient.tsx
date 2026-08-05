@@ -61,6 +61,10 @@ const STATUS_ORDER: Record<string, number> = { running: 0, error: 1, stopped: 2 
 export default function AgentsClient({ session }: { session: Session }) {
   const [agents, setAgents] = useState<Agent[]>([])
   const [loading, setLoading] = useState(true)
+  // A failed /api/agents used to leave `agents` at its initial [] with no
+  // trace of why — "No agents yet" and "the request failed" rendered
+  // identically on the page every session lands on to see its own agents.
+  const [loadError, setLoadError] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -87,9 +91,15 @@ export default function AgentsClient({ session }: { session: Session }) {
   const fetchData = useCallback(async () => {
     try {
       const agentsRes = await fetch('/api/agents')
-      if (agentsRes.ok) setAgents(await agentsRes.json())
+      if (agentsRes.ok) {
+        setAgents(await agentsRes.json())
+        setLoadError(false)
+      } else {
+        setLoadError(true)
+      }
     } catch (err) {
       console.error('Failed to fetch agents:', err)
+      setLoadError(true)
     } finally {
       setLoading(false)
     }
@@ -482,7 +492,15 @@ export default function AgentsClient({ session }: { session: Session }) {
         </div>
       )}
 
-      {agents.length === 0 ? (
+      {loadError ? (
+        <div
+          className="rounded-lg border border-navy-700 bg-navy-800 p-5 flex items-start gap-2"
+          data-testid="agents-list-error"
+        >
+          <AlertTriangle size={16} className="text-red-400 flex-shrink-0 mt-0.5" />
+          <p className="text-sm text-red-300">Could not load agents — try refreshing the page</p>
+        </div>
+      ) : agents.length === 0 ? (
         <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 text-center">
           <p className="text-mountain-400 mb-4">No agents yet</p>
           <Link

@@ -130,6 +130,10 @@ type Tab = 'collections' | 'search' | 'quality' | 'graph'
 export default function SharedKnowledgeClient({ initialTab, initialQuery }: { initialTab?: Tab; initialQuery?: string } = {}) {
   // Data state
   const [collections, setCollections] = useState<Collection[]>([])
+  // A failed collections fetch used to leave `collections` at its initial
+  // [] and rendered "No collections yet" — identical to a genuinely empty
+  // knowledge base. This is the knowledge collection itself.
+  const [collectionsError, setCollectionsError] = useState(false)
   const [sources, setSources] = useState<Source[]>([])
   const [sourcesTotal, setSourcesTotal] = useState<number | null>(null)
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null)
@@ -171,9 +175,12 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
       const res = await fetch('/api/shared-knowledge/collections')
       if (res.ok) {
         setCollections(await res.json())
+        setCollectionsError(false)
+      } else {
+        setCollectionsError(true)
       }
     } catch {
-      // silent
+      setCollectionsError(true)
     } finally {
       setLoading(false)
     }
@@ -647,7 +654,14 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
             )}
 
             {/* Collection list */}
-            {collections.length === 0 ? (
+            {collectionsError ? (
+              <div
+                className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+                data-testid="collections-error"
+              >
+                <p className="text-sm text-red-400">Could not load collections — try refreshing the page</p>
+              </div>
+            ) : collections.length === 0 ? (
               <div className="rounded-lg border border-dashed border-navy-600 bg-navy-800/50 p-6 text-center">
                 <FolderOpen className="w-8 h-8 text-mountain-500 mx-auto mb-3" />
                 <p className="text-sm font-medium text-mountain-400 mb-1">No collections yet</p>

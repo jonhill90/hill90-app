@@ -79,6 +79,11 @@ export default function DashboardClient({ session }: { session: Session }) {
   ])
   const [lastChecked, setLastChecked] = useState<string>('')
   const [harness, setHarness] = useState<HarnessOverview | null>(null)
+  // fetchHarness used to treat a non-ok /api/agents response the same as a
+  // genuinely empty estate — both left activeAgents at [] and harness at
+  // null, so "0 agents" and "the request failed" rendered identically.
+  // This is what lets the two be told apart.
+  const [harnessError, setHarnessError] = useState(false)
   const [chat, setChat] = useState<ChatSummary>({ threads: 0, messagesToday: 0 })
   const [activeAgents, setActiveAgents] = useState<AgentInfo[]>([])
   const [recentThreads, setRecentThreads] = useState<RecentThread[]>([])
@@ -177,7 +182,19 @@ export default function DashboardClient({ session }: { session: Session }) {
         fetch(`/api/usage?from=${sevenDaysAgo()}`),
       ])
 
-      const agents = agentsRes.ok ? await agentsRes.json() : []
+      // /api/agents specifically, not models/usage: it drives the Active
+      // Agents widget and the Platform Overview agent counts, the two
+      // places a silent [] reads as "you have no agents" rather than "the
+      // request failed". models/usage degrading softly to 0 on their own
+      // failure is unchanged — lower-stakes numbers, not a list a user
+      // reads as an inventory of their own agents.
+      if (!agentsRes.ok) {
+        setHarnessError(true)
+        return
+      }
+      setHarnessError(false)
+
+      const agents = await agentsRes.json()
       const models = modelsRes.ok ? await modelsRes.json() : []
       const usage = usageRes.ok ? await usageRes.json() : null
 
@@ -207,6 +224,7 @@ export default function DashboardClient({ session }: { session: Session }) {
       })
     } catch (err) {
       console.error('Failed to fetch harness overview:', err)
+      setHarnessError(true)
     }
   }, [])
 
@@ -371,7 +389,11 @@ export default function DashboardClient({ session }: { session: Session }) {
               View all
             </Link>
           </div>
-          {activeAgents.length === 0 ? (
+          {harnessError ? (
+            <p className="text-sm text-red-400" data-testid="active-agents-error">
+              Could not load agents — try refreshing
+            </p>
+          ) : activeAgents.length === 0 ? (
             <p className="text-sm text-mountain-500">No active agents</p>
           ) : (
             <ul className="space-y-3">
@@ -489,7 +511,7 @@ export default function DashboardClient({ session }: { session: Session }) {
       </div>
 
       {/* Harness overview */}
-      {harness && (
+      {harness ? (
         <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 mb-8">
           <h2 className="text-lg font-semibold text-white mb-3">Platform Overview</h2>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
@@ -527,7 +549,14 @@ export default function DashboardClient({ session }: { session: Session }) {
             </div>
           </div>
         </div>
-      )}
+      ) : harnessError ? (
+        <div
+          className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3 mb-8"
+          data-testid="platform-overview-error"
+        >
+          <p className="text-sm text-red-400">Could not load platform overview — try refreshing</p>
+        </div>
+      ) : null}
 
       {/* Service health */}
       <div className="flex items-center justify-between mb-8">
