@@ -254,3 +254,85 @@ class TestTmuxListWindows:
         parsed = json.loads(result)
         assert parsed["success"] is True
         assert parsed["windows"] == "0:zsh 1"
+
+
+class TestGitStatusDiffResetCheckReturncode:
+    """Sibling-drift sweep. `_execute_git`'s `add`, `commit`, and `log` actions
+    each check `proc.returncode != 0` before reporting success — `status`,
+    `diff`, and `reset` do not, and unconditionally return `{"success": True,
+    ...}` regardless of what the underlying git process actually did. The
+    same pattern was already fixed once in this file, for `_execute_tmux`'s
+    `list_windows` action, whose own comment says exactly this: "Every
+    sibling action above falls through to the shared `if result.returncode
+    != 0` check... This one returned early with success hardcoded." That fix
+    reached tmux; it never reached git's three siblings with the identical
+    gap.
+    """
+
+    @staticmethod
+    def _make_proc(returncode: int, stdout: bytes = b"", stderr: bytes = b""):
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(return_value=(stdout, stderr))
+        proc.wait = AsyncMock(return_value=returncode)
+        proc.returncode = returncode
+        return proc
+
+    def _side_effect_for(self, failing_action: str, stderr: bytes = b"fatal: git error"):
+        """Auto-init (git init / config x2) always succeeds; the action's own
+        subcommand fails. Keyed on the first positional git subcommand arg."""
+        def _side_effect(*args, **kwargs):
+            subcommand = args[1] if len(args) > 1 else None
+            if subcommand == failing_action:
+                return self._make_proc(1, stderr=stderr)
+            return self._make_proc(0)
+        return _side_effect
+
+    @pytest.mark.asyncio
+    @patch("asyncio.create_subprocess_exec")
+    async def test_status_failure_is_not_reported_as_success(self, mock_exec):
+        mock_exec.side_effect = self._side_effect_for("status")
+        result = await execute_tool_call("git", {"action": "status"})
+        parsed = json.loads(result)
+        assert parsed["success"] is False, f"expected failure to be reported, got: {parsed}"
+
+    @pytest.mark.asyncio
+    @patch("asyncio.create_subprocess_exec")
+    async def test_status_success_still_reports_success(self, mock_exec):
+        # POSITIVE CONTROL — a fix that always returns False would also pass
+        # the test above for the wrong reason.
+        mock_exec.side_effect = self._side_effect_for("__never_fails__")
+        result = await execute_tool_call("git", {"action": "status"})
+        parsed = json.loads(result)
+        assert parsed["success"] is True
+
+    @pytest.mark.asyncio
+    @patch("asyncio.create_subprocess_exec")
+    async def test_diff_failure_is_not_reported_as_success(self, mock_exec):
+        mock_exec.side_effect = self._side_effect_for("diff")
+        result = await execute_tool_call("git", {"action": "diff"})
+        parsed = json.loads(result)
+        assert parsed["success"] is False, f"expected failure to be reported, got: {parsed}"
+
+    @pytest.mark.asyncio
+    @patch("asyncio.create_subprocess_exec")
+    async def test_diff_success_still_reports_success(self, mock_exec):
+        mock_exec.side_effect = self._side_effect_for("__never_fails__")
+        result = await execute_tool_call("git", {"action": "diff"})
+        parsed = json.loads(result)
+        assert parsed["success"] is True
+
+    @pytest.mark.asyncio
+    @patch("asyncio.create_subprocess_exec")
+    async def test_reset_failure_is_not_reported_as_success(self, mock_exec):
+        mock_exec.side_effect = self._side_effect_for("reset")
+        result = await execute_tool_call("git", {"action": "reset"})
+        parsed = json.loads(result)
+        assert parsed["success"] is False, f"expected failure to be reported, got: {parsed}"
+
+    @pytest.mark.asyncio
+    @patch("asyncio.create_subprocess_exec")
+    async def test_reset_success_still_reports_success(self, mock_exec):
+        mock_exec.side_effect = self._side_effect_for("__never_fails__")
+        result = await execute_tool_call("git", {"action": "reset"})
+        parsed = json.loads(result)
+        assert parsed["success"] is True
