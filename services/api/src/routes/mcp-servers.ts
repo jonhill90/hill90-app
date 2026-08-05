@@ -14,8 +14,38 @@ import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isAdmin } from '../helpers/elevated-scope';
+import { encryptProviderKey, decryptProviderKey } from '../services/provider-key-crypto';
 
 const router = Router();
+
+// app#369: connection_config can carry a credential — a command's --token
+// arg, an env block — and used to be stored as plain JSONB, returned
+// verbatim on every read. Same class of secret provider_connections already
+// encrypts; reusing that exact helper and key rather than inventing a
+// second scheme, per the standing instruction not to.
+function getEncryptionKey(): string {
+  const key = process.env.PROVIDER_KEY_ENCRYPTION_KEY;
+  if (!key) throw new Error('PROVIDER_KEY_ENCRYPTION_KEY not configured');
+  return key;
+}
+
+// WHOLE-BLOB, NOT PER-KEY. connection_config is heterogeneous by transport
+// (stdio: command/args/env; sse/http: url), and the create form's own
+// placeholder invites a credential directly into `args` as a plain string
+// (`--token ghp_xxx`) or into `env`, not a single named "secret" field.
+// Maintaining an allowlist of which keys are safe to leave in cleartext
+// would have to track every future transport and is exactly the kind of
+// assumption that goes stale silently. See migration 067 for the same
+// reasoning against the schema change.
+function encryptConfig(config: unknown): { encrypted: Buffer; nonce: Buffer } {
+  return encryptProviderKey(JSON.stringify(config ?? {}), getEncryptionKey());
+}
+
+// Columns explicitly listed, never `SELECT *` — connection_config_encrypted
+// and connection_config_nonce must never leave this file. Mirrors
+// provider_connections, whose GET responses never include api_key_encrypted
+// either.
+const PUBLIC_COLUMNS = `id, name, description, transport, is_platform, created_by, created_at, updated_at`;
 
 // ── List MCP servers ────────────────────────────────────────────────
 router.get('/', requireRole('user'), async (req: Request, res: Response) => {
@@ -24,7 +54,7 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
 
     const { rows } = await getPool().query(
-      `SELECT ms.*,
+      `SELECT ${PUBLIC_COLUMNS},
               (SELECT count(*) FROM agent_mcp_servers ams WHERE ams.mcp_server_id = ms.id) AS agent_count
        FROM mcp_servers ms
        ${admin ? '' : 'WHERE ms.created_by = $1 OR ms.is_platform = true'}
@@ -62,15 +92,18 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       return;
     }
 
+    const { encrypted, nonce } = encryptConfig(connection_config);
+
     const { rows } = await getPool().query(
-      `INSERT INTO mcp_servers (name, description, transport, connection_config, is_platform, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
+      `INSERT INTO mcp_servers (name, description, transport, connection_config_encrypted, connection_config_nonce, is_platform, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING ${PUBLIC_COLUMNS}`,
       [
         name,
         description || null,
         transport || 'stdio',
-        JSON.stringify(connection_config || {}),
+        encrypted,
+        nonce,
         is_platform || false,
         user.sub,
       ]
@@ -90,7 +123,7 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
 
     const { rows } = await getPool().query(
-      `SELECT ms.*,
+      `SELECT ${PUBLIC_COLUMNS},
               (SELECT count(*) FROM agent_mcp_servers ams WHERE ams.mcp_server_id = ms.id) AS agent_count
        FROM mcp_servers ms
        WHERE ms.id = $1 ${admin ? '' : 'AND (ms.created_by = $2 OR ms.is_platform = true)'}`,
@@ -139,18 +172,32 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
     const { name, description, transport, connection_config } = req.body;
 
+    // Only re-encrypt when a new config was actually sent — COALESCE keeps
+    // the existing ciphertext otherwise, the same "not provided means
+    // unchanged" contract every other field here already has. There is no
+    // decrypt-then-compare shortcut: the caller must send the whole config
+    // to change any part of it, exactly like provider_connections' api_key.
+    let newEncrypted: Buffer | null = null;
+    let newNonce: Buffer | null = null;
+    if (connection_config !== undefined) {
+      const enc = encryptConfig(connection_config);
+      newEncrypted = enc.encrypted;
+      newNonce = enc.nonce;
+    }
+
     const { rows } = await getPool().query(
       `UPDATE mcp_servers SET
         name = COALESCE($1, name),
         description = COALESCE($2, description),
         transport = COALESCE($3, transport),
-        connection_config = COALESCE($4, connection_config),
+        connection_config_encrypted = COALESCE($4, connection_config_encrypted),
+        connection_config_nonce = COALESCE($5, connection_config_nonce),
         updated_at = NOW()
-       WHERE id = $5 ${admin ? '' : 'AND created_by = $6'}
-       RETURNING *`,
+       WHERE id = $6 ${admin ? '' : 'AND created_by = $7'}
+       RETURNING ${PUBLIC_COLUMNS}`,
       admin
-        ? [name, description, transport, connection_config ? JSON.stringify(connection_config) : null, req.params.id]
-        : [name, description, transport, connection_config ? JSON.stringify(connection_config) : null, req.params.id, user.sub]
+        ? [name, description, transport, newEncrypted, newNonce, req.params.id]
+        : [name, description, transport, newEncrypted, newNonce, req.params.id, user.sub]
     );
 
     if (rows.length === 0) {
@@ -187,5 +234,13 @@ router.delete('/:id', requireRole('user'), async (req: Request, res: Response) =
     res.status(500).json({ error: 'Failed to delete MCP server' });
   }
 });
+
+// Exported so tests/services that legitimately need the plaintext (a future
+// MCP gateway connecting to the actual server) can decrypt without
+// duplicating the key/algorithm choice. Not used by any route in this file —
+// no route ever returns the plaintext.
+export function decryptConnectionConfig(encrypted: Buffer, nonce: Buffer): unknown {
+  return JSON.parse(decryptProviderKey(encrypted, nonce, getEncryptionKey()));
+}
 
 export default router;
