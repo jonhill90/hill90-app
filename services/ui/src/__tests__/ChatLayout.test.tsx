@@ -179,6 +179,28 @@ describe('ChatLayout', () => {
     })
   })
 
+  // THE ASSERTION THAT MATTERS (cross-service sibling-drift sweep — the
+  // UI-side mirror of app#440, which fixed the CLI's streamResponse
+  // silently returning empty on a failed request). fetchThreads checked
+  // `res.ok` but had no else branch — a non-2xx left `threads` at its
+  // initial [] with no error ever surfaced, rendering byte-identical to a
+  // genuinely empty inbox (the test right above this one). A transient 500
+  // on the most-trafficked chat surface told the user they had zero chat
+  // history with no way to tell the difference.
+  it('surfaces an error when the initial thread list fails to load, not a silent empty list', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'Internal server error' }),
+    })
+
+    render(<ChatLayout session={MOCK_SESSION as any} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('error-toast')).toBeInTheDocument()
+    })
+  })
+
   it('shows "Select a thread" prompt when no thread is active (desktop)', async () => {
     render(<ChatLayout session={MOCK_SESSION as any} />)
 
