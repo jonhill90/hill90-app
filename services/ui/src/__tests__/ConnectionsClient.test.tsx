@@ -149,6 +149,23 @@ describe('ConnectionsClient', () => {
     })
   })
 
+  it('shows an error state, not the empty state, when the connections fetch fails', async () => {
+    mockFetch.mockImplementation((...args: any[]) => {
+      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || ''
+      if (url.includes('/provider-connections') && !url.includes('/validate')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    })
+
+    render(<ConnectionsClient session={session} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connections-error')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('No provider connections yet')).not.toBeInTheDocument()
+  })
+
   it('opens create form when Add Connection clicked', async () => {
     render(<ConnectionsClient session={session} />)
 

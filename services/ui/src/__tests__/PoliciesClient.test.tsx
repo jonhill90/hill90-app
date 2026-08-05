@@ -100,6 +100,25 @@ describe('PoliciesClient', () => {
     })
   })
 
+  it('shows an error state, not the empty state, when the policies fetch fails', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/model-policies') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      }
+      if (url === '/api/user-models') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_USER_MODELS) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<PoliciesClient />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('policies-error')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('No model policies yet')).not.toBeInTheDocument()
+  })
+
   it('expands policy to show detail', async () => {
     render(<PoliciesClient />)
 

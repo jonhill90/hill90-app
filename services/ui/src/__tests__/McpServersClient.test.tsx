@@ -110,6 +110,15 @@ describe('McpServersClient', () => {
     })
   })
 
+  it('shows an error state, not the empty state, when the servers fetch fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })))
+    render(<McpServersClient />)
+    await waitFor(() => {
+      expect(screen.getByTestId('servers-error')).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/no mcp servers configured/i)).not.toBeInTheDocument()
+  })
+
   it('shows create form when Add Server clicked', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) })))
     render(<McpServersClient />)
