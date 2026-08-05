@@ -6,6 +6,7 @@ Follows patterns established in knowledge_store.py.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from typing import Any
@@ -577,7 +578,11 @@ async def vector_search_chunks(
 ) -> list[dict[str, Any]]:
     """Semantic vector search using pgvector cosine similarity.
 
-    Falls back gracefully if embedding column doesn't exist or has no data.
+    Raises on failure — genuinely zero matches (no rows) is a normal return,
+    a broken query is not, and the two must stay distinguishable to the one
+    caller (hybrid_search_chunks), which is where the graceful FTS fallback
+    belongs. Swallowing it here made "the column doesn't exist yet" and "the
+    connection just died" indistinguishable to every caller, forever.
     """
     import json
 
@@ -626,9 +631,26 @@ async def vector_search_chunks(
             *params,
         )
         return [_serialize(dict(r)) for r in rows]
-    except Exception as exc:
-        logger.warning("Vector search failed (falling back to FTS): %s", exc)
+    except asyncpg.exceptions.UndefinedColumnError:
+        # The one genuinely-expected failure: a database that predates the
+        # embedding column. Real "no data yet", not a broken query.
         return []
+
+
+@dataclass
+class HybridSearchOutcome:
+    """`vector_search_ok` distinguishes "the vector arm ran and matched
+    nothing" from "the vector arm never ran, or died" — vector_search_chunks
+    itself deliberately swallows its own exceptions and returns [] either
+    way (a DB hiccup should not 500 a search FTS could still answer), which
+    means this is the only place that distinction survives. Callers use it
+    to report an honest search_type instead of one inferred from "was an
+    embedding generated", which stays true even when the vector query
+    itself failed after a real embedding was produced.
+    """
+
+    results: list[dict[str, Any]]
+    vector_search_ok: bool
 
 
 async def hybrid_search_chunks(
@@ -640,7 +662,7 @@ async def hybrid_search_chunks(
     collection_id: str | None = None,
     limit: int = 20,
     vector_weight: float = 0.6,
-) -> list[dict[str, Any]]:
+) -> HybridSearchOutcome:
     """Hybrid search combining FTS keyword matching and vector similarity.
 
     If no embedding is provided, falls back to FTS-only.
@@ -652,15 +674,24 @@ async def hybrid_search_chunks(
     )
 
     if not query_embedding:
-        return fts_results
+        return HybridSearchOutcome(results=fts_results, vector_search_ok=False)
 
-    # Run vector search
-    vec_results = await vector_search_chunks(
-        pool, query_embedding, owner=owner, collection_id=collection_id, limit=limit
-    )
+    # vector_search_chunks raises on a real failure now — caught HERE,
+    # specifically, so "ran and matched zero rows" (vector_search_ok=True,
+    # empty list) stays distinguishable from "the query itself broke"
+    # (vector_search_ok=False). Collapsing those two into the same "empty"
+    # value is exactly the shape this function used to have.
+    try:
+        vec_results = await vector_search_chunks(
+            pool, query_embedding, owner=owner, collection_id=collection_id, limit=limit
+        )
+    except Exception as exc:
+        logger.warning("Vector search failed (falling back to FTS): %s", exc)
+        return HybridSearchOutcome(results=fts_results, vector_search_ok=False)
 
     if not vec_results:
-        return fts_results
+        # Ran fine, genuinely nothing to merge — still a real hybrid search.
+        return HybridSearchOutcome(results=fts_results, vector_search_ok=True)
 
     # Merge: build a map of chunk_id -> result, blend scores
     merged: dict[str, dict[str, Any]] = {}
@@ -692,7 +723,7 @@ async def hybrid_search_chunks(
         )
 
     results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
-    return results
+    return HybridSearchOutcome(results=results, vector_search_ok=True)
 
 
 # ---------------------------------------------------------------------------
