@@ -42,6 +42,56 @@ interface GraphEdge {
   source: string
   target: string
   label?: string
+  meta?: Record<string, unknown>
+}
+
+// app#383: where a click on a node should navigate. `sourceId` is present
+// only for a source-node click (a collection click has nowhere finer to
+// point). The caller (SharedKnowledgeClient) owns tabs/selection state;
+// this component only ever resolves WHICH node was clicked and what that
+// implies, never reaches into tab state itself.
+export interface GraphNavigationTarget {
+  collectionId: string
+  sourceId?: string
+}
+
+// Node ids are constructed in services/knowledge's shared_store.py as
+// f"col-{id}" / f"src-{id}" / f"agent-{id}" / f"{agent|user}-{id}" — NOT a
+// uniform `${type}-` prefix (collection/source abbreviate, agent/user don't).
+// Hardcoded here rather than derived from `type`, because a wrong derivation
+// would fail silently (a truncated id that still looks plausible), not loudly.
+const ID_PREFIX: Record<string, string> = { collection: 'col-', source: 'src-', agent: 'agent-', user: 'user-' }
+function idWithoutPrefix(node: GraphNode): string {
+  const prefix = ID_PREFIX[node.type] ?? `${node.type}-`
+  return node.id.startsWith(prefix) ? node.id.slice(prefix.length) : node.id
+}
+
+// Pure and standalone (takes edges as a param rather than closing over
+// component state) so both the canvas's imperative click handler and the
+// user-panel's plain React onClick can call the same resolution — one
+// navigation primitive, not two, per #383.
+export function resolveNavigationTarget(node: GraphNode, edges: GraphEdge[]): GraphNavigationTarget | null {
+  if (node.type === 'collection') {
+    return { collectionId: idWithoutPrefix(node) }
+  }
+  if (node.type === 'source') {
+    // A source's parent collection isn't in its own meta — resolved from the
+    // `contains` edge whose target is this source, same as the renderer
+    // already has to do nothing special for (that edge exists purely for
+    // drawing the tree). No edge means a dangling/truncated source (#377's
+    // own dangling-edge accounting) — nothing sensible to navigate to.
+    const containsEdge = edges.find(e => e.label === 'contains' && e.target === node.id)
+    if (!containsEdge) return null
+    const collectionId = containsEdge.source.startsWith('col-')
+      ? containsEdge.source.slice('col-'.length)
+      : containsEdge.source
+    return { collectionId, sourceId: idWithoutPrefix(node) }
+  }
+  // agent/user nodes have no tab to navigate to — `user` gets the retrieved-
+  // sources panel instead (handled by the caller of resolveNavigationTarget,
+  // not here), `agent` is out of scope for #383 and stays inert on click,
+  // same as before this file existed.
+  return null
 }
 
 // d3-force mutates link.source/target from string ids into node object
@@ -153,9 +203,40 @@ interface GraphData {
   truncated?: boolean
 }
 
-export default function KnowledgeGraph() {
+interface KnowledgeGraphProps {
+  // Optional: KnowledgeGraph works standalone (e.g. under test) with clicks
+  // simply doing nothing if this isn't supplied.
+  onNavigate?: (target: GraphNavigationTarget) => void
+}
+
+// A click must be distinguishable from the drag this canvas already
+// supports — a node released within this many pixels of where it was
+// picked up, within this long, counts as a click; anything past either
+// threshold is a drag that happened to end near its start, not a click.
+//
+// NOT verified against real trackpad hardware from this environment — 5px
+// is the conventional click/drag tolerance several browsers and toolkits
+// use (roughly what a dblclick's own movement tolerance allows), chosen by
+// that precedent, not by testing this exact canvas on a trackpad. Said
+// here rather than implied: if a tap-with-a-pixel-or-two-of-drift turns
+// out to need more slack in practice, this is the one constant to widen.
+export const CLICK_MAX_MOVE_PX = 5
+export const CLICK_MAX_DURATION_MS = 400
+
+// Pure and standalone so it's testable without a canvas 2D context — jsdom
+// (this project's test environment) returns `null` from
+// `canvas.getContext('2d')`, so the pointer listeners below never attach
+// during a test render. This is the actual decision they'd make, extracted
+// so drag-vs-click has a test that doesn't depend on canvas support existing.
+export function isClickNotDrag(dxPx: number, dyPx: number, elapsedMs: number): boolean {
+  return dxPx * dxPx + dyPx * dyPx <= CLICK_MAX_MOVE_PX * CLICK_MAX_MOVE_PX
+    && elapsedMs <= CLICK_MAX_DURATION_MS
+}
+
+export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {}) {
   const [data, setData] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const { data: session } = useSession()
   // Read via ref inside the draw loop below, not the `session` value
@@ -164,6 +245,11 @@ export default function KnowledgeGraph() {
   // (routine with next-auth) would restart the layout for no visual reason.
   const currentUserSubRef = useRef<string | undefined>(undefined)
   useEffect(() => { currentUserSubRef.current = session?.user?.sub }, [session])
+  // Same reasoning, same fix, for onNavigate: a fresh function identity on
+  // every parent render must not restart the simulation. Read the current
+  // callback through this ref inside the pointer handlers below instead.
+  const onNavigateRef = useRef(onNavigate)
+  useEffect(() => { onNavigateRef.current = onNavigate }, [onNavigate])
 
   useEffect(() => {
     fetch('/api/shared-knowledge/graph')
@@ -253,6 +339,22 @@ export default function KnowledgeGraph() {
     let isPanning = false
     let panStart = { x: 0, y: 0 }
     let viewStart = { tx: 0, ty: 0 }
+    // app#383: recorded only when a node was actually hit at pointerdown —
+    // panning never sets this, so a pan gesture can never accidentally
+    // resolve as a click no matter how short or small it is.
+    let pointerDownInfo: { node: GraphNode; x: number; y: number; t: number } | null = null
+
+    function handleNodeClick(node: GraphNode) {
+      if (node.type === 'user') {
+        // Toggle: clicking the same hub again closes its panel rather than
+        // requiring the panel's own close button every time.
+        setSelectedUserId(prev => (prev === node.id ? null : node.id))
+        return
+      }
+      if (!data) return
+      const target = resolveNavigationTarget(node, data.edges)
+      if (target) onNavigateRef.current?.(target)
+    }
 
     function nodeAt(worldX: number, worldY: number): GraphNode | null {
       // Reverse order so a node drawn on top (later in the array) wins a hit.
@@ -422,6 +524,7 @@ export default function KnowledgeGraph() {
       canvas.setPointerCapture(e.pointerId)
       if (hit) {
         draggingNode = hit
+        pointerDownInfo = { node: hit, x: sx, y: sy, t: performance.now() }
         hit.fx = hit.x
         hit.fy = hit.y
         if (sim && !reducedMotion) sim.alphaTarget(0.3).restart()
@@ -464,11 +567,25 @@ export default function KnowledgeGraph() {
     function onPointerUp(e: PointerEvent) {
       canvas.releasePointerCapture(e.pointerId)
       if (draggingNode) {
+        // Click resolution BEFORE releasing fx/fy — both happen for a
+        // released-in-place node (this is intentional, matches Obsidian's
+        // own graph: releasing a node both re-settles it into the
+        // simulation and, if it never really moved, selects it).
+        if (pointerDownInfo && pointerDownInfo.node === draggingNode) {
+          const rect = canvas.getBoundingClientRect()
+          const sx = e.clientX - rect.left
+          const sy = e.clientY - rect.top
+          const elapsedMs = performance.now() - pointerDownInfo.t
+          if (isClickNotDrag(sx - pointerDownInfo.x, sy - pointerDownInfo.y, elapsedMs)) {
+            handleNodeClick(draggingNode)
+          }
+        }
         draggingNode.fx = null
         draggingNode.fy = null
         if (sim && !reducedMotion) sim.alphaTarget(0)
         draggingNode = null
       }
+      pointerDownInfo = null
       isPanning = false
     }
 
@@ -518,6 +635,23 @@ export default function KnowledgeGraph() {
 
   const counts = corpusCounts(data)
 
+  // app#383: the user-node panel. Derived entirely from `data`, already in
+  // memory — no new fetch. Nothing existing shows "what did this requester
+  // retrieve", so unlike collection/source clicks (which navigate to an
+  // existing tab) this is genuinely new surface, kept as small as the data
+  // it's showing rather than a new tab of its own.
+  const selectedUserNode = selectedUserId ? data.nodes.find(n => n.id === selectedUserId) ?? null : null
+  const retrievedBySelectedUser = selectedUserId
+    ? data.edges
+        .filter(e => e.label === 'retrieved' && e.source === selectedUserId)
+        .map(e => {
+          const target = data.nodes.find(n => n.id === e.target)
+          return target ? { node: target, retrievalCount: e.meta?.retrieval_count } : null
+        })
+        .filter((x): x is { node: GraphNode; retrievalCount: unknown } => x !== null)
+        .sort((a, b) => (Number(b.retrievalCount) || 0) - (Number(a.retrievalCount) || 0))
+    : []
+
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
@@ -536,10 +670,51 @@ export default function KnowledgeGraph() {
             </span>
           )}
         </div>
-        <span className="text-xs text-mountain-500">scroll to zoom · drag to pan · drag a node to move it</span>
+        <span className="text-xs text-mountain-500">scroll to zoom · drag to pan · click a node to open it · drag a node to move it</span>
       </div>
-      <div className="rounded-lg border border-navy-700 bg-[#0f1923] overflow-hidden">
+      <div className="relative rounded-lg border border-navy-700 bg-[#0f1923] overflow-hidden">
         <canvas ref={canvasRef} className="w-full touch-none" style={{ height: '450px' }} data-testid="knowledge-graph-canvas" />
+        {selectedUserNode && (
+          <div
+            className="absolute top-3 right-3 w-64 max-h-96 overflow-y-auto rounded-lg border border-navy-600 bg-navy-900/95 backdrop-blur-sm p-3 text-sm shadow-xl"
+            data-testid="graph-user-retrieved-panel"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-mountain-300 font-medium">
+                {labelFor(selectedUserNode, session?.user?.sub)} retrieved
+              </span>
+              <button
+                onClick={() => setSelectedUserId(null)}
+                className="text-mountain-500 hover:text-white cursor-pointer leading-none"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            {retrievedBySelectedUser.length === 0 ? (
+              <p className="text-mountain-500 text-xs">Nothing resolvable on this page of the graph.</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {retrievedBySelectedUser.map(({ node, retrievalCount }) => (
+                  <li key={node.id}>
+                    <button
+                      onClick={() => {
+                        const target = resolveNavigationTarget(node, data.edges)
+                        if (target) onNavigate?.(target)
+                      }}
+                      className="text-left w-full text-mountain-300 hover:text-white truncate cursor-pointer"
+                    >
+                      {node.label}
+                      {typeof retrievalCount === 'number' && (
+                        <span className="text-mountain-500"> · {retrievalCount}</span>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
