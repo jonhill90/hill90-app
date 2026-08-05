@@ -13,6 +13,8 @@ interface ProviderConnection {
   last_validated_at: string | null
   last_validation_error: string | null
   validation_latency_ms: number | null
+  created_by: string | null
+  is_platform: boolean
   created_at: string
   updated_at: string
 }
@@ -417,6 +419,14 @@ export default function ConnectionsClient({ session }: { session: Session }) {
                         <div className="flex items-center gap-2">
                           <h3 className="font-semibold text-white truncate">{conn.name}</h3>
                           <HealthDot isValid={conn.is_valid} />
+                          {conn.is_platform && (
+                            <span
+                              className="inline-flex items-center rounded border border-navy-600 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-mountain-400 flex-shrink-0"
+                              data-testid={`platform-badge-${conn.id}`}
+                            >
+                              Platform
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-mountain-400 capitalize">{conn.provider}</p>
                       </div>
