@@ -217,6 +217,22 @@ async def fetch_and_extract(url: str) -> dict[str, Any]:
                 current_url = location
                 continue
 
+            # A non-2xx status must fail the fetch here, before extraction —
+            # not after. trafilatura does not know a 404/500 page's body is an
+            # error page rather than content; a page like "404 Not Found — the
+            # page you requested does not exist" extracts real, non-empty text
+            # just as cleanly as a real article, so the "not empty" check
+            # below cannot catch it. Left unchecked, ingest.py has no way to
+            # tell it received an error page and marks the job completed, the
+            # source active, with real chunks that are not what anyone asked
+            # to ingest.
+            if response.status_code < 200 or response.status_code >= 300:
+                status_code = response.status_code
+                await response.aclose()
+                raise FetchError(
+                    f"Fetching '{hostname}' returned HTTP {status_code}, not a successful response"
+                )
+
             # Non-redirect response — check Content-Length header first
             content_length = response.headers.get("content-length")
             if content_length and int(content_length) > MAX_RESPONSE_BYTES:
