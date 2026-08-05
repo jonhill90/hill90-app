@@ -143,7 +143,9 @@ describe('Shared Knowledge routes', () => {
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ search: {}, ingest: {} });
-    expect(mockGetStats).toHaveBeenCalledWith(undefined);
+    // Cross-service sibling-drift sweep (app#445 family): admin (owner=None)
+    // is unscoped, matching the /collections sibling's own admin behaviour.
+    expect(mockGetStats).toHaveBeenCalledWith(undefined, undefined);
   });
 
   it('GET /shared-knowledge/stats passes since param', async () => {
@@ -152,7 +154,7 @@ describe('Shared Knowledge routes', () => {
     await request(app)
       .get('/shared-knowledge/stats?since=24h')
       .set('Authorization', `Bearer ${userToken}`);
-    expect(mockGetStats).toHaveBeenCalledWith('24h');
+    expect(mockGetStats).toHaveBeenCalledWith('24h', 'regular-user');
   });
 
   it('GET /shared-knowledge/stats requires auth', async () => {

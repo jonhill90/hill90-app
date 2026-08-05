@@ -74,7 +74,20 @@ describe('Shared knowledge stats routes', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual(statsData);
-    expect(mockGetStats).toHaveBeenCalledWith(undefined);
+    // Cross-service sibling-drift sweep (app#445 family): this route now
+    // scopes by owner like its /collections sibling — a 'user'-role caller
+    // (not admin) is scoped to their own sub.
+    expect(mockGetStats).toHaveBeenCalledWith(undefined, 'regular-user');
+  });
+
+  it('GET /shared-knowledge/stats does not scope an admin caller', async () => {
+    mockGetStats.mockResolvedValueOnce({ status: 200, data: {} });
+
+    await request(app)
+      .get('/shared-knowledge/stats')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(mockGetStats).toHaveBeenCalledWith(undefined, undefined);
   });
 
   it('GET /shared-knowledge/stats handles 502', async () => {
