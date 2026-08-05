@@ -105,7 +105,16 @@ def execute_streaming(
             else:
                 elapsed += SELECT_TIMEOUT
                 if elapsed >= timeout:
-                    os.kill(pid, signal.SIGTERM)
+                    # This whole branch fires only because the command has
+                    # already gone wrong (hung past its timeout) — a narrow
+                    # but routine race where the child exits in the gap
+                    # between the last liveness check and this call raises
+                    # ProcessLookupError here same as it would on the two
+                    # kill/waitpid calls below, which are already guarded.
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
                     # Give process 2s to terminate gracefully
                     try:
                         os.waitpid(pid, os.WNOHANG)
