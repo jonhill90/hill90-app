@@ -87,7 +87,12 @@ class RevocationManager:
                     # indistinguishable from the field never having been
                     # set — at the exact moment an operator is checking
                     # /health/ready to find out why cleanup keeps failing.
-                    reason = f"{e.__class__.__name__}: {e}"
+                    # Same [:200] bound as this fix's own cited precedents
+                    # (usage_gaps.py, proxy.py) — last_cleanup_error is
+                    # served on /health/ready, so an unbounded exception
+                    # message would go into a health response with no
+                    # size limit.
+                    reason = f"{e.__class__.__name__}: {e}"[:200]
                     self.last_cleanup_error = reason
                     logger.warning("revocation_cleanup_error", error=reason)
 
