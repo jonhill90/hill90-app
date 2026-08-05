@@ -216,6 +216,32 @@ describe('AgentDetailClient', () => {
     expect(screen.getAllByText('installed').length).toBeGreaterThan(0)
   })
 
+  it('shows an alert, not a silent no-op, when an avatar upload fails', async () => {
+    mockFetchDefaults()
+    const defaultImpl = mockFetch.getMockImplementation()!
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/agents/uuid-1/avatar' && opts?.method === 'POST') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'db unavailable' }) })
+      }
+      return defaultImpl(url, opts)
+    })
+
+    const { container } = render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+    await waitFor(() => {
+      expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    })
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File(['fake image bytes'], 'avatar.png', { type: 'image/png' })
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('db unavailable')
+    })
+    // hasAvatar was never set — a failed upload must not look like it worked.
+    expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+  })
+
   it('clicking Configuration tab shows skills runtime summary', async () => {
     render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
 

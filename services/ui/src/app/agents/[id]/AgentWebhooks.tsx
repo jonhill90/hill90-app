@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { Webhook, Plus, Trash2, TestTube } from 'lucide-react'
+import Toast, { useToast, failureMessage } from '@/components/Toast'
 
 interface AgentWebhook {
   id: string
@@ -18,6 +19,7 @@ export default function AgentWebhooks({ agentId }: { agentId: string }) {
   const [url, setUrl] = useState('')
   const [events, setEvents] = useState(['start', 'stop', 'error'])
   const [saving, setSaving] = useState(false)
+  const { toast, showToast } = useToast()
 
   const isDiscord = (u: string) => u.includes('discord.com/api/webhooks/') || u.includes('discordapp.com/api/webhooks/')
 
@@ -46,21 +48,33 @@ export default function AgentWebhooks({ agentId }: { agentId: string }) {
         setShowForm(false)
         setUrl('')
         fetchWebhooks()
+      } else {
+        showToast('error', await failureMessage('Could not add the webhook', res))
       }
-    } catch { /* ignore */ }
-    finally { setSaving(false) }
+    } catch {
+      showToast('error', 'Could not add the webhook: the request did not complete')
+    } finally { setSaving(false) }
   }
 
   const handleDelete = async (webhookId: string) => {
     if (!confirm('Remove this webhook?')) return
-    await fetch(`/api/agents/${agentId}/webhooks/${webhookId}`, { method: 'DELETE' })
-    fetchWebhooks()
+    try {
+      const res = await fetch(`/api/agents/${agentId}/webhooks/${webhookId}`, { method: 'DELETE' })
+      if (res.ok) {
+        fetchWebhooks()
+      } else {
+        showToast('error', await failureMessage('Could not remove the webhook', res))
+      }
+    } catch {
+      showToast('error', 'Could not remove the webhook: the request did not complete')
+    }
   }
 
   if (loading) return <div className="flex justify-center py-4"><div className="h-5 w-5 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" /></div>
 
   return (
     <div className="rounded-lg border border-navy-700 bg-navy-800 p-5">
+      <Toast toast={toast} />
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Webhook className="w-4 h-4 text-mountain-400" />
