@@ -127,6 +127,20 @@ describe('WorkflowsClient', () => {
     })
   })
 
+  it('shows an error banner, not "No workflows yet", when the workflows fetch fails', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url === '/api/workflows') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+    render(<WorkflowsClient />)
+    await waitFor(() => {
+      expect(screen.getByTestId('workflows-error')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Could not load workflows — try refreshing the page')).toBeInTheDocument()
+    expect(screen.queryByText('No workflows yet')).not.toBeInTheDocument()
+  })
+
   // app#374: the persistent per-row webhook URL render was the actual leak —
   // the full token sat in a `title` attribute on every list render. Asserting
   // its absence here only has teeth because the fixture above no longer
