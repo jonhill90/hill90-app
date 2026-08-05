@@ -472,6 +472,48 @@ describe('Agent lifecycle routes', () => {
     expect(mockEnsureRequiredToolsInstalled).toHaveBeenCalledWith('uuid-1', 'test-agent');
   });
 
+  it('POST /agents/:id/start names the leaked container in error_message when tool-install cleanup ALSO fails', async () => {
+    // If ensureRequiredToolsInstalled throws AND the compensating
+    // stopAndRemoveContainer also fails, the container is real and running
+    // but this row's container_id is never set (the final UPDATE that would
+    // set it never runs) — the row lands at status='error' with nothing
+    // pointing back to the orphaned container except its own error_message.
+    // This pins that the container ID actually lands in that message,
+    // rather than requiring an operator to already know the
+    // agent-<agent_id> Docker naming convention to go find it.
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'uuid-1', agent_id: 'test-agent', name: 'Test',
+          tools_config: {}, cpus: '1.0', mem_limit: '1g', pids_limit: 200,
+          soul_md: '', rules_md: '', description: '',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] }) // SELECT agent_skills (no skill instructions)
+      .mockResolvedValueOnce({ rows: [] }) // SELECT DISTINCT s.scope (getAgentEffectiveScope)
+      .mockResolvedValueOnce({ rows: [] }); // UPDATE status=error in catch block
+    mockEnsureRequiredToolsInstalled.mockRejectedValueOnce(new Error('gh install failed'));
+    mockStopAndRemoveContainer.mockRejectedValueOnce(new Error('docker daemon unreachable'));
+
+    const res = await request(app)
+      .post('/agents/uuid-1/start')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(500);
+    expect(res.body.detail).toContain('Tool installation failed');
+    // THE ASSERTION THAT MATTERS: the container ID that leaked is named in
+    // the same detail message — and therefore in the row's error_message —
+    // not just logged to a console nobody is reading.
+    expect(res.body.detail).toContain('container-id-123');
+    expect(res.body.detail).toMatch(/could not be removed/);
+
+    const errorUpdateCall = mockQuery.mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string' && call[0].includes("status = 'error'")
+    );
+    expect(errorUpdateCall).toBeDefined();
+    expect(errorUpdateCall![1][0]).toContain('container-id-123');
+  });
+
   it('POST /agents/:id/stop requires admin role', async () => {
     const res = await request(app)
       .post('/agents/some-id/stop')
