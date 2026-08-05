@@ -75,6 +75,12 @@ those two moved to GitHub — `AI-258` is now
   again will break object storage in a way that does not look like a dependency problem.
   Re-pin it consciously rather than accepting whatever a bump produces. (JSON takes no
   comments, which is why this note is here rather than beside the line.)
+- **A pin that no longer binds is invisible.** [#397](https://github.com/jonhill90/hill90-app/pull/397)
+  found that `npm audit fix`'s remedy for an unrelated `@aws-sdk/xml-builder` advisory bumps it
+  to a version that drops `fast-xml-parser` as a dependency entirely — the override above would
+  have kept reading `~5.6.0`, still correct-looking, while binding nothing at all. Check what a
+  bump actually removes from the tree, not just what it changes; a pin's own text is what the
+  next reader trusts.
 - `services/knowledge/Dockerfile` builds the Go `akm` binary with BuildKit's
   `TARGETARCH`. The reason it must not be hardcoded is documented in the Dockerfile
   itself.
@@ -203,6 +209,26 @@ replace the tool; if the caller flattened it, keep the tool and stop flattening 
 status against the value that means *error*, or separate the steps so each is checked on its own.
 Either way: a positive control that fails loudly is what caught this, and a script whose controls
 always pass has told you nothing about itself.
+
+## Agreement between two methods proves nothing about which file they read
+
+Adjacent to the instrument sections above, but a different failure. Those are about a tool
+that cannot see, or a tool that hides the confusion it was built to catch. This is a tool that
+sees perfectly, pointed at the wrong thing, and cross-checked with a second tool aimed
+identically.
+
+Measured on 2026-08-05, [app#396](https://github.com/jonhill90/hill90-app/issues/396):
+`PROVIDER_KEY_ENCRYPTION_KEY` was reported to differ between SOPS and the running containers —
+verified twice, `secrets.sh get` and a direct `sops -d`, precisely because that helper has a
+documented mangling history and a second method felt like real corroboration. Both agreed. Both
+read Hill90's own `prod.enc.env` — same relative path, different repository, never read by this
+app's deploy. The decoder was checked twice; the path was never questioned once.
+
+**The rule:** two methods against one input is one measurement, no matter how independent the
+methods look. Agreement that never leaves the file already open tells you the decoder works, not
+that you opened the right file. Before trusting corroboration, ask what actually reads this value
+in production — a question about provenance, which no amount of re-decoding the same input can
+answer.
 
 ## Look for the twin before you look for the next defect
 
@@ -333,14 +359,19 @@ keys actually touched) so the client never needs the full value back at all.
 was expected and silently stopped arriving. The three characters cannot tell you which; only
 reading the producer can.
 
-**Five defects on 2026-08-05 shared this exact shape:**
+**Six defects on 2026-08-05 shared this exact shape:**
 [#354](https://github.com/jonhill90/hill90-app/pull/354) (`data.stats.collections`, after the
 producer renamed the field to `total`), [#371](https://github.com/jonhill90/hill90-app/pull/371)
 (`usage.total_cost` against a producer that had always sent `total_cost_usd`),
 [#373](https://github.com/jonhill90/hill90-app/pull/373) (`distinct_models`, never computed by
-the producer at all — not a rename, an unfinished field), and the UI-blanking shapes in #372 and
-#386 above. Every one shipped invisibly because the fallback produced a plausible-looking zero
-or blank instead of an error.
+the producer at all — not a rename, an unfinished field), the UI-blanking shapes in #372 and
+#386 above, and [#399](https://github.com/jonhill90/hill90-app/pull/399)
+(`services/api/src/routes/provider-connections.ts`: `models: response.data?.models || []`
+discarding `response.data?.error` on the same 200 response — a decrypt failure rendered to a
+user as "this provider has no models" instead of the real reason). Every one shipped invisibly
+because the fallback produced a plausible-looking zero or blank instead of an error. Five of the
+six, including #399, turned up while tracing something else, not from a dedicated sweep — this
+shape hides from a search aimed straight at it and shows up in the wreckage of an unrelated one.
 
 **The boundary matters as much as the shape, so it is stated here too.** A sweep of
 `services/ui` for this exact pattern
