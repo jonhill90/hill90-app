@@ -113,6 +113,21 @@ Most of these were bought with a real bug. They are not style preferences.
   aged is honest; an undated one is just wrong later.
 - **Do not document what you have not run.** "The compose file parses" is not
   "the service starts".
+- **Decision records preserve; status trackers expire.** A record explaining why
+  something was decided, built, or diagnosed — a `docs/decisions/*.md` entry, a
+  root-cause writeup, the retracted-and-corrected paragraphs already scattered
+  through this file — stays even where its language has aged, because the
+  reasoning is the value. A tracker whose whole content is "here is the current
+  state" does not survive its own timestamp, and updating it is fine. The two
+  read alike ("X is true") and are opposite documents: rewriting a decision
+  record to match what later happened destroys the record of what was intended
+  or diagnosed at the time; leaving a status tracker unedited just makes it
+  wrong. When in doubt which kind a document is, ask what a reader loses if it's
+  rewritten to match today — nothing, or the reasoning. This is not a hypothetical:
+  `PROVENANCE.md` once carried this exact rule and was deleted along with the
+  extraction record it was written for (#225, 2026-08-04), taking the rule with
+  it — restated here so the next repo-wide cleanup has somewhere to find it
+  again.
 - Prefer the shape already in Hill90 over inventing a second dialect;
   `scripts/deploy.sh` deliberately mirrors Hill90's.
 - Never commit a credential, an age key, or a decrypted `.env`.
