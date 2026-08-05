@@ -64,6 +64,9 @@ jest.mock('../services/keycloak-account', () => ({
   updateKeycloakProfile: (...args: any[]) => mockUpdateKeycloakProfile(...args),
 }));
 
+const mockAuditLog = jest.fn();
+jest.mock('../helpers/audit', () => ({ auditLog: (...args: unknown[]) => mockAuditLog(...args) }));
+
 const app = createApp({
   issuer: TEST_ISSUER,
   getSigningKey: async () => publicKey,
@@ -89,6 +92,12 @@ beforeEach(() => {
   mockGetAvatarStream.mockReset();
   mockGetKeycloakProfile.mockReset();
   mockUpdateKeycloakProfile.mockReset();
+  mockAuditLog.mockReset();
+  jest.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -231,6 +240,55 @@ describe('POST /profile/avatar', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Invalid file type/);
   });
+
+  // #424: avatarKey() mints a fresh random-UUID key every call, so once the
+  // S3 upload succeeds, that object exists in storage regardless of what
+  // happens next — a crash before the DB upsert leaks it, since a retry
+  // creates yet another key rather than reclaiming this one.
+  it('#424: audits the orphaned S3 object when the DB upsert fails after a successful upload', async () => {
+    mockProcessAvatar.mockResolvedValueOnce(Buffer.from('webp-data'));
+    mockAvatarKey.mockReturnValueOnce('avatars/test-user/orphan.webp');
+    mockUploadAvatar.mockResolvedValueOnce(undefined);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] }) // no existing avatar
+      .mockRejectedValueOnce(new Error('connection reset')); // upsert throws
+
+    const res = await request(app)
+      .post('/profile/avatar')
+      .set('Authorization', `Bearer ${userToken}`)
+      .attach('avatar', Buffer.from('fake-image'), { filename: 'avatar.png', contentType: 'image/png' });
+
+    expect(res.status).toBe(500);
+
+    const orphaned = mockAuditLog.mock.calls.find((c) => c[0] === 'avatar_upload_orphaned_object');
+    expect(orphaned).toBeDefined();
+    expect(orphaned![1]).toBe('test-user');
+    expect(orphaned![4]).toMatchObject({ orphaned_key: 'avatars/test-user/orphan.webp' });
+    expect(String(orphaned![4]?.error)).toMatch(/connection reset/);
+  });
+
+  it('#424: audits a failed old-avatar cleanup instead of only logging it — the upload still succeeds', async () => {
+    mockProcessAvatar.mockResolvedValueOnce(Buffer.from('webp-data'));
+    mockAvatarKey.mockReturnValueOnce('avatars/test-user/new.webp');
+    mockUploadAvatar.mockResolvedValueOnce(undefined);
+    mockDeleteAvatar.mockRejectedValueOnce(new Error('NoSuchKey'));
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ avatar_key: 'avatars/test-user/old.webp' }] })
+      .mockResolvedValueOnce({ rows: [] }); // upsert succeeds
+
+    const res = await request(app)
+      .post('/profile/avatar')
+      .set('Authorization', `Bearer ${userToken}`)
+      .attach('avatar', Buffer.from('fake-image'), { filename: 'avatar.jpg', contentType: 'image/jpeg' });
+
+    // Non-blocking, deliberately: the new avatar is already live.
+    expect(res.status).toBe(200);
+    expect(res.body.message).toBe('Avatar uploaded');
+
+    const failed = mockAuditLog.mock.calls.find((c) => c[0] === 'avatar_old_key_cleanup_failed');
+    expect(failed).toBeDefined();
+    expect(failed![4]).toMatchObject({ stale_key: 'avatars/test-user/old.webp' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -263,6 +321,33 @@ describe('DELETE /profile/avatar', () => {
       .delete('/profile/avatar')
       .set('Authorization', `Bearer ${userToken}`);
     expect(res.status).toBe(404);
+  });
+
+  // #424: a crash between the S3 delete succeeding and this UPDATE leaves
+  // the DB permanently claiming an avatar_key that no longer exists in S3
+  // — already surfaced honestly on the next GET (see that route's own
+  // comment on the dangling-avatar_key 404), but with no trace of WHY it
+  // went stale. This pins that the WHY now lands in the audit trail.
+  it('#424: audits a failed DB update after a successful S3 delete, naming the deleted key', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ avatar_key: 'avatars/test-user/abc.webp' }] })
+      .mockRejectedValueOnce(new Error('connection reset')); // the UPDATE throws
+    mockDeleteAvatar.mockResolvedValueOnce(undefined);
+
+    const res = await request(app)
+      .delete('/profile/avatar')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(500);
+    // The S3 object really is gone — this must not report success, but it
+    // must be distinguishable from "nothing happened" via the audit trail.
+    expect(mockDeleteAvatar).toHaveBeenCalledWith(expect.anything(), 'avatars/test-user/abc.webp');
+
+    const failed = mockAuditLog.mock.calls.find((c) => c[0] === 'avatar_delete_db_update_failed');
+    expect(failed).toBeDefined();
+    expect(failed![1]).toBe('test-user');
+    expect(failed![4]).toMatchObject({ deleted_key: 'avatars/test-user/abc.webp' });
+    expect(String(failed![4]?.error)).toMatch(/connection reset/);
   });
 });
 
