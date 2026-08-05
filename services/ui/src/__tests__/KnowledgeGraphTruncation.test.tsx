@@ -6,6 +6,12 @@ import '@testing-library/jest-dom/vitest'
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
 
+// #380: KnowledgeGraph reads the session (to resolve a `user` node's own
+// sub to "You") and throws without a SessionProvider unless mocked.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({ data: { user: { sub: undefined } }, status: 'authenticated' }),
+}))
+
 import SharedKnowledgeClient from '@/app/harness/shared-knowledge/SharedKnowledgeClient'
 
 /**

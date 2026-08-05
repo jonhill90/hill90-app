@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { useSession } from 'next-auth/react'
 import { GitBranch } from 'lucide-react'
 import {
   forceSimulation,
@@ -63,15 +64,72 @@ function corpusCounts(d: { total?: Record<string, number>; stats?: Record<string
   return d.total ?? d.stats ?? {}
 }
 
-const TYPE_COLORS: Record<string, string> = {
+// #380: `user` added here 2026-08-05 (the knowledge service's requester
+// -> source edges, #379). Explicit colours/radii stay for the types we
+// actually design around; anything the producer adds after this falls
+// through to colorForType/baseRadiusForType's deterministic fallback below
+// instead of a shared grey dot, and the legend (legendTypes, further down)
+// derives from what the response actually contains rather than this map —
+// the map alone is not what decides whether a type is visible.
+const KNOWN_TYPE_COLORS: Record<string, string> = {
   collection: '#5b9a2f',
   source: '#3b82f6',
   agent: '#f59e0b',
+  // A hub colour distinct from the other three — magenta reads as "different
+  // kind of thing" against the green/blue/amber palette, which matters here
+  // since a user node is structurally the thing holding disconnected
+  // collections together, not a peer of source/agent.
+  user: '#c026d3',
 }
-const TYPE_BASE_RADIUS: Record<string, number> = {
+const KNOWN_TYPE_BASE_RADIUS: Record<string, number> = {
   collection: 16,
   source: 7,
   agent: 11,
+  // Bigger than a source at rest — retrieval_count (see radiusOf) does the
+  // rest of the hub-prominence work per-node, on top of this floor.
+  user: 12,
+}
+// Types are producer-defined and this file cannot know about the next one
+// in advance (that is the whole lesson of this file's own history — #354,
+// then #380). A hash-derived HSL hue is deterministic per type string, so
+// the same unknown type always gets the same colour across renders instead
+// of the shared '#6b7280' every previously-unseen type collapsed into.
+function hashType(type: string): number {
+  let hash = 0
+  for (let i = 0; i < type.length; i++) hash = (hash * 31 + type.charCodeAt(i)) >>> 0
+  return hash
+}
+export function colorForType(type: string): string {
+  const known = KNOWN_TYPE_COLORS[type]
+  if (known) return known
+  return `hsl(${hashType(type) % 360}, 65%, 55%)`
+}
+export function baseRadiusForType(type: string): number {
+  return KNOWN_TYPE_BASE_RADIUS[type] ?? 8
+}
+// Preferred legend order for the types this component was actually
+// designed around; anything else present in the data is appended after,
+// alphabetically, rather than being silently omitted.
+const KNOWN_TYPE_ORDER = ['collection', 'source', 'agent', 'user']
+export function legendTypes(nodes: GraphNode[]): string[] {
+  const present = new Set(nodes.map(n => n.type))
+  const known = KNOWN_TYPE_ORDER.filter(t => present.has(t))
+  const unknown = [...present].filter(t => !KNOWN_TYPE_ORDER.includes(t)).sort()
+  return [...known, ...unknown]
+}
+
+// A `user` node's label is a raw Keycloak sub (#379: `"label": requester_id`,
+// unmodified). Rendering that verbatim is a UUID nobody reads. The knowledge
+// service has no access to Keycloak's user table and deliberately shouldn't
+// gain one for a label — so only the CURRENT session's own sub can ever be
+// resolved to something human ("You"); every other user node gets a short,
+// honestly-still-a-fragment prefix rather than a fabricated name.
+export function labelFor(n: GraphNode, currentUserSub: string | undefined): string {
+  if (n.type === 'user') {
+    if (currentUserSub && n.label === currentUserSub) return 'You'
+    return n.label.length > 8 ? `${n.label.slice(0, 8)}…` : n.label
+  }
+  return n.label
 }
 
 function prefersReducedMotion(): boolean {
@@ -92,6 +150,13 @@ export default function KnowledgeGraph() {
   const [data, setData] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(true)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const { data: session } = useSession()
+  // Read via ref inside the draw loop below, not the `session` value
+  // directly — the physics effect keys off `[data]` only, and re-running the
+  // whole simulation setup because the session object identity changed
+  // (routine with next-auth) would restart the layout for no visual reason.
+  const currentUserSubRef = useRef<string | undefined>(undefined)
+  useEffect(() => { currentUserSubRef.current = session?.user?.sub }, [session])
 
   useEffect(() => {
     fetch('/api/shared-knowledge/graph')
@@ -128,9 +193,14 @@ export default function KnowledgeGraph() {
     }
 
     function radiusOf(n: GraphNode): number {
-      const base = TYPE_BASE_RADIUS[n.type] ?? 6
+      const base = baseRadiusForType(n.type)
       const d = degree.get(n.id) || 0
-      return base + Math.min(Math.sqrt(d) * 2.2, 14)
+      // retrieval_count (#379/#380) is a second, independent size input —
+      // a hub like a `user` node can carry high retrieval activity with a
+      // modest degree, and degree alone would under-represent it.
+      const retrievals = typeof n.meta?.retrieval_count === 'number' ? n.meta.retrieval_count : 0
+      const bonus = Math.sqrt(d) * 2.2 + Math.sqrt(retrievals) * 1.1
+      return base + Math.min(bonus, 18)
     }
 
     const dpr = window.devicePixelRatio || 1
@@ -227,7 +297,7 @@ export default function KnowledgeGraph() {
       for (const n of nodes) {
         if (n.x == null || n.y == null) continue
         const r = radiusOf(n)
-        const color = TYPE_COLORS[n.type] || '#6b7280'
+        const color = colorForType(n.type)
         const isHovered = n.id === hoveredId
         const isNeighbor = activeNeighbors?.has(n.id) ?? false
         const dimmed = hoveredId != null && !isHovered && !isNeighbor
@@ -247,17 +317,20 @@ export default function KnowledgeGraph() {
         ctx.stroke()
         ctx.restore()
 
-        // Labels: always for hovered/neighbors, otherwise only for
-        // collections (the busiest tier — sources would be unreadable noise
-        // at rest, exactly why hover exists).
-        const showLabel = isHovered || isNeighbor || n.type === 'collection'
+        // Labels: always for hovered/neighbors, otherwise only for the
+        // "always visible" tiers — collections, and `user` nodes (#380: a
+        // user is structurally a hub, the same reason it gets a bigger base
+        // radius above; sources stay hover-only, or the resting state is
+        // unreadable noise).
+        const showLabel = isHovered || isNeighbor || n.type === 'collection' || n.type === 'user'
         if (showLabel) {
           ctx.globalAlpha = dimmed ? 0.3 : 1
           ctx.shadowBlur = 0
           ctx.fillStyle = isHovered ? '#ffffff' : '#c9d1d9'
           ctx.font = `${isHovered ? 'bold ' : ''}${n.type === 'collection' ? 11 : 10}px system-ui, sans-serif`
           ctx.textAlign = 'center'
-          const label = n.label.length > 22 ? n.label.slice(0, 20) + '…' : n.label
+          const resolved = labelFor(n, currentUserSubRef.current)
+          const label = resolved.length > 22 ? `${resolved.slice(0, 20)}…` : resolved
           ctx.fillText(label, n.x, n.y + r + 13)
           ctx.globalAlpha = 1
         }
@@ -265,12 +338,16 @@ export default function KnowledgeGraph() {
 
       ctx.restore()
 
-      // Legend — fixed to the viewport, not the world transform.
+      // Legend — fixed to the viewport, not the world transform. Derived
+      // from the types actually present in this response (#380), not a
+      // fixed list: the producer adding a type this component has never
+      // seen must not make that type invisible in the legend the way it
+      // was invisible on the node itself before this fix.
       ctx.font = '11px system-ui'
       ctx.textAlign = 'left'
       let ly = 20
-      for (const [type, color] of Object.entries(TYPE_COLORS)) {
-        ctx.fillStyle = color
+      for (const type of legendTypes(nodes)) {
+        ctx.fillStyle = colorForType(type)
         ctx.beginPath()
         ctx.arc(20, ly, 5, 0, Math.PI * 2)
         ctx.fill()
