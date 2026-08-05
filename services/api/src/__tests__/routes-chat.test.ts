@@ -90,10 +90,12 @@ describe('Chat thread CRUD', () => {
     mockDispatchChatWork.mockReset();
     mockDispatchChatWork.mockResolvedValue({ accepted: true, work_id: 'work-123' });
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+    process.env.CHAT_CALLBACK_TOKEN = 'test-callback-secret';
   });
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
+    delete process.env.CHAT_CALLBACK_TOKEN;
   });
 
   it('GET /chat/threads requires auth', async () => {
@@ -706,10 +708,12 @@ describe('Chat multi-agent dispatch', () => {
     mockDispatchChatWork.mockReset();
     mockDispatchChatWork.mockResolvedValue({ accepted: true, work_id: 'work-123' });
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+    process.env.CHAT_CALLBACK_TOKEN = 'test-callback-secret';
   });
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
+    delete process.env.CHAT_CALLBACK_TOKEN;
   });
 
   it('POST /chat/threads/:id/messages dispatches to all agents in group (I8, I11)', async () => {
@@ -998,6 +1002,51 @@ describe('Chat multi-agent dispatch', () => {
     expect(res.body.failed[0].reason).toBe('dispatch_failed');
     expect(res.body.failed[0].message_id).toBe('ph-1');
   });
+
+  // #364: agentbox's handle_chat() checks the same env var and, if unset,
+  // emits a local work_failed event and returns WITHOUT ever calling back —
+  // the placeholder would otherwise sit 'pending' until the stale sweeper
+  // marks it "Response timed out" 2+ minutes later, pointing away from the
+  // real cause. Dispatch must never even be attempted in this case.
+  it('POST /chat/threads/:id/messages reports the actual cause when CHAT_CALLBACK_TOKEN is missing, not a timeout (#364)', async () => {
+    const savedToken = process.env.CHAT_CALLBACK_TOKEN;
+    delete process.env.CHAT_CALLBACK_TOKEN;
+
+    try {
+      mockQuery
+        .mockResolvedValueOnce({ rows: [{ id: 1 }] })  // isParticipant
+        .mockResolvedValueOnce({ rows: [{ type: 'group', lead_agent_id: null }] })  // getThreadType
+        .mockResolvedValueOnce({ rows: [{ participant_id: 'agent-1' }] })  // getThreadAgents
+        .mockResolvedValueOnce({
+          rows: [{ id: 'agent-1', agent_id: 'alpha', name: 'Alpha', status: 'running', work_token: 'wt', models: ['gpt-4o-mini'] }],
+        })
+        .mockResolvedValueOnce({ rows: [] })  // elevated scope
+        .mockResolvedValueOnce({ rows: [] })  // concurrency guard
+        .mockResolvedValueOnce({ rows: [{ id: 'user-msg', seq: 10 }] })  // INSERT user message
+        .mockResolvedValueOnce({ rows: [] })  // UPDATE thread timestamp
+        .mockResolvedValueOnce({ rows: [] })  // message history
+        // getAgentForDispatch for participant list (group threads)
+        .mockResolvedValueOnce({ rows: [{ id: 'agent-1', agent_id: 'alpha', name: 'Alpha', status: 'running', work_token: 'wt', models: ['gpt-4o-mini'] }] })
+        .mockResolvedValueOnce({ rows: [{ id: 'ph-1' }] })  // placeholder
+        .mockResolvedValueOnce({ rowCount: 1 });  // UPDATE placeholder to error
+
+      const res = await request(app)
+        .post('/chat/threads/thread-1/messages')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ message: 'Hello' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.dispatched).toHaveLength(0);
+      expect(res.body.failed).toHaveLength(1);
+      expect(res.body.failed[0].reason).toBe('callback_not_configured');
+      expect(res.body.failed[0].message_id).toBe('ph-1');
+      // The agent must never be dispatched to — the callback could never
+      // complete, so the correct behavior is to not even try.
+      expect(mockDispatchChatWork).not.toHaveBeenCalled();
+    } finally {
+      if (savedToken !== undefined) process.env.CHAT_CALLBACK_TOKEN = savedToken;
+    }
+  });
 });
 
 // ── Cancel ──
@@ -1062,10 +1111,12 @@ describe('Chat send message (backward compat)', () => {
     mockDispatchChatWork.mockReset();
     mockDispatchChatWork.mockResolvedValue({ accepted: true, work_id: 'work-123' });
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+    process.env.CHAT_CALLBACK_TOKEN = 'test-callback-secret';
   });
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
+    delete process.env.CHAT_CALLBACK_TOKEN;
   });
 
   it('POST /chat/threads/:id/messages returns 409 for concurrent send on direct thread', async () => {
@@ -1890,10 +1941,12 @@ describe('Chat RBAC', () => {
     mockDispatchChatWork.mockReset();
     mockDispatchChatWork.mockResolvedValue({ accepted: true, work_id: 'work-123' });
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+    process.env.CHAT_CALLBACK_TOKEN = 'test-callback-secret';
   });
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
+    delete process.env.CHAT_CALLBACK_TOKEN;
   });
 
   it('POST /chat/threads allows admin to send to elevated agent', async () => {
@@ -2001,10 +2054,12 @@ describe('Group broadcast dispatch', () => {
     mockDispatchChatWork.mockReset();
     mockDispatchChatWork.mockResolvedValue({ accepted: true, work_id: 'work-123' });
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+    process.env.CHAT_CALLBACK_TOKEN = 'test-callback-secret';
   });
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
+    delete process.env.CHAT_CALLBACK_TOKEN;
   });
 
   it('dispatches to all group agents in parallel (T1)', async () => {

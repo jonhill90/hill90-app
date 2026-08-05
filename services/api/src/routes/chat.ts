@@ -255,6 +255,30 @@ async function dispatchToAgents(opts: {
     placeholders.push({ agent, placeholderId: placeholder.id, model });
   }
 
+  // Fail fast if CHAT_CALLBACK_TOKEN is absent: agentbox's handle_chat() checks
+  // the same env var and, if unset, emits a local work_failed event and returns
+  // WITHOUT ever calling back — the dispatch below would hang until the stale
+  // sweeper marks it "Response timed out" 2+ minutes later, actively pointing
+  // away from the real cause. Report the actual cause immediately instead.
+  if (!process.env.CHAT_CALLBACK_TOKEN) {
+    console.error('[chat] CHAT_CALLBACK_TOKEN not configured — refusing to dispatch');
+    for (const { agent, placeholderId } of placeholders) {
+      try {
+        await pool.query(
+          `UPDATE chat_messages SET status = 'error',
+           error_message = 'Chat is not configured on this server (CHAT_CALLBACK_TOKEN missing)',
+           seq = nextval('chat_messages_seq')
+           WHERE id = $1 AND status = 'pending'`,
+          [placeholderId]
+        );
+      } catch (updateErr) {
+        console.error(`[chat] Failed to mark callback-not-configured error:`, updateErr);
+      }
+      failed.push({ agent_id: agent.id, message_id: placeholderId, reason: 'callback_not_configured' });
+    }
+    return { dispatched, failed };
+  }
+
   // Phase 2: Dispatch all work items in parallel
   // In collaborative mode (leadAgentId set), the lead agent gets collaborator
   // context so it knows which agents are available for consultation.
