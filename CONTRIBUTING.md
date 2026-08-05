@@ -298,3 +298,101 @@ Received string:  "STREAM NEVER CLOSED"
 
 Same family as the other instrument notes above: the run said nothing, and silence was taken
 for a problem with the tooling.
+
+## Withholding a field from a response is a write-path change, not a read-path one
+
+Encrypting a secret column and dropping it from every `GET`/`POST`/`PUT` response looks like a
+read-side fix — the value simply stops coming back. It isn't only that, and the miss is easy to
+make because the write path's own validation still passes.
+
+**[#386](https://github.com/jonhill90/hill90-app/pull/386)'s first version got this wrong, and
+it was caught in review, not in production.** `agents.env_vars` was withheld to close the secret
+surface, and the fix's own first draft kept `PUT` as a server-side merge over a full-object
+`env_vars` field — safe at the API layer in isolation. What it missed: `AgentClaudeConfig.tsx`
+and `AgentDetailClient.tsx` both do a client-side read-modify-write, `{ ...(envVars || {}),
+KEY: val }`, spreading the *current* map before applying one change and `PUT`ing the whole
+result. With `env_vars` withheld from every response, `envVars` is always `undefined`
+client-side, so `...(undefined || {})` is `{}` — every existing key would have silently vanished
+on the very next save, with a success toast telling the user it worked.
+**[#372](https://github.com/jonhill90/hill90-app/pull/372)** hit the same shape one PR earlier,
+for `mcp_servers.connection_config` — held before merge specifically because the edit form's
+client-side prefill depended on reading back a value the fix had just stopped sending.
+
+**The generalisation:** wherever a client round-trips a value it received — reads it, holds it
+in local state, and later spreads it into a write — removing that value from the read response
+is not cosmetic. The client's notion of "the current full value" silently goes stale, and the
+write either destroys data (a spread over `undefined` collapsing to `{}`) or blanks a field that
+now looks intentionally empty. Before withholding a field, check every consumer for this shape,
+not just whether the write path still validates in isolation — the fix that closed both of these
+replaced the whole-value write with a delta (`env_vars_set`/`env_vars_unset` naming only the
+keys actually touched) so the client never needs the full value back at all.
+
+## A defensive default can hide a contract break — the shape, and its boundary
+
+`?? 0`, `|| {}`, `|| ''` read identically whether the field behind them is genuinely optional or
+was expected and silently stopped arriving. The three characters cannot tell you which; only
+reading the producer can.
+
+**Five defects on 2026-08-05 shared this exact shape:**
+[#354](https://github.com/jonhill90/hill90-app/pull/354) (`data.stats.collections`, after the
+producer renamed the field to `total`), [#371](https://github.com/jonhill90/hill90-app/pull/371)
+(`usage.total_cost` against a producer that had always sent `total_cost_usd`),
+[#373](https://github.com/jonhill90/hill90-app/pull/373) (`distinct_models`, never computed by
+the producer at all — not a rename, an unfinished field), and the UI-blanking shapes in #372 and
+#386 above. Every one shipped invisibly because the fallback produced a plausible-looking zero
+or blank instead of an error.
+
+**The boundary matters as much as the shape, so it is stated here too.** A sweep of
+`services/ui` for this exact pattern
+([#388](https://github.com/jonhill90/hill90-app/issues/388)) found **zero** new instances — every
+surviving candidate resolved to a genuinely optional field (a nullable column, a dynamic-key
+dict where an absent key means zero) or a field the producer always sends, where the default is
+merely redundant. **Do not strip a default just because it matches the pattern.** Most of them
+are correct, and removing working code to "clean it up" once you have a name for the shape is
+exactly the churn this estate has separately learned to distrust — the fix belongs only where
+checking the producer shows the field is expected but no longer sent.
+
+## An empty column is the cheapest moment to close a secret surface
+
+Four columns went from plaintext to protected on 2026-08-05, each argued for on the same
+timing point: the cost of the fix is dominated by what's already stored, and right now that's
+nothing real.
+
+**Three had literally zero rows when their migration ran:**
+`mcp_servers.connection_config` ([#372](https://github.com/jonhill90/hill90-app/pull/372)),
+`workflows.webhook_token` ([#376](https://github.com/jonhill90/hill90-app/pull/376)), `agent_webhooks.secret`
+([#390](https://github.com/jonhill90/hill90-app/pull/390)). The fourth,
+`agents.env_vars` ([#386](https://github.com/jonhill90/hill90-app/pull/386)), had one real row
+with an empty value — not literally an empty table, but the same cost: nothing to backfill,
+nothing to lose, no dual-read window. Say the distinction accurately rather than rounding both
+to "zero rows" — the argument holds either way, but only one of them is actually zero.
+
+**The rule, stated once for reuse:** the migration these four PRs describe as "the cheapest this
+will ever be" gets more expensive the longer it waits, precisely because nothing using the
+column yet is a property of *today*, not of the column. Finding a secret-shaped surface at zero
+real rows is the strongest possible argument for fixing it now — a schema change instead of a
+migration project with backfills and a key-rotation-under-load risk — and that argument only
+gets weaker, never stronger, by deferring it.
+
+## Where a manifest check earns its cost, and where a transcribed fixture is the right size
+
+[#380](https://github.com/jonhill90/hill90-app/issues/380)/[#381](https://github.com/jonhill90/hill90-app/pull/381)/[#382](https://github.com/jonhill90/hill90-app/pull/382)/[#384](https://github.com/jonhill90/hill90-app/pull/384)
+built a shared manifest — a JSON file neither the producer nor the consumer owns, each side
+checked against it independently — after the knowledge graph's node types disagreed between the
+API and the renderer. It is not the default answer to "two things disagree about a shape."
+
+**Checked explicitly rather than reused by habit:** the same defensive-default sweep above
+([#388](https://github.com/jonhill90/hill90-app/issues/388)) asked whether the manifest approach
+fit its findings too, and concluded no — not because nothing was found, but because the shape
+doesn't match. A node **type** is an open set a producer can add to at will; there is no fixed
+answer to "which types exist" for a manifest to enumerate against. A single endpoint's response
+fields are a **fixed shape**; the failure mode there is "the shape drifted between one write and
+its one read," which a fixture **transcribed from a live response** (not composed by hand) —
+[#354](https://github.com/jonhill90/hill90-app/pull/354)'s own `KnowledgeGraphContract.test.tsx`
+pattern — already catches.
+
+**The rule: build a manifest for an open-set taxonomy two independent sides both need to agree
+on. Use a transcribed-fixture regression test for one endpoint's fixed shape.** Building a
+manifest for the second case is ceremony nobody needs; a fixture test for the first case cannot
+express "any future member of this set," because it only ever pins the members that existed when
+it was written.
