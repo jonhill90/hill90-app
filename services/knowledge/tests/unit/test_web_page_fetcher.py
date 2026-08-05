@@ -489,7 +489,7 @@ class TestFetchAndExtract:
         with (
             patch("app.services.web_page_fetcher.socket.getaddrinfo") as mock_dns,
             patch("app.services.web_page_fetcher.httpx.AsyncClient") as mock_client_cls,
-            patch("app.services.web_page_fetcher.trafilatura") as mock_traf,
+            patch("app.services.web_page_fetcher.trafilatura"),
         ):
             mock_dns.return_value = PUBLIC_DNS
             resp = _make_streaming_response(
