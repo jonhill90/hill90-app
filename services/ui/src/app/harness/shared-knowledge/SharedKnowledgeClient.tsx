@@ -8,12 +8,30 @@ import { Database, FileText, FolderOpen, Globe, Search, Plus, AlertCircle, Uploa
 interface GraphNode { id: string; type: string; label: string; meta?: Record<string, unknown> }
 interface GraphEdge { source: string; target: string; label?: string }
 
+// The corpus counts, whatever the upstream calls them.
+//
+// #215 built the graph in the api and named this object `stats`. #303 moved
+// the query into the knowledge service — the service that owns the tables —
+// and named it `total`. The api proxies the body through untouched, so from
+// #303 onward the UI was reading `data.stats` off a response that has no
+// `stats` key: `data.stats.collections` threw and the Graph tab rendered
+// nothing, while the endpoint answered 200 throughout.
+//
+// `total` is the live name and is read first. `stats` stays as a fallback so
+// the component does not care which side of #303 the api is on, and the empty
+// object means the NEXT rename costs a missing headline, not a blank page.
+function corpusCounts(d: { total?: Record<string, number>; stats?: Record<string, number> }) {
+  return d.total ?? d.stats ?? {}
+}
+
 function KnowledgeGraph() {
   const [data, setData] = useState<{
     nodes: GraphNode[]
     edges: GraphEdge[]
     // The corpus, measured with COUNT(*) — not the size of what was drawn.
-    stats: Record<string, number>
+    total?: Record<string, number>
+    // Pre-#303 name for the same object. See `corpusCounts`.
+    stats?: Record<string, number>
     // What this response actually contains. Optional because an api older than
     // #215 sends neither, and absence must read as "nothing to say" rather
     // than as a truncation warning on a complete graph.
@@ -157,21 +175,23 @@ function KnowledgeGraph() {
   if (loading) return <div className="flex justify-center py-12"><div className="h-6 w-6 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" /></div>
   if (!data) return <p className="text-mountain-500 text-center py-8">Failed to load graph</p>
 
+  const counts = corpusCounts(data)
+
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <GitBranch className="w-4 h-4 text-mountain-400" />
-          <span className="text-sm text-mountain-300">
-            {data.stats.collections} collections · {data.stats.sources} sources · {data.stats.agents_with_knowledge} agents
+          <span className="text-sm text-mountain-300" data-testid="graph-counts">
+            {counts.collections ?? 0} collections · {counts.sources ?? 0} sources · {counts.agents_with_knowledge ?? 0} agents
           </span>
           {data.truncated && data.shown && (
             <span
               className="text-xs text-amber-400/90 border border-amber-700/50 bg-amber-900/20 rounded px-1.5 py-0.5"
               data-testid="graph-truncated-notice"
             >
-              graph shows {data.shown.collections} of {data.stats.collections} collections
-              {' '}and {data.shown.sources} of {data.stats.sources} sources
+              graph shows {data.shown.collections} of {counts.collections} collections
+              {' '}and {data.shown.sources} of {counts.sources} sources
             </span>
           )}
         </div>
