@@ -424,17 +424,28 @@ export default function SharedKnowledgeClient({ initialTab, initialQuery }: { in
   }
 
   // --- Bulk delete error sources ---
+  // Each DELETE is an independent request with no compensating "undo" —
+  // by the time one call in the batch fails, an earlier one may already have
+  // succeeded server-side. Presenting this as all-or-nothing would be false
+  // either way it failed, so the honest answer is a count: report how many
+  // of the batch actually went through, not a single success/failure verdict.
   const handleCleanupErrors = async () => {
     if (!selectedCollection) return
     const errorSources = sources.filter(s => s.status === 'error' || s.status === 'failed')
     if (errorSources.length === 0) return
     if (!confirm(`Delete ${errorSources.length} error source${errorSources.length !== 1 ? 's' : ''}?`)) return
+    let succeeded = 0
     for (const src of errorSources) {
       try {
-        await fetch(`/api/shared-knowledge/sources/${src.id}`, { method: 'DELETE' })
+        const res = await fetch(`/api/shared-knowledge/sources/${src.id}`, { method: 'DELETE' })
+        if (res.ok) succeeded++
       } catch { /* continue */ }
     }
     await fetchSources(selectedCollection.id)
+    const failed = errorSources.length - succeeded
+    if (failed > 0) {
+      alert(`Deleted ${succeeded} of ${errorSources.length} error source${errorSources.length !== 1 ? 's' : ''} — ${failed} could not be deleted.`)
+    }
   }
 
   // --- Search ---
