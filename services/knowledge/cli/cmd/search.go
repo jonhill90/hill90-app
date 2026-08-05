@@ -34,11 +34,26 @@ var searchCmd = &cobra.Command{
 			return errUnexpectedShape("results", result)
 		}
 
+		// A DROPPED ROW MUST BE COUNTED, not just skipped. shape.go's
+		// errUnexpectedShape already closed the top-level version of this —
+		// a missing or null `results` printed "no results" and exited 0. This
+		// is the same defect one layer down: the list is fine, an element in
+		// it is not, and `continue` alone means the operator sees fewer rows
+		// than exist with nothing saying so. A partial answer presented as a
+		// complete one.
+		//
+		// Reported on STDERR, matching list.go's truncation summary, so a
+		// parsed pipeline reading stdout is unaffected — same reasoning that
+		// file already records for its own summary.
+		skipped := 0
+		shown := 0
 		for _, r := range results {
 			entry, ok := r.(map[string]interface{})
 			if !ok {
+				skipped++
 				continue
 			}
+			shown++
 			fmt.Fprintf(os.Stdout, "%.2f  %-40s %s\n",
 				entry["score"],
 				entry["path"],
@@ -47,6 +62,11 @@ var searchCmd = &cobra.Command{
 			if headline, ok := entry["headline"].(string); ok {
 				fmt.Fprintf(os.Stdout, "       %s\n", headline)
 			}
+		}
+		if skipped > 0 {
+			fmt.Fprintf(os.Stderr,
+				"showing %d of %d — %d could not be parsed\n",
+				shown, shown+skipped, skipped)
 		}
 		return nil
 	},

@@ -40,11 +40,19 @@ var contextCmd = &cobra.Command{
 			return errUnexpectedShape("sections", result)
 		}
 
+		// Same defect and same remedy as search.go — see its comment. A
+		// section that does not decode is counted, not silently dropped:
+		// context feeds an agent's prompt, so a missing section changes what
+		// the model was told without changing what anyone was shown.
+		skipped := 0
+		shown := 0
 		for _, s := range sections {
 			section, ok := s.(map[string]interface{})
 			if !ok {
+				skipped++
 				continue
 			}
+			shown++
 			fmt.Fprintf(os.Stdout, "## [%s] %s (%s)\n",
 				section["type"],
 				section["title"],
@@ -54,6 +62,12 @@ var contextCmd = &cobra.Command{
 				fmt.Fprintln(os.Stdout, content)
 			}
 			fmt.Fprintln(os.Stdout)
+		}
+
+		if skipped > 0 {
+			fmt.Fprintf(os.Stderr,
+				"showing %d of %d sections — %d could not be parsed\n",
+				shown, shown+skipped, skipped)
 		}
 
 		fmt.Fprintf(os.Stdout, "---\ntokens: %.0f / %.0f\n",
