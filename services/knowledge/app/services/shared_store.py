@@ -981,6 +981,35 @@ async def get_shared_stats(
         "since": since,
     }
 
+# app#380: the producer half of a contract with services/ui's graph renderer
+# (KnowledgeGraph.tsx's TYPE_COLORS/TYPE_BASE_RADIUS). #379 added `user` here
+# in one PR while a different lane's #378, merged the same night with no
+# visibility into it, styled only the three types that existed when it was
+# written — both renderer maps have a defensive fallback, so the new type
+# rendered as a small grey dot with a raw UUID label instead of erroring. The
+# fourth time in one night a producer and a consumer disagreed about a name
+# and nothing caught it.
+#
+# GRAPH_NODE_TYPES is DECLARED, not scraped from the literals below by static
+# analysis — a grep works today but breaks the moment this construction is
+# refactored into a shared node-builder or the type comes from a variable.
+# Declaring it is the honest answer to "can this be reliably extracted."
+#
+# docs/contracts/graph-node-types.json is the actual contract — both this
+# constant and services/ui's styling maps are checked AGAINST that file, not
+# against each other directly, since the two services share no package.
+class GraphNodeType:
+    COLLECTION = "collection"
+    SOURCE = "source"
+    AGENT = "agent"
+    USER = "user"
+
+
+GRAPH_NODE_TYPES: frozenset[str] = frozenset({
+    GraphNodeType.COLLECTION, GraphNodeType.SOURCE, GraphNodeType.AGENT, GraphNodeType.USER,
+})
+
+
 async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     """Nodes, edges and totals for the shared-knowledge graph (#300, #377).
 
@@ -1072,7 +1101,7 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     for c in collections:
         collection_ids.add(str(c["id"]))
         nodes.append({
-            "id": f"col-{c['id']}", "type": "collection", "label": c["name"],
+            "id": f"col-{c['id']}", "type": GraphNodeType.COLLECTION, "label": c["name"],
             "meta": {"visibility": c["visibility"]},
         })
 
@@ -1085,7 +1114,7 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     for s in sources:
         source_ids.add(str(s["id"]))
         nodes.append({
-            "id": f"src-{s['id']}", "type": "source", "label": s["title"],
+            "id": f"src-{s['id']}", "type": GraphNodeType.SOURCE, "label": s["title"],
             "meta": {"source_type": s["source_type"], "chunk_count": int(s["chunk_count"])},
         })
         if str(s["collection_id"]) in collection_ids:
@@ -1101,7 +1130,7 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     for a in agent_entries:
         node_id = f"agent-{a['agent_id']}"
         agent_or_user_nodes[node_id] = {
-            "id": node_id, "type": "agent", "label": a["agent_id"],
+            "id": node_id, "type": GraphNodeType.AGENT, "label": a["agent_id"],
             "meta": {"entry_count": int(a["entry_count"])},
         }
 
@@ -1114,7 +1143,7 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     for r in retrieval_edges:
         requester_id = r["requester_id"]
         requesters_shown.add(requester_id)
-        node_type = "agent" if r["requester_type"] == "agent" else "user"
+        node_type = GraphNodeType.AGENT if r["requester_type"] == "agent" else GraphNodeType.USER
         node_id = f"{node_type}-{requester_id}"
         # setdefault does not help meta specifically: a requester_type='agent'
         # row can hit an EXISTING node already inserted by the agent_entries
