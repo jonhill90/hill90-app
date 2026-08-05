@@ -213,6 +213,25 @@ async function resolveAgentSlugs(threadId: string, slugs: string[]): Promise<Map
  * Dispatch chat work to a set of agents. Shared by human-send and agent-to-agent orchestration.
  * Creates assistant placeholder messages (sequential), then fires dispatch calls (parallel).
  */
+const DISPATCH_REASON_MAX_LEN = 500;
+
+// Dispatch failure reasons come from network errors and agentbox response
+// bodies — neither is expected to carry a secret, but the work token is sent
+// as a Bearer header and could theoretically be echoed back by an error page
+// or a Node fetch error message. Strip any literal secret and any Bearer-style
+// token before a reason is persisted to a column a user can read, and bound
+// its length since it's an unbounded upstream string.
+function sanitizeDispatchReason(reason: string, secrets: (string | null | undefined)[]): string {
+  let sanitized = reason;
+  for (const secret of secrets) {
+    if (secret) sanitized = sanitized.split(secret).join('[REDACTED]');
+  }
+  sanitized = sanitized.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+  return sanitized.length > DISPATCH_REASON_MAX_LEN
+    ? `${sanitized.slice(0, DISPATCH_REASON_MAX_LEN)}…`
+    : sanitized;
+}
+
 async function dispatchToAgents(opts: {
   threadId: string;
   agents: NonNullable<Awaited<ReturnType<typeof getAgentForDispatch>>>[];
@@ -317,13 +336,19 @@ async function dispatchToAgents(opts: {
       const reason = result.status === 'rejected'
         ? String(result.reason)
         : (result.value.error || 'not accepted');
-      console.error(`[chat] Dispatch failed for agent=${agent.agent_id}: ${reason}`);
+      // Sanitize before this reaches ANY output — console.error included.
+      // Container stdout/stderr is shipped to Loki and retained there, so an
+      // unredacted token logged "just for diagnostics" ends up in a queryable
+      // log store, which is a worse leak surface than the DB column this was
+      // written to protect in the first place.
+      const safeReason = sanitizeDispatchReason(reason, [agent.work_token]);
+      console.error(`[chat] Dispatch failed for agent=${agent.agent_id}: ${safeReason}`);
       try {
         await pool.query(
-          `UPDATE chat_messages SET status = 'error', error_message = 'Dispatch failed',
+          `UPDATE chat_messages SET status = 'error', error_message = $2,
            seq = nextval('chat_messages_seq')
            WHERE id = $1 AND status = 'pending'`,
-          [placeholderId]
+          [placeholderId, `Dispatch failed: ${safeReason}`]
         );
       } catch (updateErr) {
         console.error(`[chat] Failed to mark dispatch error:`, updateErr);
