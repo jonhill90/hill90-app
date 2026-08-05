@@ -42,7 +42,7 @@ jest.mock('../db/pool', () => ({
   withTransaction: async (fn: (c: unknown) => Promise<unknown>) => fn({ query: mockQuery }),
 }));
 
-const mockCreateAndStartContainer = jest.fn().mockResolvedValue('container-id-123');
+const mockCreateAndStartContainer = jest.fn().mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
 jest.mock('../services/docker', () => ({
   createAndStartContainer: (...args: any[]) => mockCreateAndStartContainer(...args),
   stopAndRemoveContainer: jest.fn().mockResolvedValue(undefined),
@@ -100,7 +100,7 @@ describe('POST /agents/:id/start does not abort a successful start over a failed
   beforeEach(() => {
     mockQuery.mockReset();
     mockCreateAndStartContainer.mockReset();
-    mockCreateAndStartContainer.mockResolvedValue('container-id-123');
+    mockCreateAndStartContainer.mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
     mockGenerateAgentModelRouterToken.mockReset();
     mockGenerateAgentModelRouterToken.mockResolvedValue({
       token: 'fake-jwt', jti: 'jti-1', expiresAt: 9999999999, refreshSecret: 'secret',

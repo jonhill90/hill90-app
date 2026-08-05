@@ -84,7 +84,21 @@ export interface CreateAgentContainerOpts {
   metadata?: ProfileMetadata;
 }
 
-export async function createAndStartContainer(opts: CreateAgentContainerOpts): Promise<string> {
+export interface CreateAndStartContainerResult {
+  containerId: string;
+  /**
+   * True when a host_docker/vps_system-scope agent's edge-network attach
+   * failed. The container still started — this does not undo that, same
+   * as this codebase's other degraded-but-started paths (AKM/model-router
+   * token failures, surfaced via routes/agents.ts's `startWarnings`) — but
+   * unlike those, nothing previously distinguished "attached" from "didn't,
+   * silently caught and logged." Always false for a sandbox-scope agent,
+   * which never attempts the attach at all.
+   */
+  edgeNetworkAttachFailed: boolean;
+}
+
+export async function createAndStartContainer(opts: CreateAgentContainerOpts): Promise<CreateAndStartContainerResult> {
   const containerName = `${CONTAINER_PREFIX}${opts.agentId}`;
   assertAgentboxName(containerName);
 
@@ -183,17 +197,19 @@ export async function createAndStartContainer(opts: CreateAgentContainerOpts): P
   // Agents with host_docker or vps_system scope need external internet access.
   // The primary network (agent_internal) is internal-only, so we attach the
   // edge network as a secondary to provide DNS + outbound HTTP.
+  let edgeNetworkAttachFailed = false;
   if (opts.network === AGENT_NETWORK) {
     try {
       const edgeNetwork = docker.getNetwork('hill90_edge');
       await edgeNetwork.connect({ Container: containerName });
     } catch (err) {
       console.error(`[docker] Failed to attach edge network to ${containerName}:`, err);
+      edgeNetworkAttachFailed = true;
     }
   }
 
   const info = await container.inspect();
-  return info.Id;
+  return { containerId: info.Id, edgeNetworkAttachFailed };
 }
 
 export async function stopAndRemoveContainer(agentId: string): Promise<void> {

@@ -43,7 +43,7 @@ jest.mock('../db/pool', () => ({
   withTransaction: async (fn: (c: unknown) => Promise<unknown>) => fn({ query: mockQuery }),
 }));
 
-const mockCreateAndStartContainer = jest.fn().mockResolvedValue('container-id-123');
+const mockCreateAndStartContainer = jest.fn().mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
 jest.mock('../services/docker', () => ({
   createAndStartContainer: (...args: any[]) => mockCreateAndStartContainer(...args),
   stopAndRemoveContainer: jest.fn().mockResolvedValue(undefined),
@@ -117,7 +117,7 @@ describe('POST /agents/:id/start surfaces a token-generation failure instead of 
   beforeEach(() => {
     mockQuery.mockReset();
     mockCreateAndStartContainer.mockReset();
-    mockCreateAndStartContainer.mockResolvedValue('container-id-123');
+    mockCreateAndStartContainer.mockResolvedValue({ containerId: 'container-id-123', edgeNetworkAttachFailed: false });
     mockGenerateAgentModelRouterToken.mockReset();
     mockGenerateAgentAkmToken.mockReset();
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
