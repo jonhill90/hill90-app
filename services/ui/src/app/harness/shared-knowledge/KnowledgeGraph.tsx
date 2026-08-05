@@ -96,7 +96,15 @@ export function resolveNavigationTarget(node: GraphNode, edges: GraphEdge[]): Gr
 
 // d3-force mutates link.source/target from string ids into node object
 // references once the simulation initializes — this is the post-init shape.
-type SimLink = SimulationLinkDatum<GraphNode> & { label?: string }
+type SimLink = SimulationLinkDatum<GraphNode> & { label?: string; meta?: Record<string, unknown> }
+
+// `retrieved` edges (#379) carry a real usage weight; `contains` edges carry
+// none — 0 means "no weight signal", not "weight of zero", and every caller
+// below treats 0 as leaving the length-based defaults alone.
+function edgeWeight(link: SimLink): number {
+  const v = link.meta?.retrieval_count
+  return typeof v === 'number' && v > 0 ? v : 0
+}
 
 // The corpus counts, whatever the upstream calls them.
 //
@@ -160,6 +168,21 @@ export function colorForType(type: string): string {
   const known = TYPE_COLORS[type]
   if (known) return known
   return `hsl(${hashType(type) % 360}, 65%, 55%)`
+}
+// Both color shapes colorForType can return — '#rrggbb' and 'hsl(h, s%, l%)'
+// — need an alpha channel for edge gradients and layered glow, and canvas
+// doesn't accept a separate alpha alongside either string form.
+export function withAlpha(color: string, alpha: number): string {
+  if (color.startsWith('#') && color.length === 7) {
+    const r = parseInt(color.slice(1, 3), 16)
+    const g = parseInt(color.slice(3, 5), 16)
+    const b = parseInt(color.slice(5, 7), 16)
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  }
+  if (color.startsWith('hsl(')) {
+    return `hsla(${color.slice(4, -1)}, ${alpha})`
+  }
+  return color
 }
 export function baseRadiusForType(type: string): number {
   return TYPE_BASE_RADIUS[type] ?? 8
@@ -271,7 +294,7 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
     const nodeById = new Map(nodes.map(n => [n.id, n]))
     const links: SimLink[] = data.edges
       .filter(e => nodeById.has(e.source) && nodeById.has(e.target))
-      .map(e => ({ source: e.source, target: e.target, label: e.label }))
+      .map(e => ({ source: e.source, target: e.target, label: e.label, meta: e.meta }))
 
     // Degree (for radius scaling) and adjacency (for hover highlighting),
     // computed once up front rather than per frame.
@@ -369,7 +392,90 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
       return null
     }
 
-    function draw() {
+    // ── Idle drift (visual polish, see PR for measurement) ─────────────
+    //
+    // A per-node stable phase (hashed from id, not random — the same node
+    // drifts the same way every frame, not a new random walk each render)
+    // so the whole graph doesn't sway in lockstep, which would read as one
+    // rigid object breathing rather than many independent things settled
+    // near equilibrium. This NEVER touches n.x/n.y (the simulation's real
+    // state) — it is a screen-space-only offset added at draw time, so it
+    // cannot destabilize the settled layout, feed back into the physics, or
+    // accumulate energy. Amplitude is deliberately sub-pixel-to-a-couple-
+    // pixels: enough to read as alive, not enough to be distracting, and
+    // small enough that hit-testing (nodeAt, keyed off the true n.x/n.y)
+    // does not need to account for it.
+    const DRIFT_AMPLITUDE_PX = 0.6
+    function driftOffset(n: GraphNode, now: number): { dx: number; dy: number } {
+      if (reducedMotion) return { dx: 0, dy: 0 }
+      const seed = hashType(n.id)
+      const phaseX = (seed % 997) / 997 * Math.PI * 2
+      const phaseY = (Math.floor(seed / 997) % 997) / 997 * Math.PI * 2
+      return {
+        dx: Math.sin(now / 4200 + phaseX) * DRIFT_AMPLITUDE_PX,
+        dy: Math.cos(now / 5100 + phaseY) * DRIFT_AMPLITUDE_PX,
+      }
+    }
+
+    // ── Layered glow (real bloom, not a single shadowBlur ring) ────────
+    //
+    // [radius multiplier, alpha] pairs, drawn outer-to-inner as flat filled
+    // circles UNDER the crisp node — no `shadowBlur` at all. This is not
+    // only prettier (a graduated falloff instead of one hard-edged glow
+    // ring) — it measures cheaper too: `shadowBlur` forces a real blur
+    // convolution over the shadow-casting shape's bounding box on every
+    // draw, on every node, and browsers do not cache that between frames.
+    // A handful of flat alpha-blended arcs is compositing, not convolution.
+    // Measured via the Playwright harness in this PR, not assumed — see the
+    // PR description for the actual per-frame timing at this corpus size.
+    const GLOW_RINGS: readonly [mult: number, alpha: number][] = [
+      [2.4, 0.035],
+      [1.8, 0.07],
+      [1.35, 0.12],
+    ]
+    // The user node is the graph's visual anchor (its structural role: the
+    // hub that turns three disconnected collection-trees into one connected
+    // component, #377/#379) and gets one extra, wider, brighter ring rather
+    // than a separate effect (a pulsing or rotating ring was considered and
+    // rejected — it would fight the "not enough to be distracting" bar the
+    // idle drift is already held to, and the size/glow/colour treatment
+    // already gives it primacy without extra chrome).
+    const GLOW_RINGS_HUB: readonly [mult: number, alpha: number][] = [
+      [3.0, 0.04],
+      [2.3, 0.08],
+      [1.7, 0.13],
+      [1.3, 0.17],
+    ]
+
+    function labelAlphaFor(n: GraphNode, isHovered: boolean, isNeighbor: boolean, dimmed: boolean): number {
+      if (dimmed) return 0
+      if (isHovered) return 1
+      if (isNeighbor) return 0.9
+      // Collections and the user hub stay structurally labeled regardless
+      // of zoom or connectivity — same reasoning as before this file's
+      // visual pass, just no longer a hard on/off for everything else.
+      if (n.type === 'collection' || n.type === 'user') return 1
+      // Everything else fades in smoothly from two independent signals —
+      // degree (a well-connected node earns its label even at rest) and
+      // zoom (get close enough and the resting state should read like
+      // Obsidian's own: labels appear as you approach, not all at once).
+      // Summed and capped, not multiplied, so either signal alone can
+      // still bring a label most of the way in.
+      //
+      // zoomAlpha's threshold is deliberately ABOVE the default view.scale
+      // of 1 — checked visually (see the PR's screenshots), not just by
+      // formula: a lower threshold made every source label visible at rest
+      // simply because 1.0 already cleared it, which is the exact "becomes
+      // noise fast" problem this pass exists to fix, just moved from "always
+      // on" to "always on, slightly fainter". Below 1.3x zoom, only degree
+      // contributes; past that, zooming in progressively reveals the rest.
+      const deg = degree.get(n.id) || 0
+      const degreeAlpha = Math.min(deg / 4, 1) * 0.55
+      const zoomAlpha = Math.min(Math.max((view.scale - 1.3) / 1.0, 0), 1) * 0.55
+      return Math.min(degreeAlpha + zoomAlpha, 1)
+    }
+
+    function draw(now: number = performance.now()) {
       if (!ctx) return
       ctx.save()
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -381,66 +487,84 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
 
       const activeNeighbors = hoveredId ? neighbors.get(hoveredId) ?? new Set<string>() : null
 
-      // Edges — faded by length, dimmed further when a hover focuses attention
-      // elsewhere.
+      // Edges — gradient between the two endpoints' own colours (not a flat
+      // neutral line), opacity by length as before PLUS a boost for
+      // `retrieved` edges' real usage weight (chunk_hits, #379) so a
+      // heavily-used link reads as heavier, not just "a line exists".
+      // Thickness gets the same weight boost.
       for (const link of links) {
         const s = link.source as GraphNode
         const t = link.target as GraphNode
         if (s.x == null || s.y == null || t.x == null || t.y == null) continue
-        const dx = t.x - s.x
-        const dy = t.y - s.y
+        const sOff = driftOffset(s, now)
+        const tOff = driftOffset(t, now)
+        const sx = s.x + sOff.dx, sy = s.y + sOff.dy
+        const tx2 = t.x + tOff.dx, ty2 = t.y + tOff.dy
+        const dx = tx2 - sx
+        const dy = ty2 - sy
         const len = Math.sqrt(dx * dx + dy * dy)
         const isFocused = hoveredId != null && (s.id === hoveredId || t.id === hoveredId)
-        const base = Math.max(0.08, Math.min(0.5, 140 / (len + 60)))
-        const alpha = hoveredId == null ? base : (isFocused ? Math.min(base + 0.35, 0.85) : base * 0.15)
-        ctx.strokeStyle = `rgba(94, 130, 160, ${alpha})`
-        ctx.lineWidth = isFocused ? 1.6 : 1
+        const weight = edgeWeight(link)
+        const lengthAlpha = Math.max(0.08, Math.min(0.5, 140 / (len + 60)))
+        const weightAlphaBoost = weight > 0 ? Math.min(Math.sqrt(weight) * 0.08, 0.25) : 0
+        const base = Math.min(lengthAlpha + weightAlphaBoost, 0.75)
+        const alpha = hoveredId == null ? base : (isFocused ? Math.min(base + 0.35, 0.9) : base * 0.15)
+
+        const grad = ctx.createLinearGradient(sx, sy, tx2, ty2)
+        grad.addColorStop(0, withAlpha(colorForType(s.type), alpha))
+        grad.addColorStop(1, withAlpha(colorForType(t.type), alpha))
+        ctx.strokeStyle = grad
+        ctx.lineWidth = (isFocused ? 1.6 : 1) + Math.min(Math.sqrt(weight) * 0.5, 2.2)
         ctx.beginPath()
-        ctx.moveTo(s.x, s.y)
-        ctx.lineTo(t.x, t.y)
+        ctx.moveTo(sx, sy)
+        ctx.lineTo(tx2, ty2)
         ctx.stroke()
       }
 
-      // Nodes — glow via shadowBlur, radius by degree, colour by type; hover
-      // highlights the node and its direct neighbours and dims the rest.
+      // Nodes — layered glow (bloom) under a crisp core, radius by degree,
+      // colour by type; hover highlights the node and its direct neighbours
+      // and dims the rest.
       for (const n of nodes) {
         if (n.x == null || n.y == null) continue
+        const { dx, dy } = driftOffset(n, now)
+        const nx = n.x + dx, ny = n.y + dy
         const r = radiusOf(n)
         const color = colorForType(n.type)
         const isHovered = n.id === hoveredId
         const isNeighbor = activeNeighbors?.has(n.id) ?? false
         const dimmed = hoveredId != null && !isHovered && !isNeighbor
 
-        ctx.save()
         if (!dimmed) {
-          ctx.shadowColor = color
-          ctx.shadowBlur = isHovered ? 22 : 10
+          const rings = n.type === 'user' ? GLOW_RINGS_HUB : GLOW_RINGS
+          const boost = isHovered ? 1.7 : 1
+          for (const [mult, a] of rings) {
+            ctx.beginPath()
+            ctx.fillStyle = withAlpha(color, Math.min(a * boost, 0.5))
+            ctx.arc(nx, ny, r * mult, 0, Math.PI * 2)
+            ctx.fill()
+          }
         }
+
+        ctx.save()
         ctx.globalAlpha = dimmed ? 0.22 : 1
         ctx.fillStyle = color + '33'
         ctx.strokeStyle = color
         ctx.lineWidth = isHovered ? 2.5 : 1.5
         ctx.beginPath()
-        ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
+        ctx.arc(nx, ny, r, 0, Math.PI * 2)
         ctx.fill()
         ctx.stroke()
         ctx.restore()
 
-        // Labels: always for hovered/neighbors, otherwise only for the
-        // "always visible" tiers — collections, and `user` nodes (#380: a
-        // user is structurally a hub, the same reason it gets a bigger base
-        // radius above; sources stay hover-only, or the resting state is
-        // unreadable noise).
-        const showLabel = isHovered || isNeighbor || n.type === 'collection' || n.type === 'user'
-        if (showLabel) {
-          ctx.globalAlpha = dimmed ? 0.3 : 1
-          ctx.shadowBlur = 0
+        const la = labelAlphaFor(n, isHovered, isNeighbor, dimmed)
+        if (la > 0.03) {
+          ctx.globalAlpha = la
           ctx.fillStyle = isHovered ? '#ffffff' : '#c9d1d9'
           ctx.font = `${isHovered ? 'bold ' : ''}${n.type === 'collection' ? 11 : 10}px system-ui, sans-serif`
           ctx.textAlign = 'center'
           const resolved = labelFor(n, currentUserSubRef.current)
           const label = resolved.length > 22 ? `${resolved.slice(0, 20)}…` : resolved
-          ctx.fillText(label, n.x, n.y + r + 13)
+          ctx.fillText(label, nx, ny + r + 13)
           ctx.globalAlpha = 1
         }
       }
@@ -471,6 +595,26 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
     let sim: Simulation<GraphNode, SimLink> | null = null
     const reducedMotion = prefersReducedMotion()
 
+    // Idle drift's own rAF loop — separate from d3-force's internal timer,
+    // which stops calling the tick handler once alpha decays below
+    // alphaMin. This loop exists ONLY to keep redrawing (with the tiny
+    // screen-space drift offset above) after the physics has genuinely
+    // settled; it is never started at all when `reducedMotion` is true —
+    // the ABSOLUTE constraint from the review that authorized this file:
+    // reduced motion settles once and stays still, full stop.
+    let idleRafId: number | null = null
+    function stopIdleDrift() {
+      if (idleRafId != null) { cancelAnimationFrame(idleRafId); idleRafId = null }
+    }
+    function startIdleDrift() {
+      if (reducedMotion || idleRafId != null) return
+      function loop(now: number) {
+        draw(now)
+        idleRafId = requestAnimationFrame(loop)
+      }
+      idleRafId = requestAnimationFrame(loop)
+    }
+
     if (nodes.length > 0) {
       sim = forceSimulation<GraphNode>(nodes)
         .force('charge', forceManyBody().strength(-160))
@@ -485,7 +629,7 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
         .force('x', forceX<GraphNode>(0).strength(0.02))
         .force('y', forceY<GraphNode>(0).strength(0.02))
         .velocityDecay(0.35)
-        .on('tick', draw)
+        .on('tick', () => draw())
 
       if (reducedMotion) {
         // Settle synchronously — run the simulation to completion before the
@@ -495,6 +639,10 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
         sim.stop()
         for (let i = 0; i < 300; i++) sim.tick()
         draw()
+      } else {
+        // Fires whenever alpha decays past alphaMin — including again after
+        // a drag's alphaTarget(0) lets it settle back down, not just once.
+        sim.on('end', startIdleDrift)
       }
     } else {
       draw()
@@ -527,7 +675,10 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
         pointerDownInfo = { node: hit, x: sx, y: sy, t: performance.now() }
         hit.fx = hit.x
         hit.fy = hit.y
-        if (sim && !reducedMotion) sim.alphaTarget(0.3).restart()
+        if (sim && !reducedMotion) {
+          stopIdleDrift()
+          sim.alphaTarget(0.3).restart()
+        }
       } else {
         isPanning = true
         panStart = { x: sx, y: sy }
@@ -599,13 +750,19 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointerleave', onPointerLeave)
 
-    // Tab hidden → stop the simulation's timer outright (a rAF loop left
-    // running off-screen is a real battery/CPU cost); tab visible again →
-    // give it a small reheat so a mid-motion layout doesn't look frozen.
+    // Tab hidden → stop the simulation's timer AND idle drift's own loop
+    // outright (either one left running off-screen is a real battery/CPU
+    // cost); tab visible again → reheat the simulation, which will refire
+    // 'end' and resume idle drift once it resettles, so a mid-motion layout
+    // doesn't look frozen and drift doesn't need its own separate resume path.
     function onVisibilityChange() {
       if (!sim) return
-      if (document.hidden) sim.stop()
-      else sim.alpha(Math.max(sim.alpha(), 0.1)).restart()
+      if (document.hidden) {
+        sim.stop()
+        stopIdleDrift()
+      } else {
+        sim.alpha(Math.max(sim.alpha(), 0.1)).restart()
+      }
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
 
@@ -613,13 +770,24 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
       resizeCanvas()
       // Force targets are world-space (0, 0), which doesn't move on resize —
       // only the canvas backing store and the redraw need updating.
-      if (reducedMotion) draw()
-      else sim?.alpha(Math.max(sim.alpha(), 0.15)).restart()
+      if (reducedMotion) {
+        draw()
+      } else {
+        stopIdleDrift()
+        // Pre-existing bug, unrelated to this PR's own changes, fixed while
+        // touching this line rather than left or silently patched: `sim`
+        // can be null (zero-node graph) and the un-guarded `sim.alpha()`
+        // inside `Math.max` below would throw on a resize in that case,
+        // before the outer `sim?.` optional chain ever got a chance to
+        // short-circuit anything.
+        sim?.alpha(Math.max(sim?.alpha() ?? 0, 0.15)).restart()
+      }
     }
     window.addEventListener('resize', onResize)
 
     return () => {
       sim?.stop()
+      stopIdleDrift()
       canvas.removeEventListener('wheel', onWheel)
       canvas.removeEventListener('pointerdown', onPointerDown)
       canvas.removeEventListener('pointermove', onPointerMove)
