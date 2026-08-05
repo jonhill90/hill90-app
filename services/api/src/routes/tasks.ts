@@ -44,6 +44,16 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
     let tasks = result.data as Array<{ agent_id: string }>;
     if (allowed !== null) {
       tasks = tasks.filter(t => allowed.includes(t.agent_id));
+      // The upstream total counts every agent's tasks, not just this user's —
+      // forwarding it after filtering would overstate what's actually visible,
+      // the same shape as the defect this total exists to prevent (#180,
+      // #215). Not sending it is the honest answer: unknown, not a number
+      // computed from a scope the total doesn't describe. `tasks.length` would
+      // look like a fix and repeat the mistake one level up.
+    } else if (result.total !== null) {
+      // Admin: unfiltered, so the upstream total describes exactly what's
+      // returned, same as akm-proxy and shared-knowledge-proxy forward it.
+      res.setHeader('X-Total-Count', String(result.total));
     }
 
     res.json(tasks);

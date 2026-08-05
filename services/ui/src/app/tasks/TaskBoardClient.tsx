@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react'
 import Toast, { useToast, failureMessage } from '@/components/Toast'
+import { parseTotal, describePage } from '@/utils/knowledge-page'
 
 interface Task {
   id: string
@@ -65,6 +66,14 @@ interface NewTaskForm {
 
 export default function TaskBoardClient() {
   const [tasks, setTasks] = useState<Task[]>([])
+  // Rows matching the query upstream, from X-Total-Count — NOT tasks.length.
+  // Null when the response carried no header (a non-admin's own total isn't
+  // sent at all, since the upstream figure counts every agent's tasks, not
+  // just theirs — see routes/tasks.ts) or when the count truly is unknown.
+  // Read as "unknown", never silently as tasks.length: a total derived from
+  // the page agrees with itself and reports truncation as completeness,
+  // the shape #180 and #215 already named (#356).
+  const [total, setTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [agents, setAgents] = useState<Array<{ agent_id: string; name: string }>>([])
@@ -83,6 +92,10 @@ export default function TaskBoardClient() {
       if (res.ok) {
         const data = await res.json()
         setTasks(Array.isArray(data) ? data : [])
+        // Optional chaining only for test doubles — a real Response always
+        // has headers. A double without them lands on the unknown-total
+        // path, the honest reading of "this response carried no total".
+        setTotal(parseTotal(res.headers?.get?.('X-Total-Count') ?? null))
       } else {
         const body = await res.json().catch(() => ({}))
         setError(body.error || `Failed to load tasks (${res.status})`)
@@ -239,6 +252,15 @@ export default function TaskBoardClient() {
           + New Task
         </button>
       </div>
+
+      {total !== null && total > tasks.length && (
+        <p
+          className="text-xs text-amber-400/90 border border-amber-700/50 bg-amber-900/20 rounded px-2 py-1 mb-4 inline-block"
+          data-testid="tasks-truncated-notice"
+        >
+          {describePage(tasks.length, total)} — the board is not showing every task
+        </p>
+      )}
 
       {/* Filter tabs */}
       <div className="flex items-center gap-1 mb-6" data-testid="filter-tabs">

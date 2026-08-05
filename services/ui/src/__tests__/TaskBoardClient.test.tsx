@@ -149,4 +149,55 @@ describe('TaskBoardClient', () => {
 
     expect(screen.getByTestId('loading')).toBeInTheDocument()
   })
+
+  describe('truncation notice (#356)', () => {
+    // A fixture where the page and the total AGREE cannot detect this defect
+    // — #215's own lesson, paid for once already in this repo. Every case
+    // below makes them DISAGREE on purpose.
+    function mockTasksWithTotal(tasks: typeof MOCK_TASKS, total: number | null) {
+      mockFetch.mockImplementation(async (url: string) => {
+        if (typeof url === 'string' && url === '/api/tasks') {
+          return {
+            ok: true,
+            json: async () => tasks,
+            headers: { get: (name: string) => (name === 'X-Total-Count' && total !== null ? String(total) : null) },
+          }
+        }
+        if (typeof url === 'string' && url === '/api/agents') {
+          return { ok: true, json: async () => MOCK_AGENTS }
+        }
+        return { ok: false, json: async () => ({}) }
+      })
+    }
+
+    it('T7: says how much is missing when the board is cut — 3 tasks shown, 742 upstream', async () => {
+      mockTasksWithTotal(MOCK_TASKS, 742)
+      render(<TaskBoardClient />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('tasks-truncated-notice')).toBeInTheDocument()
+      })
+      expect(screen.getByTestId('tasks-truncated-notice')).toHaveTextContent('showing 3 of 742')
+    })
+
+    it('T8: no notice when the page and the total agree', async () => {
+      mockTasksWithTotal(MOCK_TASKS, 3)
+      render(<TaskBoardClient />)
+
+      await waitFor(() => {
+        expect(screen.getAllByTestId('task-card')).toHaveLength(3)
+      })
+      expect(screen.queryByTestId('tasks-truncated-notice')).not.toBeInTheDocument()
+    })
+
+    it('T9: no notice when the total is unknown — never falls back to tasks.length as if it were complete', async () => {
+      mockTasksWithTotal(MOCK_TASKS, null)
+      render(<TaskBoardClient />)
+
+      await waitFor(() => {
+        expect(screen.getAllByTestId('task-card')).toHaveLength(3)
+      })
+      expect(screen.queryByTestId('tasks-truncated-notice')).not.toBeInTheDocument()
+    })
+  })
 })

@@ -96,6 +96,37 @@ describe('Tasks routes', () => {
       expect(mockQuery).not.toHaveBeenCalled();
     });
 
+    it('forwards the real total for admins, when it disagrees with the page (#356)', async () => {
+      // The page and the total DISAGREE on purpose — a fixture where they match
+      // cannot detect the defect (#215's own lesson). One task in the body,
+      // 742 upstream: exactly the shape of a >500-row board silently cut at
+      // the knowledge service's default page size.
+      mockListTasks.mockResolvedValueOnce({ status: 200, data: [MOCK_TASK], total: 742 });
+
+      const res = await request(app)
+        .get('/tasks')
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.headers['x-total-count']).toBe('742');
+    });
+
+    it('does NOT forward the upstream total for a scoped user — it describes every agent, not just theirs', async () => {
+      // Filtering happens after the fetch, so the upstream total (which counts
+      // every agent's tasks) would overstate what a non-admin actually sees.
+      // Sending it anyway would be the same defect wearing the fix.
+      mockListTasks.mockResolvedValueOnce({ status: 200, data: [MOCK_TASK], total: 742 });
+      mockQuery.mockResolvedValueOnce({ rows: [{ agent_id: 'bot-1' }] });
+
+      const res = await request(app)
+        .get('/tasks')
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['x-total-count']).toBeUndefined();
+    });
+
     it('filters out tasks for agents user does not own', async () => {
       mockListTasks.mockResolvedValueOnce({ status: 200, data: [MOCK_TASK] });
       // User owns no agents
