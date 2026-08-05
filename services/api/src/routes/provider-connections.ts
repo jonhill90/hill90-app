@@ -474,8 +474,20 @@ router.get('/:id/models', async (req: Request, res: Response) => {
       }
     );
 
+    // app#396: services/ai's /internal/list-provider-models returns 200 with
+    // `{models: [], error: "..."}` on a decrypt failure — deliberately, so a
+    // provider-listing problem doesn't read as an HTTP error to a caller that
+    // only checks status. Axios does not throw on a 200, so that response
+    // landed in THIS branch, and `response.data?.models || []` read the
+    // models array while `response.data?.error` was never looked at — the
+    // one piece of information the UI (ModelsClient.tsx) is specifically
+    // built to show (`if (data.error) setProviderModelsError(data.error)`)
+    // never reached it. A decrypt failure rendered as "this provider has no
+    // models" instead of the real reason. Forwarded here the same way the
+    // /validate route below already forwards its own 200-with-error shape.
     res.json({
       models: response.data?.models || [],
+      ...(response.data?.error ? { error: response.data.error } : {}),
       provider: row.provider,
     });
   } catch (err: any) {

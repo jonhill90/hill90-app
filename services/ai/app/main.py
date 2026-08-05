@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from app.auth import AuthError, AgentClaims, verify_model_router_token
 from app.config import get_settings, load_public_key
 from app.crypto import decrypt_provider_key
+from app.provider_key_canary import run_provider_key_canary
 from app.delegation import (
     compute_effective_policy,
     create_delegation,
@@ -116,6 +117,35 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             f"app-ai cannot start: DATABASE_URL is set but the database could not be "
             f"reached ({e}). Refusing to serve without the policy and usage tables."
+        ) from e
+
+    # app#396: PROVIDER_KEY_ENCRYPTION_KEY decrypts provider_connections.api_key
+    # for every BYOK request this service proxies. Per-request decrypt failures
+    # already fail loud (see _inject_byok_credentials and the two /internal/*
+    # handlers below) — this closes the gap that was left: those three call
+    # sites only ever learn the key is wrong when a real user's request needs
+    # it, and #396 found the SOPS-stored key and a running container's actual
+    # key had already drifted apart, undetected, before anyone touched a BYOK
+    # feature. Same doctrine as the DB check just above (an unverified piece
+    # of required config must not get to serve), and the same reasoning as
+    # services/api's own boot canary for reading a REAL stored row instead of
+    # a self-round-trip: any key passes against a value it just encrypted
+    # itself, which is exactly why that drift went undetected as long as it
+    # did.
+    try:
+        canary_status = await run_provider_key_canary(_db_pool, settings.provider_key_encryption_key)
+        if canary_status == "verified":
+            logger.info("provider_key_canary_verified")
+        else:
+            logger.info("provider_key_canary_nothing_to_verify")
+    except Exception as e:
+        logger.error("provider_key_canary_failed", error=str(e))
+        raise RuntimeError(
+            "app-ai cannot start: PROVIDER_KEY_ENCRYPTION_KEY cannot decrypt an "
+            "existing provider_connections row. This is not a database problem; "
+            "check whether the key configured for this container matches the key "
+            "that last wrote that data (see docs/reference/secret-layout.md and "
+            "app#396)."
         ) from e
 
     # Init HTTP client for LiteLLM proxy
