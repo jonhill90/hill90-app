@@ -112,6 +112,12 @@ export function getModelRouterEnvVars(tokenResult: ModelRouterTokenResult): stri
   const API_URL = process.env.API_INTERNAL_URL || 'http://api:3000';
   return [
     `MODEL_ROUTER_TOKEN=${tokenResult.token}`,
+    // AI_SERVICE_URL is the name hill90/agentbox:latest actually reads
+    // (chat.py:58, confirmed against the running image — app#355).
+    // MODEL_ROUTER_URL is kept alongside it for one release so a container
+    // still running an older image, which never read AI_SERVICE_URL, is
+    // unaffected. Both carry the same value; there is only one URL.
+    `AI_SERVICE_URL=${MODEL_ROUTER_URL}`,
     `MODEL_ROUTER_URL=${MODEL_ROUTER_URL}`,
     `MODEL_ROUTER_REFRESH_URL=${API_URL}/internal/model-router/refresh-token`,
     `MODEL_ROUTER_REFRESH_SECRET=${tokenResult.refreshSecret}`,

@@ -1,0 +1,38 @@
+{
+  "_provenance": [
+    "Every env var name hill90/agentbox:latest actually reads, confirmed by",
+    "reading the RUNNING IMAGE on the production host — not derived from this",
+    "repo's services/agentbox Python. That distinction is the whole reason",
+    "this fixture exists: the image and this repo drifted ~74 commits apart",
+    "(app#353), so a name present in this repo's agentbox source is not",
+    "evidence of what a built image actually contains.",
+    "",
+    "Captured 2026-08-04 against hill90/agentbox:latest",
+    "(sha256:fcf1357e24001bfe028112dddb242c0efd55de71b9271fa6c5a96d9965a552bb,",
+    "created 2026-08-04T06:37:02Z). Source: app#353's investigation comment,",
+    "cross-checked against app#355's follow-up read of chat.py:58.",
+    "",
+    "RE-DERIVE by running, on a host with the image:",
+    "  docker run --rm --entrypoint grep hill90/agentbox:latest -rn 'os.environ' /app/app/",
+    "and reading the variable names out of the actual hits. A first attempt at",
+    "exactly this grep in app#353 returned only 4 of the real 14 names — a",
+    "second, differently-targeted grep is what caught the miss. Do not trust a",
+    "single regex for this list; read the hits."
+  ],
+  "envVars": [
+    "AGENT_CONFIG",
+    "AGENT_ID",
+    "AGENT_USE_TERMINAL",
+    "AI_SERVICE_URL",
+    "AKM_REFRESH_SECRET",
+    "AKM_REFRESH_URL",
+    "AKM_SERVICE_URL",
+    "AKM_TOKEN",
+    "CHAT_CALLBACK_TOKEN",
+    "MODEL_ROUTER_REFRESH_SECRET",
+    "MODEL_ROUTER_REFRESH_URL",
+    "MODEL_ROUTER_TOKEN",
+    "TAVILY_API_KEY",
+    "WORK_TOKEN"
+  ]
+}
