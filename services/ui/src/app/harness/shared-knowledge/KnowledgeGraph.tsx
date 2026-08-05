@@ -71,7 +71,14 @@ function corpusCounts(d: { total?: Record<string, number>; stats?: Record<string
 // instead of a shared grey dot, and the legend (legendTypes, further down)
 // derives from what the response actually contains rather than this map —
 // the map alone is not what decides whether a type is visible.
-const KNOWN_TYPE_COLORS: Record<string, string> = {
+//
+// Both exported maps are checked, key-for-key, against
+// docs/contracts/graph-node-types.json in KnowledgeGraphNodeTypes.test.tsx —
+// the shared manifest services/knowledge's producer side (#381) also
+// asserts against. Add a type to BOTH maps in the same PR that adds it to
+// the manifest; that test is what stops this file quietly falling behind
+// again.
+export const TYPE_COLORS: Record<string, string> = {
   collection: '#5b9a2f',
   source: '#3b82f6',
   agent: '#f59e0b',
@@ -81,7 +88,7 @@ const KNOWN_TYPE_COLORS: Record<string, string> = {
   // collections together, not a peer of source/agent.
   user: '#c026d3',
 }
-const KNOWN_TYPE_BASE_RADIUS: Record<string, number> = {
+export const TYPE_BASE_RADIUS: Record<string, number> = {
   collection: 16,
   source: 7,
   agent: 11,
@@ -100,12 +107,12 @@ function hashType(type: string): number {
   return hash
 }
 export function colorForType(type: string): string {
-  const known = KNOWN_TYPE_COLORS[type]
+  const known = TYPE_COLORS[type]
   if (known) return known
   return `hsl(${hashType(type) % 360}, 65%, 55%)`
 }
 export function baseRadiusForType(type: string): number {
-  return KNOWN_TYPE_BASE_RADIUS[type] ?? 8
+  return TYPE_BASE_RADIUS[type] ?? 8
 }
 // Preferred legend order for the types this component was actually
 // designed around; anything else present in the data is appended after,
