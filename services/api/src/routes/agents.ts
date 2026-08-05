@@ -1431,6 +1431,22 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
       }
     }
 
+    // Surfaced to the caller in the final response (see `startWarnings`
+    // below) rather than only to console.error. A silently swallowed
+    // model-router failure here leaves MODEL_ROUTER_TOKEN unset in the
+    // container's environment — services/agentbox/app/chat.py returns
+    // `status="error", error_message="MODEL_ROUTER_TOKEN not configured"`
+    // on every subsequent chat/inference attempt, with no later recovery
+    // (token_refresh.py only refreshes a token that was set at start; there
+    // is nothing to refresh if this failed). The response for THIS request
+    // used to say `{status: "running", ...}` — identical to a fully healthy
+    // start — with nothing to connect a much later, differently-worded chat
+    // error back to this moment. Same shape for AKM. The start itself is
+    // deliberately still NOT aborted by either failure: the container really
+    // did launch, same reasoning `containerStartedAt`'s own comment below
+    // already applies to a different secondary concern.
+    const startWarnings: string[] = [];
+
     // Generate AKM token if configured (AI-115: WorkloadClaims)
     let akmEnv: string[] = [];
     let akmJti: string | null = null;
@@ -1455,6 +1471,7 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
         });
       } catch (err) {
         console.error('[agents] AKM token generation failed (continuing without AKM):', err);
+        startWarnings.push('AKM token generation failed — agent started without AKM access');
       }
     }
 
@@ -1484,6 +1501,7 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
         });
       } catch (err) {
         console.error('[agents] Model-router token generation failed (continuing without model-router):', err);
+        startWarnings.push('Model-router token generation failed — agent started but cannot make inference requests until it is stopped and restarted');
       }
     }
 
@@ -1647,7 +1665,13 @@ router.post('/:id/start', requireRole('admin'), async (req: Request, res: Respon
     });
     dispatchWebhooks(agent.agent_id, agent.id, 'start', { container_id: containerId });
     notify(agent.created_by, `Agent "${agent.name || agent.agent_id}" started`, 'agent_start', { agent_id: agent.id, agent_slug: agent.agent_id });
-    res.json({ status: 'running', container_id: containerId, principal_id: agent.id });
+    const startResponse: Record<string, unknown> = { status: 'running', container_id: containerId, principal_id: agent.id };
+    // Only present when non-empty — matches this file's own established
+    // shape for a conditional field (e.g. routes/provider-connections.ts's
+    // `if (validationError) result.error = validationError`), rather than
+    // always shipping an empty array a caller has to learn means nothing.
+    if (startWarnings.length > 0) startResponse.warnings = startWarnings;
+    res.json(startResponse);
   } catch (err: any) {
     console.error('[agents] Start error:', err);
 
@@ -2294,7 +2318,17 @@ router.get('/:id/events', requireRole('user'), async (req: Request, res: Respons
             const inferenceRows = await getRecentInference(agent.agent_id, tail, user.sub, admin);
             inferenceEvents = inferenceRows.map(mapInferenceToEvent);
           } catch (err) {
-            console.error('[agents] One-shot inference query failed (continuing):', err);
+            // Same reasoning as the export route's identical catch: falling
+            // through here would hand back a 200 array that looks like the
+            // agent's complete event history and silently omits every
+            // inference event. This is the route the UI renders directly —
+            // higher blast radius than the CSV export, not lower.
+            console.error('[agents] One-shot inference query failed:', err);
+            res.status(502).json({
+              error: 'Failed to read inference events',
+              detail: 'The inference-event portion of this history could not be read. Retry.',
+            });
+            return;
           }
 
           // Merge and sort by (timestamp, id)
@@ -2373,7 +2407,17 @@ router.get('/:id/events/export', requireRole('user'), async (req: Request, res: 
         });
         return;
       }
+      // Same reasoning as the ReadTooLargeError branch above: falling through
+      // here would hand back a CSV that looks complete and silently omits
+      // every container event. A caller exporting for audit/debugging has no
+      // way to tell "the agent has no events" from "the read failed" once the
+      // file has already downloaded as a normal-looking export.
       console.error('[agents] CSV export container events failed:', err);
+      res.status(502).json({
+        error: 'Failed to read container events',
+        detail: 'The container-event portion of this export could not be read. Retry, or export a narrower ?tail= range.',
+      });
+      return;
     }
 
     // Collect inference events
@@ -2382,7 +2426,14 @@ router.get('/:id/events/export', requireRole('user'), async (req: Request, res: 
       const inferenceRows = await getRecentInference(agent.agent_id, tail, user.sub, admin);
       inferenceEvents = inferenceRows.map(mapInferenceToEvent);
     } catch (err) {
+      // Same reasoning as the container-events catch above: a query failure
+      // here must not silently ship a CSV missing every inference event.
       console.error('[agents] CSV export inference query failed:', err);
+      res.status(502).json({
+        error: 'Failed to read inference events',
+        detail: 'The inference-event portion of this export could not be read. Retry the export.',
+      });
+      return;
     }
 
     // Merge and sort
