@@ -487,7 +487,12 @@ describe('GET /agents/:id/events', () => {
     expect(res.body[1].tool).toBe('inference');
   });
 
-  it('DB failure does not break one-shot — returns container events only', async () => {
+  it('a DB failure refuses the one-shot rather than silently returning container events only', async () => {
+    // Previously this asserted the opposite — a 200 with only container
+    // events, silently missing every inference event. That is the exact
+    // "operation fails but reports success" shape closed for this route:
+    // a caller viewing their own agent's history could not tell "no
+    // inference events happened" from "the inference query broke".
     mockRunningAgent();
 
     const shellEvent = JSON.stringify({
@@ -503,9 +508,8 @@ describe('GET /agents/:id/events', () => {
       .get(`/agents/${AGENT_UUID}/events?tail=50`)
       .set('Authorization', `Bearer ${userToken}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0].id).toBe('e1');
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(Array.isArray(res.body)).toBe(false);
   });
 
   it('non-admin inference query includes owner filter', async () => {
