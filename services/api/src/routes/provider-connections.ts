@@ -22,7 +22,16 @@ function isAdmin(req: Request): boolean {
   return roles.includes('admin');
 }
 
-// GET /provider-connections — list own connections
+// GET /provider-connections — list own connections, plus platform-wide ones
+//
+// `created_by = $1` alone can never match a platform connection: SQL NULL
+// compared to any bound parameter is never true, never false, always
+// unknown, which a WHERE clause treats as excluded. The POST handler above
+// has computed `is_platform: row.created_by === null` on create since this
+// route existed, on the clear assumption a platform connection would be
+// visible somewhere — but nothing ever read that assumption back. A
+// platform connection could be created and never again appear in this list
+// for any user, admin included, with no error anywhere to say so.
 router.get('/', async (req: Request, res: Response) => {
   const pool = getPool();
   if (!process.env.DATABASE_URL) {
@@ -34,16 +43,25 @@ router.get('/', async (req: Request, res: Response) => {
   const result = await pool.query(
     `SELECT id, name, provider, api_base_url, is_valid,
             last_validated_at, last_validation_error, validation_latency_ms,
-            created_at, updated_at
+            created_by, created_at, updated_at
      FROM provider_connections
-     WHERE created_by = $1
+     WHERE created_by = $1 OR created_by IS NULL
      ORDER BY created_at DESC`,
     [user.sub]
   );
-  res.json(result.rows);
+  const rows = result.rows.map((row: any) => ({
+    ...row,
+    is_platform: row.created_by === null,
+  }));
+  res.json(rows);
 });
 
-// GET /provider-connections/health — aggregate health stats for own connections
+// GET /provider-connections/health — aggregate health stats for own
+// connections, plus platform-wide ones. Same reasoning as GET / above: a
+// platform connection's validation state is part of "is anything broken"
+// just as much as an owned one's, and excluding it from this count would
+// make a genuinely untested platform connection invisible to the stats
+// card that exists specifically to surface an untested connection.
 router.get('/health', async (req: Request, res: Response) => {
   const pool = getPool();
   if (!process.env.DATABASE_URL) {
@@ -61,7 +79,7 @@ router.get('/health', async (req: Request, res: Response) => {
        COUNT(*) FILTER (WHERE is_valid IS NULL)::int AS untested,
        ROUND(AVG(validation_latency_ms) FILTER (WHERE validation_latency_ms IS NOT NULL))::int AS avg_latency_ms
      FROM provider_connections
-     WHERE created_by = $1`,
+     WHERE created_by = $1 OR created_by IS NULL`,
     [user.sub]
   );
 
@@ -74,7 +92,7 @@ router.get('/health', async (req: Request, res: Response) => {
        COUNT(*) FILTER (WHERE is_valid IS NULL)::int AS untested,
        ROUND(AVG(validation_latency_ms) FILTER (WHERE validation_latency_ms IS NOT NULL))::int AS avg_latency_ms
      FROM provider_connections
-     WHERE created_by = $1
+     WHERE created_by = $1 OR created_by IS NULL
      GROUP BY provider
      ORDER BY provider`,
     [user.sub]

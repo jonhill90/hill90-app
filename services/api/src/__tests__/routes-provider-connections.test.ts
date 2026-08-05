@@ -129,9 +129,9 @@ describe('Provider Connections CRUD', () => {
     expect(body).not.toContain('api_key_nonce');
   });
 
-  it('list shows only own connections', async () => {
+  it('list scopes to own connections, bound by user.sub', async () => {
     mockQuery.mockResolvedValueOnce({
-      rows: [{ id: 'uuid-1', name: 'My OpenAI', provider: 'openai' }],
+      rows: [{ id: 'uuid-1', name: 'My OpenAI', provider: 'openai', created_by: 'regular-user' }],
     });
 
     const res = await request(app)
@@ -139,10 +139,40 @@ describe('Provider Connections CRUD', () => {
       .set('Authorization', `Bearer ${userToken}`);
 
     expect(res.status).toBe(200);
-    // Verify query scopes to owner
     const call = mockQuery.mock.calls[0];
     expect(call[0]).toContain('created_by = $1');
     expect(call[1]).toEqual(['regular-user']);
+  });
+
+  // POSITIVE CONTROL for the coupling this fixes: a platform connection
+  // (created_by IS NULL) is a row that `WHERE created_by = $1` alone can
+  // never match — NULL compared to a bound parameter is never true. This is
+  // not a hypothetical: the POST handler above has computed
+  // `is_platform: row.created_by === null` since this route existed,
+  // assuming a platform connection would be visible somewhere. Nothing
+  // ever read that assumption back until this test.
+  it('list includes platform-wide connections (created_by IS NULL) and marks them', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { id: 'uuid-1', name: 'My OpenAI', provider: 'openai', created_by: 'regular-user' },
+        { id: 'uuid-2', name: 'Platform OpenAI', provider: 'openai', created_by: null },
+      ],
+    });
+
+    const res = await request(app)
+      .get('/provider-connections')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    // The query itself must be able to match a NULL owner, or the mocked
+    // row above is not representative of what the real query would return.
+    const call = mockQuery.mock.calls[0];
+    expect(call[0]).toContain('created_by IS NULL');
+
+    const own = res.body.find((c: any) => c.id === 'uuid-1');
+    const platform = res.body.find((c: any) => c.id === 'uuid-2');
+    expect(own.is_platform).toBe(false);
+    expect(platform.is_platform).toBe(true);
   });
 
   it('list includes health columns', async () => {
@@ -400,6 +430,24 @@ describe('Provider Connections Health', () => {
     // Both queries should scope to owner
     expect(mockQuery.mock.calls[0][1]).toEqual(['regular-user']);
     expect(mockQuery.mock.calls[1][1]).toEqual(['regular-user']);
+  });
+
+  // Same coupling as the list endpoint, same reason: an untested platform
+  // connection is exactly the kind of thing this stats card exists to
+  // surface, and `WHERE created_by = $1` alone silently excludes it.
+  it('health stats also count platform-wide connections', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ total: 2, valid: 1, invalid: 0, untested: 1, avg_latency_ms: 200 }],
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get('/provider-connections/health')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[0][0]).toContain('created_by IS NULL');
+    expect(mockQuery.mock.calls[1][0]).toContain('created_by IS NULL');
   });
 
   it('POST /provider-connections/validate-all validates all connections', async () => {
