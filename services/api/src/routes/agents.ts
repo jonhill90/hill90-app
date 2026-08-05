@@ -3247,11 +3247,24 @@ router.post('/:id/webhooks', requireRole('admin'), async (req: Request, res: Res
       return;
     }
 
+    // app#374 tier two: encrypted, not hashed — webhook-dispatch.ts must
+    // recover this in plaintext to HMAC-sign outbound deliveries, unlike
+    // workflows.webhook_token (#341), which is only ever compared. Same
+    // helper/key as env_vars above; a webhook's secret is a single string,
+    // not a heterogeneous blob, so no JSON.stringify is needed here.
+    let secretEncrypted: Buffer | null = null;
+    let secretNonce: Buffer | null = null;
+    if (secret) {
+      const enc = encryptProviderKey(secret, getEnvVarsEncryptionKey());
+      secretEncrypted = enc.encrypted;
+      secretNonce = enc.nonce;
+    }
+
     const { rows } = await getPool().query(
-      `INSERT INTO agent_webhooks (agent_id, url, events, secret, created_by)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO agent_webhooks (agent_id, url, events, secret_encrypted, secret_nonce, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, agent_id, url, events, active, created_by, created_at, updated_at`,
-      [req.params.id, url, eventList, secret || null, user.sub]
+      [req.params.id, url, eventList, secretEncrypted, secretNonce, user.sub]
     );
 
     res.status(201).json(rows[0]);
