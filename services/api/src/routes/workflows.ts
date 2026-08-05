@@ -531,6 +531,13 @@ router.delete('/:id/steps/:stepId', requireRole('user'), async (req: Request, re
 
 // ── Inbound webhook trigger (PUBLIC — no auth, uses token) ──────────
 router.post('/webhook/:token', async (req: Request, res: Response) => {
+  // Hoisted so the outer catch can mark the run it created — same fix and
+  // same reasoning as POST /:id/run above: without this, a failure between
+  // the workflow_runs INSERT and the response left that row at 'running'
+  // forever, indistinguishable from a run still in progress except by age.
+  // This is the public, unauthenticated sibling of that route and shares
+  // the same insert sequence, so it shared the same gap.
+  let runId: string | null = null;
   try {
     const { token } = req.params;
     // Looked up by digest, never by the plaintext value — same reasoning as
@@ -573,6 +580,7 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
       `INSERT INTO workflow_runs (workflow_id, status) VALUES ($1, 'running') RETURNING id`,
       [wf.id]
     );
+    runId = runRows[0].id;
 
     // Create thread
     const { rows: threadRows } = await pool.query(
@@ -629,6 +637,25 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
     res.json({ triggered: true, workflow: wf.name, run_id: runRows[0].id, thread_id: threadId });
   } catch (err: any) {
     console.error('[workflows] Webhook error:', err);
+
+    // Best-effort and separately guarded, same reasoning as POST /:id/run's
+    // catch: the database failing is precisely the case that produces this
+    // catch, so recording the failure must not be able to throw out of it.
+    // `AND status = 'running'` avoids clobbering a run the dispatch .catch
+    // above already marked.
+    if (runId) {
+      try {
+        await getPool().query(
+          `UPDATE workflow_runs SET status = 'error', error = $1, completed_at = NOW(),
+           duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at))::int * 1000
+           WHERE id = $2 AND status = 'running'`,
+          [err?.message || 'Webhook trigger failed', runId]
+        );
+      } catch (markErr) {
+        console.error(`[workflows] Failed to mark run ${runId} as error:`, markErr);
+      }
+    }
+
     res.status(500).json({ error: 'Webhook trigger failed' });
   }
 });
