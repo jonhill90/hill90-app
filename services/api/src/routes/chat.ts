@@ -1599,6 +1599,11 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
     if (!follow) {
       // One-shot: collect events from all running agents, filter, return JSON
       const allEvents: any[] = [];
+      // Same reasoning as agents.ts's identical one-shot merge failure: falling
+      // through to res.json(allEvents) after a non-size read failure would hand
+      // back a 200 array that looks like the thread's complete event history
+      // and silently omits every event from the agent whose read failed.
+      const failedAgents: string[] = [];
 
       for (const agent of runningAgents) {
         try {
@@ -1636,7 +1641,16 @@ router.get('/threads/:id/events', requireRole('user'), async (req: Request, res:
             return;
           }
           console.error(`[chat-events] Failed to read events from ${agent.agent_id}:`, err);
+          failedAgents.push(agent.agent_id);
         }
+      }
+
+      if (failedAgents.length > 0) {
+        res.status(502).json({
+          error: 'Failed to read events from one or more agents',
+          detail: `Could not read events from: ${failedAgents.join(', ')}. Retry.`,
+        });
+        return;
       }
 
       // Sort by timestamp
