@@ -41,7 +41,84 @@ export interface PausableSource {
 export const SSE_DEFAULTS = {
   /** 8 MB queued for one client is not slow, it is gone. Matches the relay cap. */
   hardCapBytes: 8 * 1024 * 1024,
+
+  /**
+   * How long a follow-mode stream's poll or tail may be silently failing before
+   * the client is told. Four sites poll or tail an upstream source on an
+   * interval and, on failure, kept the connection open with nothing but
+   * heartbeats — the client had no way to tell "nothing new happened" from
+   * "the poll has been broken since some point in the past" (app#443).
+   *
+   * 10s: short enough that a client learns well before the 30s heartbeat cycle
+   * would otherwise be the only other signal it has, long enough that one slow
+   * tick — a GC pause, a single dropped connection — does not fire it by
+   * itself. Each call site derives its own consecutive-failure THRESHOLD from
+   * this and its own poll interval via failureThresholdFor(), so a stream that
+   * polls once a second and one that polls once every five both signal inside
+   * the same wall-clock bound rather than after the same failure COUNT.
+   */
+  pollFailureSignalMs: 10_000,
 };
+
+/**
+ * Consecutive polls/ticks that must fail before pollFailureSignalMs's bound is
+ * reached, for a given poll interval. Always at least 1, so a poll slower than
+ * the bound itself still signals on its first failure rather than never.
+ */
+export function failureThresholdFor(pollIntervalMs: number): number {
+  return Math.max(1, Math.ceil(SSE_DEFAULTS.pollFailureSignalMs / pollIntervalMs));
+}
+
+/**
+ * The SAME frame shape createBoundedSseWriter's onOverflow already uses to say
+ * "this stream cannot continue honestly" — `event: error` with a JSON
+ * {error, detail} body. A second convention for the same idea, sent by four
+ * different call sites, would be worse than either convention alone.
+ */
+export function sseErrorFrame(error: string, detail: string): string {
+  return `event: error\ndata: ${JSON.stringify({ error, detail })}\n\n`;
+}
+
+/**
+ * Tracks consecutive poll/tail failures for one follow-mode stream and fires
+ * ONCE when they cross a threshold — not once PER failure, which would repeat
+ * the same frame every tick for as long as the outage lasts. recordSuccess()
+ * resets the counter AND re-arms the signal: a stream that recovers stops
+ * complaining, and if it breaks again later the client is told again rather
+ * than staying silent because it already fired once.
+ *
+ * Deliberately does not end the stream. Unlike the hard-cap overflow this
+ * guards against (a reader that will never catch up), a poll failure is
+ * recoverable — the next tick might succeed — so ending the connection over it
+ * would turn a transient upstream blip into an unnecessary reconnect storm.
+ * The frame is informational: it tells the client its view may be behind,
+ * not that the connection is over.
+ */
+export interface PollFailureSignal {
+  recordFailure(): void;
+  recordSuccess(): void;
+}
+
+export function createPollFailureSignal(
+  threshold: number,
+  onThresholdCrossed: () => void,
+): PollFailureSignal {
+  let consecutiveFailures = 0;
+  let signalled = false;
+  return {
+    recordFailure() {
+      consecutiveFailures += 1;
+      if (!signalled && consecutiveFailures >= threshold) {
+        signalled = true;
+        onThresholdCrossed();
+      }
+    },
+    recordSuccess() {
+      consecutiveFailures = 0;
+      signalled = false;
+    },
+  };
+}
 
 export interface SseWriterOptions {
   hardCapBytes: number;
