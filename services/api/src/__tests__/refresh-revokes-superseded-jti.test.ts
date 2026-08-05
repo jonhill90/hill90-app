@@ -37,6 +37,13 @@ jest.mock('../services/model-router-revoke', () => ({
 const mockGenerate = jest.fn();
 jest.mock('../services/model-router-token', () => ({
   isModelRouterConfigured: () => true,
+  // #459: the handler now VERIFIES this token instead of base64-decoding it.
+  // Mocked here for the same reason generateAgentModelRouterToken already is —
+  // this suite is about revoking a superseded JTI, not about token
+  // authenticity, and it hands the route hand-built fixtures. The real
+  // verifier is exercised in model-router-refresh-token-verification.test.ts.
+  verifyModelRouterToken: (token: string) =>
+    JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()),
   generateAgentModelRouterToken: (...a: unknown[]) => mockGenerate(...a),
 }));
 

@@ -48,6 +48,14 @@ export interface ModelRouterTokenOptions {
  * Generate an Ed25519 JWT for an agent to authenticate with the model-router.
  * AI-115: Now emits WorkloadClaims (principal_type, scopes, agent_slug when V2).
  */
+let cachedPublicKey: crypto.KeyObject | undefined;
+
+/** Derived from the private key — Ed25519 makes this exact, not an approximation. */
+function getPublicKey(): crypto.KeyObject {
+  if (!cachedPublicKey) cachedPublicKey = crypto.createPublicKey(getPrivateKey());
+  return cachedPublicKey;
+}
+
 export async function generateAgentModelRouterToken(
   agentIdOrOpts: string | ModelRouterTokenOptions,
   owner?: string,
@@ -127,6 +135,62 @@ export function getModelRouterEnvVars(tokenResult: ModelRouterTokenResult): stri
 /**
  * Check if model-router integration is configured.
  */
+/**
+ * Verify a model-router JWT this service issued.
+ *
+ * The signing key is Ed25519, so the public half is DERIVED from the private
+ * key already configured here — verification needs no new environment
+ * variable and no key distribution. That is why this can live next to the
+ * signer instead of waiting on config.
+ *
+ * `allowExpired` exists for the refresh flow, which is defined by the token
+ * being at or past its expiry. It disables the `exp` check and NOTHING else:
+ * signature, algorithm, issuer and audience are all still enforced. This
+ * mirrors the knowledge service's `verify_agent_token(..., allow_expired=True)`,
+ * which is the sibling this file's own header says it mirrors.
+ */
+export function verifyModelRouterToken(
+  token: string,
+  opts: { allowExpired?: boolean } = {},
+): Record<string, unknown> {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('malformed JWT: expected three segments');
+  const [headerB64, payloadB64, signatureB64] = parts;
+
+  // The algorithm is checked BEFORE the signature, deliberately. A token
+  // claiming `alg: none` with an empty signature is the canonical JWT forgery,
+  // and it must be refused for being the wrong algorithm rather than reaching
+  // a verify call whose behaviour on an empty signature we would have to
+  // reason about.
+  const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString());
+  if (header.alg !== 'EdDSA') {
+    throw new Error(`unexpected JWT alg: ${String(header.alg)} (expected EdDSA)`);
+  }
+
+  const signed = crypto.verify(
+    null,
+    Buffer.from(`${headerB64}.${payloadB64}`),
+    getPublicKey(),
+    Buffer.from(signatureB64, 'base64url'),
+  );
+  if (!signed) throw new Error('JWT signature does not verify');
+
+  const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
+  if (payload.iss !== 'hill90-api') {
+    throw new Error(`unexpected issuer: ${String(payload.iss)}`);
+  }
+  if (payload.aud !== 'hill90-model-router') {
+    throw new Error(`unexpected audience: ${String(payload.aud)}`);
+  }
+  if (!opts.allowExpired) {
+    const now = Math.floor(Date.now() / 1000);
+    if (typeof payload.exp === 'number' && payload.exp < now) {
+      throw new Error('token has expired');
+    }
+  }
+  return payload;
+}
+
 export function isModelRouterConfigured(): boolean {
   return !!MODEL_ROUTER_SIGNING_PRIVATE_KEY;
 }
