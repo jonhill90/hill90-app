@@ -18,6 +18,7 @@
 import * as http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { attachTerminalProxy } from '../services/terminal-proxy';
+import { expWithGuaranteedRunway } from '../testSupport/expiryRunway';
 
 const mockQuery = jest.fn();
 jest.mock('../db/pool', () => ({
@@ -98,8 +99,27 @@ function connect(): { ws: WebSocket; opened: Promise<void>; closed: Promise<{ co
 
 describe('4002 — the session does not outlive the credential', () => {
   it('closes with 4002 when the token expires, and says so', async () => {
-    // A credential with ~1.2s left. The proxy arms setTimeout(exp - now) at upgrade.
-    verdict = { sub: 'user-1', roles: [], exp: Math.floor(Date.now() / 1000) + 1 };
+    // Math.floor(Date.now()/1000)+1 (the previous formula here) discards the
+    // sub-second remainder before adding one whole second, so real runway
+    // was anywhere in (0, 1] depending on where "now" fell in its current
+    // second — on a loaded runner the credential could already be expired
+    // by the time terminal-proxy.ts's upgrade handler reads Date.now(), which
+    // 401s (correct behaviour for an expired token) before the handshake this
+    // test needs ever completes. That's a race in this fixture, not a
+    // product defect: verified directly against terminal-proxy.ts, which
+    // refuses with 401 whenever `expiresAtMs <= Date.now()` at upgrade time.
+    //
+    // expWithGuaranteedRunway uses Math.ceil instead: runway from the real
+    // clock is always in [2000, 3000) ms, never approaching 0 regardless of
+    // where "now" falls in its second — see expiry-runway-arithmetic.test.ts
+    // for the proof, kept separate from this real-socket test on purpose (a
+    // forced worst-case instant fed in here would itself cut that runway
+    // roughly in half, on the one test that was flaky for lack of margin).
+    verdict = {
+      sub: 'user-1',
+      roles: [],
+      exp: expWithGuaranteedRunway(2, Date.now()),
+    };
 
     const { opened, closed } = connect();
     await opened;                       // the handshake succeeded — the session is live
