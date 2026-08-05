@@ -367,7 +367,12 @@ async def search_shared(
         "results": results,
         "count": len(results),
         "search_type": search_type,
-        "score_type": "ts_rank",
+        # Twin of routes/shared.py's own derivation. Hardcoded "ts_rank"
+        # here regardless of search_type meant a hybrid admin search's
+        # `score` field — actually the blended fts/vector score computed in
+        # hybrid_search_chunks — was reported as a plain ts_rank, which is
+        # not on the same scale and cannot be interpreted as one.
+        "score_type": "hybrid" if search_type == "hybrid" else "ts_rank",
         "quality_summary": quality_summary,
     }
 
