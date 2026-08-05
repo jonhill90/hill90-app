@@ -1,0 +1,21 @@
+{
+  "$comment": "app#380: the contract between services/knowledge's knowledge_graph() node emission (app/services/shared_store.py's GraphNodeType/GRAPH_NODE_TYPES) and services/ui's graph renderer (KnowledgeGraph.tsx's TYPE_COLORS and TYPE_BASE_RADIUS). Neither service owns this file, and neither reaches into the other's source to read it directly -- this is the shared, third thing both are checked against. Add a type here in the SAME PR that adds it on either side; that is the whole mechanism. See docs/decisions/HANDOFF-2026-08-04.md for the incident this closes: #378 and #379 shipped the same night, each correct in isolation, and the renderer silently fell back to a grey dot and a default radius for the type it did not know about.",
+  "types": [
+    {
+      "name": "collection",
+      "description": "A shared-knowledge collection."
+    },
+    {
+      "name": "source",
+      "description": "A source (document, URL, or raw text) within a collection."
+    },
+    {
+      "name": "agent",
+      "description": "An agent identity -- from knowledge_entries and/or shared_retrievals where requester_type='agent'. Both can produce the same node id (agent-{agent_id}) and must merge, not duplicate."
+    },
+    {
+      "name": "user",
+      "description": "A human requester -- shared_retrievals where requester_type='user'. Added in app#379; distinct from 'agent' so the legend can tell human search activity from agent activity apart."
+    }
+  ]
+}
