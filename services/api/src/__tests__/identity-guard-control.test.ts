@@ -82,8 +82,10 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { spawnSync } from 'child_process';
 
 const guard = require('../../jest.identityguard.js');
+const API_ROOT = path.resolve(__dirname, '../..');
 
 function listen(server: net.Server, target: number | string): Promise<void> {
   return new Promise((resolve) => server.listen(target as any, resolve));
@@ -194,4 +196,90 @@ describe('identity guard control (#179)', () => {
     expect(violations[0].kind).toBe('FOREIGN STAMP');
     expect(violations[0].got).toBe('other-worker:9');
   });
+
+  // #350's own ask named both instruments — "capturing whatever the identity
+  // guard AND the auth401 probe wrote" — and the first shipped fix (#352)
+  // only wired up the probe. Before the write added alongside this test, a
+  // real violation's only evidence was the thrown Error's message: visible
+  // in the raw CI job log until GitHub's retention window closes it, never a
+  // durable artifact.
+  //
+  // Arms A/B/C above use __drainViolationsForControl(), which drains BEFORE
+  // afterEach runs — deliberately, so the control's own synthetic violations
+  // don't fail the control test that just proved the detector fires. That
+  // means none of them exercise the write, which only happens for a
+  // violation that survives to actually fail a test. A REAL undrained
+  // violation can't be produced in-process without failing this file, so
+  // this spawns the violation in a genuinely separate jest process (same
+  // pattern as boot-fatal.test.ts) and asserts on its exit code and the
+  // evidence file it leaves behind — proving the write happens on the actual
+  // fail path, not a path adjacent to it.
+  test('a REAL (undrained) violation writes evidence before it fails the test', () => {
+    const evidenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'identity-guard-evidence-'));
+    const evidenceOut = path.join(evidenceDir, 'identityguard.jsonl');
+    const fixtureName = `zz-nested-identity-violation-${process.pid}.test.ts`;
+    const fixturePath = path.join(__dirname, fixtureName);
+
+    const fixtureSource = `
+import http from 'http';
+import net from 'net';
+
+function listen(server: net.Server, target: number): Promise<void> {
+  return new Promise((resolve) => server.listen(target, resolve));
+}
+function get(opts: http.RequestOptions): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(opts, (res) => {
+      res.on('data', () => {});
+      res.on('end', () => { res.socket?.destroy(); resolve(); });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('deliberately fails with an undrained FOREIGN STAMP violation', async () => {
+  const guard = require('../../jest.identityguard.js');
+  guard.__setStampForControl('deliberately-wrong-worker:0');
+  const server = http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); });
+  await listen(server, 0);
+  const port = (server.address() as net.AddressInfo).port;
+  await get({ port, path: '/', method: 'GET' });
+  guard.__setStampForControl(guard.__ID);
+  await new Promise((r) => server.close(r));
+  // Deliberately not drained — this is the point of the fixture.
+});
+`;
+
+    fs.writeFileSync(fixturePath, fixtureSource);
+    try {
+      const result = spawnSync(
+        path.join(API_ROOT, 'node_modules/.bin/jest'),
+        ['--runTestsByPath', fixturePath, '--config', path.join(API_ROOT, 'jest.config.js')],
+        {
+          cwd: API_ROOT,
+          encoding: 'utf8',
+          timeout: 30000,
+          env: { ...process.env, IDENTITY_GUARD_OUT: evidenceOut },
+        },
+      );
+
+      // The violation must still fail the fixture's own test — this test
+      // must not silently make the detector toothless while checking that
+      // it also writes evidence.
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain('RESPONSE IDENTITY VIOLATION');
+
+      const raw = fs.readFileSync(evidenceOut, 'utf8').trim();
+      expect(raw.length).toBeGreaterThan(0);
+      const row = JSON.parse(raw.split('\n')[0]);
+      expect(row.kind).toBe('FOREIGN STAMP');
+      expect(row.got).toBe('deliberately-wrong-worker:0');
+      expect(typeof row.ts).toBe('number');
+      expect(row.test).toContain('deliberately fails with an undrained FOREIGN STAMP violation');
+    } finally {
+      fs.rmSync(fixturePath, { force: true });
+      fs.rmSync(evidenceDir, { recursive: true, force: true });
+    }
+  }, 35000);
 });

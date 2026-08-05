@@ -1,6 +1,10 @@
 # The api suite is flaky, why, and what a green CI run is worth
 
-**Status:** diagnosed, **not fixed**. Recorded 2026-07-30.
+**Status, as this line was last edited (2026-07-30):** diagnosed, **not fixed**. That
+sentence is now stale relative to the tree — read the round eighteen addendum at the end
+of this file for what's actually true as of 2026-08-05, rather than trusting this line.
+Left as originally written, not rewritten to match later events, per this repo's own
+decision-records-preserve rule.
 
 ## The measurement
 
@@ -3456,3 +3460,70 @@ history of breaking twice, and the one modelling the only responder observed in 
 remains unproven, and is handed over rather than shipped green. A control covering two of three
 arms on this guard would be worse than none.
 
+
+## Round eighteen (2026-08-05) — the doc catches up to the tree, then a real batch
+
+The entries above end mid-problem, on 2026-08-03: arm C of `jest.identityguard.js`'s
+control unshippable, the sibling-worker hypothesis "narrowed, not confirmed." Real
+progress happened in git and issue history after that and was never folded back in here.
+This section does both: reconciles the record, then reports a fresh 30-run batch.
+
+**What actually shipped, in order, that this document never recorded:**
+
+- **#179 → #338**: arm C shipped, using a Unix Domain Socket for the in-process raw
+  responder — exempt from `ourPorts` (keyed by TCP port, `undefined` for UDS) without
+  itself destabilising the suite the way a real ephemeral-port listener did. Arms A and C
+  proven clean across two full 117-suite parallel runs.
+- **#339 → #344**: arm B (FOREIGN STAMP) found failing 2/2 under real full-suite load
+  despite passing every hand-built repro. Root cause: `jest.identityguard.js` is a
+  `setupFilesAfterEnv` entry, re-executed fresh per test file, but `http.ServerResponse
+  .prototype` is the same real Node object across every file sharing a worker — a
+  module-scoped `stampValue` meant every file's setup stacked another monkey-patch layer,
+  and the *oldest* layer always won on the wire, silently defeating any later file's
+  control override. Fixed by moving state onto the shared prototype itself, keyed by a
+  plain string (not `Symbol.for()`, whose registry is per-realm and doesn't collide across
+  Jest's per-file realms).
+- **#350**: asked CI to capture whatever the identity guard *and* the auth401 probe wrote,
+  naming explicitly that the guard might not have the probe's already-fixed
+  workspace-relative-path property. **#352 shipped only the probe's half** — the guard had
+  zero file I/O until today.
+- **#431 (this session, 2026-08-05)**: closed that other half. `jest.identityguard.js` now
+  writes one JSONL row per violation that survives to fail a real test (not the control's
+  own synthetic ones — verified both ways), CI's artifact step renamed and its comment
+  expanded to cover both instruments, one new committed test spawning a real separate jest
+  process to prove the write fires on the genuine fail path.
+
+**Then a real batch, with the evidence gap finally closed:** 30 full-suite runs on top of
+#431, `IDENTITY_GUARD_OUT` and `AUTH_401_PROBE=1` both set, every log and every run's
+`identityguard.jsonl` inspected before being overwritten by the next run.
+
+```
+30 full-suite runs          11 failed          36.7%
+identityguard.jsonl violations, all 30 runs, including all 11 failures:  ZERO
+```
+
+**Decisive negative result.** The doc's leading hypothesis since round seventeen —
+sibling-jest-worker cross-talk, demonstrated *capable* but never naturally observed — is
+now ruled out **for this batch's failures**: the guard durably records every stamp
+mismatch or missing stamp, in every worker, and recorded nothing across all 11. Whatever
+failed these 11 runs, it was not a response arriving from something other than this
+worker's own correctly-routed app instance.
+
+**A correlated, plausible, NOT confirmed replacement lead.** `routes-agents.test.ts` (4
+failures) and `role-hierarchy.test.ts` (1) are the *only* two of the eight failing files
+that exercise `POST /agents/:id/start` — the only route that calls the fire-and-forget
+`dispatchWebhooks()` (`src/services/webhook-dispatch.ts:48`, `void dispatchAsync(...)`,
+never awaited by the caller). A hand-built positive-control reproduction of the obvious
+version of this race (test A's leaked call landing during test B's `mockQuery.mockReset()`)
+did **not** reproduce corruption — tracing the real handler shows mock-queue consumption
+is synchronous at call time, not resolution time, which contradicts the simple version of
+the theory. Correlated by file, not yet shown causal.
+
+**Six of eleven failures (55%) remain unexplained** — six different files, no shared route
+or async path found among them. Consistent with, not a departure from, this document's own
+history: not one mechanism, several.
+
+Full writeup, batch data, and the suggested next instrumentation step:
+[issue #432](https://github.com/jonhill90/hill90-app/issues/432). Not fixed by serializing
+or by retries — both remain rejected for the reasons already established earlier in this
+document.
