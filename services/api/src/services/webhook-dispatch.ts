@@ -1,12 +1,32 @@
 import crypto from 'node:crypto';
 import { getPool } from '../db/pool';
+import { decryptProviderKey } from './provider-key-crypto';
 
 export type WebhookEvent = 'start' | 'stop' | 'error';
 
 interface WebhookRow {
   id: string;
   url: string;
-  secret: string | null;
+  secret_encrypted: Buffer | null;
+  secret_nonce: Buffer | null;
+}
+
+// app#374 tier two: this function is the WHOLE REASON agent_webhooks.secret
+// is encrypted rather than hashed — it must recover the plaintext to HMAC-
+// sign outbound deliveries below, unlike workflows.webhook_token (#341),
+// which only ever needs a comparison. Same key as routes/agents.ts's
+// env_vars encryption; each consuming file reads its own copy of
+// PROVIDER_KEY_ENCRYPTION_KEY rather than sharing a cross-file import, same
+// established pattern as #372/#386.
+function getWebhookSecretEncryptionKey(): string {
+  const key = process.env.PROVIDER_KEY_ENCRYPTION_KEY;
+  if (!key) throw new Error('PROVIDER_KEY_ENCRYPTION_KEY not configured');
+  return key;
+}
+
+function decryptWebhookSecret(row: WebhookRow): string | null {
+  if (!row.secret_encrypted || !row.secret_nonce) return null;
+  return decryptProviderKey(row.secret_encrypted, row.secret_nonce, getWebhookSecretEncryptionKey());
 }
 
 /**
@@ -36,7 +56,7 @@ async function dispatchAsync(
 ): Promise<void> {
   try {
     const { rows } = await getPool().query<WebhookRow>(
-      `SELECT id, url, secret FROM agent_webhooks
+      `SELECT id, url, secret_encrypted, secret_nonce FROM agent_webhooks
        WHERE agent_id = $1 AND active = TRUE AND $2 = ANY(events)`,
       [agentUuid, event]
     );
@@ -105,9 +125,10 @@ async function deliverWebhook(hook: WebhookRow, body: string): Promise<void> {
     'User-Agent': 'Hill90-Webhooks/1.0',
   };
 
-  if (hook.secret && !isDiscord) {
+  const secret = decryptWebhookSecret(hook);
+  if (secret && !isDiscord) {
     const signature = crypto
-      .createHmac('sha256', hook.secret)
+      .createHmac('sha256', secret)
       .update(deliveryBody)
       .digest('hex');
     headers['X-Webhook-Signature'] = `sha256=${signature}`;

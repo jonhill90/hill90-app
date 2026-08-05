@@ -28,6 +28,7 @@ import request from 'supertest';
 import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { createApp } from '../app';
+import { decryptProviderKey, encryptProviderKey } from '../services/provider-key-crypto';
 
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -36,6 +37,7 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
 });
 
 const TEST_ISSUER = 'https://auth.hill90.com/realms/hill90';
+const TEST_ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
 
 const mockQuery = jest.fn();
 jest.mock('../db/pool', () => ({
@@ -78,10 +80,12 @@ describe('agent_webhooks.secret never appears in a response', () => {
   beforeEach(() => {
     mockQuery.mockReset();
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+    process.env.PROVIDER_KEY_ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
   });
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
+    delete process.env.PROVIDER_KEY_ENCRYPTION_KEY;
   });
 
   it('GET /agents/:id/webhooks selects columns explicitly and never names secret', async () => {
@@ -133,5 +137,77 @@ describe('agent_webhooks.secret never appears in a response', () => {
   it('CONTROL: projectionOf() would flag an explicit-but-leaky column list', () => {
     const sql = 'SELECT id, url, secret FROM agent_webhooks WHERE agent_id = $1';
     expect(projectionOf(sql).toLowerCase()).toMatch(/\bsecret\b/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// app#374 tier two: encryption at rest. The tests above prove the read path
+// was already withheld (#376); these prove the value is genuinely encrypted
+// before it reaches the INSERT, and decrypts back to the exact original —
+// not just that "some bytes were sent", the same standard #372/#386 used.
+// ---------------------------------------------------------------------------
+describe('agent_webhooks.secret is encrypted at rest (app#374 tier two)', () => {
+  beforeEach(() => {
+    mockQuery.mockReset();
+    process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+    process.env.PROVIDER_KEY_ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+  });
+
+  afterEach(() => {
+    delete process.env.DATABASE_URL;
+    delete process.env.PROVIDER_KEY_ENCRYPTION_KEY;
+  });
+
+  const SECRET_VALUE = 'whsec_a-real-hmac-signing-key-1234567890';
+
+  it('POST encrypts the secret — never reaches the INSERT as plaintext, and decrypts back to the exact original', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'agent-1' }] }) // agent existence check
+      .mockResolvedValueOnce({ rows: [{ ...PUBLIC_WEBHOOK_ROW }] }); // INSERT ... RETURNING
+
+    const res = await request(app)
+      .post('/agents/agent-1/webhooks')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ url: 'https://example.com/hook', secret: SECRET_VALUE });
+
+    expect(res.status).toBe(201);
+
+    const [insertSql, params] = mockQuery.mock.calls[1];
+    expect(insertSql).not.toContain(SECRET_VALUE);
+    for (const p of params) {
+      if (typeof p === 'string') expect(p).not.toContain(SECRET_VALUE);
+    }
+
+    const encrypted: Buffer = params.find((p: unknown) => Buffer.isBuffer(p) && (p as Buffer).length > 12);
+    const nonce: Buffer = params.find((p: unknown) => Buffer.isBuffer(p) && (p as Buffer).length === 12);
+    expect(encrypted).toBeInstanceOf(Buffer);
+    expect(nonce).toBeInstanceOf(Buffer);
+
+    const decrypted = decryptProviderKey(encrypted, nonce, TEST_ENCRYPTION_KEY);
+    expect(decrypted).toBe(SECRET_VALUE);
+  });
+
+  it('POST with no secret writes NULL to both encrypted columns, not an encrypted empty string', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'agent-1' }] })
+      .mockResolvedValueOnce({ rows: [{ ...PUBLIC_WEBHOOK_ROW }] });
+
+    await request(app)
+      .post('/agents/agent-1/webhooks')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ url: 'https://example.com/no-secret-hook' });
+
+    const [, params] = mockQuery.mock.calls[1];
+    const bufferParams = params.filter((p: unknown) => Buffer.isBuffer(p));
+    expect(bufferParams).toHaveLength(0);
+  });
+
+  // POSITIVE CONTROL. Proves the round-trip assertion above can actually
+  // fail, not just that it happens to pass — decrypting with the WRONG key
+  // must not silently produce the right answer.
+  it('CONTROL: decrypting with the wrong key does not reproduce the original secret', () => {
+    const wrongKey = crypto.randomBytes(32).toString('hex');
+    const { encrypted, nonce } = encryptProviderKey(SECRET_VALUE, TEST_ENCRYPTION_KEY);
+    expect(() => decryptProviderKey(encrypted, nonce, wrongKey)).toThrow();
   });
 });
