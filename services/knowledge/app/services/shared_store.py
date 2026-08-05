@@ -982,7 +982,7 @@ async def get_shared_stats(
     }
 
 async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
-    """Nodes, edges and totals for the shared-knowledge graph (#300).
+    """Nodes, edges and totals for the shared-knowledge graph (#300, #377).
 
     MOVED HERE FROM THE API, which queried `shared_collections`,
     `shared_sources` and `knowledge_entries` through its own pool — tables that
@@ -993,6 +993,26 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     is over the same WHERE as the list it describes, and the agent figure is
     COUNT(DISTINCT agent_id) because its list is grouped — a plain COUNT(*)
     there would count entries rather than agents (#215, #188).
+
+    #377 ADDED retrieval-derived requester -> source edges. Measured on the
+    real corpus before this was written, not estimated: the `contains` edges
+    alone are a FOREST — three collections with nothing connecting them, so a
+    force-directed layout has no reason to place them near each other. One
+    real requester's retrievals resolve (via chunk_ids -> shared_chunks ->
+    shared_documents -> shared_sources) to sources in ALL THREE collections —
+    a single hub node of degree 4 that merges the whole graph into one
+    connected component. That is the entire justification for this addition;
+    it is not a decoration.
+
+    Deliberately NOT added, with reasons recorded so they are not re-litigated:
+    chunk-level nodes (the corpus is 1 chunk per source today — a chunk node
+    would duplicate its source's single edge, not add structure), duplicate
+    content_hash edges (zero duplicate groups exist), and source-source
+    co-occurrence within a retrieval's chunk_ids (rejected outright, not
+    deferred — two sources retrieved by the same requester already connect
+    two hops through that requester's node once this ships, so a direct edge
+    encodes the same fact twice, and it is the one candidate with real
+    quadratic-in-result-count blowup risk).
     """
     async with pool.acquire() as conn:
         collections = await conn.fetch(
@@ -1015,12 +1035,34 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
              GROUP BY agent_id ORDER BY agent_id LIMIT $1""",
             limit,
         )
+        # Resolved through chunk_ids, not the collection_id column: collection_id
+        # is nullable and only populated since migration 010, while chunk_ids has
+        # been written by every retrieval since the table was created — resolving
+        # this way means every row contributes, not just the ones written after
+        # the column existed. `CROSS JOIN LATERAL unnest(...)` is required here,
+        # not an implicit comma-join with an explicit JOIN chained onto it — that
+        # shape binds the JOIN to the unnest alone and either fails or silently
+        # joins wrong, rather than to the (retrieval, chunk_id) pair intended.
+        retrieval_edges = await conn.fetch(
+            """SELECT r.requester_id, r.requester_type, s.id AS source_id,
+                      count(*) AS chunk_hits
+                 FROM shared_retrievals r
+                 CROSS JOIN LATERAL unnest(r.chunk_ids) AS cid
+                 JOIN shared_chunks sc ON sc.id = cid
+                 JOIN shared_documents sd ON sd.id = sc.document_id
+                 JOIN shared_sources s ON s.id = sd.source_id
+             GROUP BY r.requester_id, r.requester_type, s.id
+             ORDER BY r.requester_id, s.id LIMIT $1""",
+            limit,
+        )
         totals = await conn.fetchrow(
             """SELECT
                  (SELECT count(*) FROM shared_collections) AS collections,
                  (SELECT count(*) FROM shared_sources WHERE status = 'active') AS sources,
                  (SELECT count(DISTINCT agent_id) FROM knowledge_entries WHERE status = 'active')
-                   AS agents_with_knowledge"""
+                   AS agents_with_knowledge,
+                 (SELECT count(DISTINCT requester_id) FROM shared_retrievals)
+                   AS requesters_with_retrievals"""
         )
 
     nodes: list[dict[str, Any]] = []
@@ -1039,7 +1081,9 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
     # that do not exist, which is worse than a smaller graph: a renderer either
     # drops them silently or lays out around a phantom.
     dangling_edges = 0
+    source_ids = set()
     for s in sources:
+        source_ids.add(str(s["id"]))
         nodes.append({
             "id": f"src-{s['id']}", "type": "source", "label": s["title"],
             "meta": {"source_type": s["source_type"], "chunk_count": int(s["chunk_count"])},
@@ -1049,21 +1093,64 @@ async def knowledge_graph(pool: asyncpg.Pool, limit: int) -> dict[str, Any]:
         else:
             dangling_edges += 1
 
+    # A dict, not a list-append, because a requester can appear in this
+    # service's `agent_entries` (knowledge_entries-derived) AND in the
+    # retrieval-derived rows below under the identical id (`agent-{agent_id}`)
+    # — those must merge into one node, not produce two nodes sharing an id.
+    agent_or_user_nodes: dict[str, dict[str, Any]] = {}
     for a in agent_entries:
-        nodes.append({
-            "id": f"agent-{a['agent_id']}", "type": "agent", "label": a["agent_id"],
+        node_id = f"agent-{a['agent_id']}"
+        agent_or_user_nodes[node_id] = {
+            "id": node_id, "type": "agent", "label": a["agent_id"],
             "meta": {"entry_count": int(a["entry_count"])},
+        }
+
+    # requester_type is 'agent' or 'user' (the column's own CHECK constraint) —
+    # 'agent' reuses the id scheme above so it merges with any knowledge_entries
+    # node for the same agent_id; 'user' is a genuinely new, self-describing
+    # node type so the legend can tell human search activity from agent
+    # activity apart, rather than lumping them under "agent".
+    requesters_shown: set[str] = set()
+    for r in retrieval_edges:
+        requester_id = r["requester_id"]
+        requesters_shown.add(requester_id)
+        node_type = "agent" if r["requester_type"] == "agent" else "user"
+        node_id = f"{node_type}-{requester_id}"
+        # setdefault does not help meta specifically: a requester_type='agent'
+        # row can hit an EXISTING node already inserted by the agent_entries
+        # loop above, whose meta has entry_count but no retrieval_count yet —
+        # so the increment itself must tolerate the key being absent.
+        node = agent_or_user_nodes.setdefault(node_id, {
+            "id": node_id, "type": node_type, "label": requester_id, "meta": {},
         })
+        node["meta"]["retrieval_count"] = node["meta"].get("retrieval_count", 0) + int(r["chunk_hits"])
+
+        if str(r["source_id"]) in source_ids:
+            edges.append({
+                "source": node_id, "target": f"src-{r['source_id']}", "label": "retrieved",
+                "meta": {"retrieval_count": int(r["chunk_hits"])},
+            })
+        else:
+            dangling_edges += 1
+
+    nodes.extend(agent_or_user_nodes.values())
 
     total = {
         "collections": int(totals["collections"]),
         "sources": int(totals["sources"]),
         "agents_with_knowledge": int(totals["agents_with_knowledge"]),
+        "requesters_with_retrievals": int(totals["requesters_with_retrievals"]),
     }
     shown = {
         "collections": len(collections),
         "sources": len(sources),
         "agents_with_knowledge": len(agent_entries),
+        # Distinct requesters actually represented on this page, not the row
+        # count of retrieval_edges — the same #215/#188 discipline as
+        # agents_with_knowledge above: a requester can produce several edge
+        # rows (one per source), and counting rows here would let `shown`
+        # exceed `total` rather than agree with it when the page is complete.
+        "requesters_with_retrievals": len(requesters_shown),
     }
     return {
         "nodes": nodes,
