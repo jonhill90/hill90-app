@@ -2,7 +2,7 @@
 //
 // Every response this worker produces is stamped with the worker's identity. The
 // client side then asserts the stamp on each response matches the app it believes
-// it called. Two failures are caught by one check:
+// it called. Three failures are caught:
 //
 //   stamp MISSING  -> the response came from something that is not this suite at
 //                     all: the foreign daemon of round fifteen (websocket-sharp on
@@ -11,6 +11,9 @@
 //                     app instance, with a different RSA keypair (42 of 59 test
 //                     files mint their own) and a different route table, which
 //                     produces 401 and 404 exactly as the surviving failures do.
+//   WRONG REQUEST  -> the response genuinely came from THIS worker's own app, but
+//                     for a DIFFERENT request. See round twenty below — this is a
+//                     class the first two checks are structurally blind to.
 //
 // WHY THIS IS STRONGER THAN EVERY EARLIER INSTRUMENT IN THIS INVESTIGATION:
 // a status code can always be a legitimate answer, so every check built on one
@@ -19,8 +22,26 @@
 // the byte recorder all lacked that property and all reported clean results that
 // were wrong.
 //
+// ROUND TWENTY — THE STAMP-ONLY VERSION OF THIS GUARD HAD ITS OWN BLIND SPOT,
+// AND IT LOOKED EXACTLY LIKE THE CLASS IT WAS BUILT TO CATCH BEING ABSENT.
+// `state.ID`/`state.stampValue` are WORKER-constants — every response this worker's
+// app writes carries the identical stamp, for ANY request, correct or misattributed.
+// The guard could prove "not a foreign process" and "not a sibling worker" but had
+// no way to prove "the right response for THIS request" — a same-worker cross-
+// request mixup was invisible to it by construction, not by bug. This was found by
+// investigating one wrong-status flake (`GET /agents/:id/logs`, expected 403, got
+// 400) that was proven — by exhaustive code-path elimination — IMPOSSIBLE for the
+// app's own logic to produce, in a run where this guard recorded zero violations.
+// Both could not be true; the guard's silence was the wrong one to trust. See
+// docs/decisions/api-suite-flakiness.md, round twenty, and issue #432.
+//
+// The fix below adds a per-REQUEST nonce (WRONG REQUEST) alongside the existing
+// per-WORKER stamp (NO STAMP / FOREIGN STAMP) — the first two checks are not
+// weakened or replaced, they cover a real, distinct class this one cannot.
+//
 // Test-side only. No production file is touched.
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
@@ -75,7 +96,15 @@ const CARRIER = http.ServerResponse.prototype;
 if (!CARRIER[STATE_KEY]) {
   const id = `${process.pid}:${(process.env.JEST_WORKER_ID || '0')}`;
   Object.defineProperty(CARRIER, STATE_KEY, {
-    value: { ID: id, stampValue: id, violations: [], ourPorts: new Set(), patched: false },
+    value: {
+      ID: id, stampValue: id, violations: [], ourPorts: new Set(), patched: false,
+      // round twenty: per-request correlation, alongside the per-worker stamp
+      // above. reqCounter/inFlight live on the SAME shared carrier as everything
+      // else here, for the identical reason state itself does (#339) — a plain
+      // module-scoped Map would be fresh per test file and could never see a
+      // request tagged by an earlier file sharing this worker.
+      reqCounter: 0, inFlight: new Map(),
+    },
     enumerable: false,
     configurable: false,
   });
@@ -83,6 +112,8 @@ if (!CARRIER[STATE_KEY]) {
 const state = CARRIER[STATE_KEY];
 const { ID } = state;
 const HEADER = 'x-test-app-id';
+const REQ_HEADER = 'x-test-req-nonce';
+const REQ_ECHO_HEADER = 'x-test-req-echo';
 
 // PORTS THIS PROCESS LISTENS ON — see state.ourPorts above for why this is now
 // shared rather than one Set per file.
@@ -116,16 +147,73 @@ if (!state.patched) {
   };
 
   // --- server side: stamp every response this worker writes -------------------
+  // Also echoes back whatever REQ_HEADER nonce the incoming request carried —
+  // `this.req` is the associated IncomingMessage, a stable Node http API. A
+  // request that never sent a nonce (real app traffic, or an earlier version of
+  // this file's own control tests) simply gets no echo; that's not a violation.
+  const stampAndEcho = function (res) {
+    try {
+      if (res.headersSent) return;
+      res.setHeader(HEADER, state.stampValue);
+      // __forceWrongEchoForControl exists only so the control test can force a
+      // genuine same-worker mismatch deterministically — normal operation always
+      // echoes exactly what was received, same reasoning as __setStampForControl.
+      if (state.forceEchoValue !== undefined) {
+        res.setHeader(REQ_ECHO_HEADER, state.forceEchoValue);
+      } else if (res.req && res.req.headers && res.req.headers[REQ_HEADER]) {
+        res.setHeader(REQ_ECHO_HEADER, res.req.headers[REQ_HEADER]);
+      }
+    } catch (e) {}
+  };
   const origWriteHead = http.ServerResponse.prototype.writeHead;
   http.ServerResponse.prototype.writeHead = function (...a) {
-    try { if (!this.headersSent) this.setHeader(HEADER, state.stampValue); } catch (e) {}
+    stampAndEcho(this);
     return origWriteHead.apply(this, a);
   };
   const origEnd = http.ServerResponse.prototype.end;
   http.ServerResponse.prototype.end = function (...a) {
-    try { if (!this.headersSent) this.setHeader(HEADER, state.stampValue); } catch (e) {}
+    stampAndEcho(this);
     return origEnd.apply(this, a);
   };
+
+  // --- client side: tag every outgoing request with a unique nonce ------------
+  // Uses http.request/https.request rather than the raw-byte connect() sniffer
+  // below on purpose: the worker stamp check needs to see bytes that might not
+  // even be valid HTTP (a foreign daemon, round fifteen). This check only cares
+  // about well-formed responses from OUR OWN Express handlers, so Node's own
+  // parsed `res.headers` (available on the 'response' event) is simpler and
+  // exactly as reliable as the thing it's checking.
+  const patchRequest = (mod) => {
+    const origRequest = mod.request;
+    mod.request = function (...a) {
+      const req = origRequest.apply(this, a);
+      try {
+        const nonce = `n${process.pid}.${process.env.JEST_WORKER_ID || '0'}.${++state.reqCounter}`;
+        req.setHeader(REQ_HEADER, nonce);
+        state.inFlight.set(nonce, { method: req.method, path: req.path });
+        req.on('response', (res) => {
+          const stamp = res.headers[HEADER];
+          state.inFlight.delete(nonce);
+          // Only meaningful when the worker stamp says this response IS ours —
+          // a foreign/sibling-worker response is already NO STAMP/FOREIGN STAMP
+          // above; double-flagging it here would just be noise on a known class.
+          if (stamp !== state.ID) return;
+          const echoed = res.headers[REQ_ECHO_HEADER];
+          if (echoed === nonce) return;
+          const owner = echoed ? state.inFlight.get(echoed) : undefined;
+          state.violations.push({
+            kind: 'WRONG REQUEST',
+            sentNonce: nonce, sentMethod: req.method, sentPath: req.path,
+            echoedNonce: echoed, ownerMethod: owner && owner.method, ownerPath: owner && owner.path,
+            status: res.statusCode,
+          });
+        });
+      } catch (e) {}
+      return req;
+    };
+  };
+  patchRequest(http);
+  patchRequest(https);
 
   // --- client side: every response must carry OUR stamp ------------------------
   const origConnect = net.Socket.prototype.connect;
@@ -165,9 +253,16 @@ afterEach(() => {
   // evidence exists for, not the synthetic ones every CI run generates on
   // purpose.
   v.forEach(recordViolation);
-  const lines = v.map((x) => x.kind === 'NO STAMP'
-    ? `  NO STAMP       ${x.statusLine}  from 127.0.0.1:${x.port}\n${x.head.split('\r\n').map((l) => '      ' + l).join('\n')}`
-    : `  FOREIGN STAMP  ${x.statusLine}  from 127.0.0.1:${x.port}\n      produced by ${x.got}, this worker is ${x.expected}`);
+  const lines = v.map((x) => {
+    if (x.kind === 'NO STAMP') {
+      return `  NO STAMP       ${x.statusLine}  from 127.0.0.1:${x.port}\n${x.head.split('\r\n').map((l) => '      ' + l).join('\n')}`;
+    }
+    if (x.kind === 'FOREIGN STAMP') {
+      return `  FOREIGN STAMP  ${x.statusLine}  from 127.0.0.1:${x.port}\n      produced by ${x.got}, this worker is ${x.expected}`;
+    }
+    return `  WRONG REQUEST  status ${x.status}, sent ${x.sentMethod} ${x.sentPath} (nonce ${x.sentNonce})\n` +
+      `      response carried nonce ${x.echoedNonce || '(none)'}${x.ownerPath ? `, which belongs to ${x.ownerMethod} ${x.ownerPath}` : ''}`;
+  });
   throw new Error(
     'RESPONSE IDENTITY VIOLATION — this test received a response it did not cause.\n' +
     lines.join('\n') + '\n\n' +
@@ -176,7 +271,11 @@ afterEach(() => {
     '                Logitech Options (LogiPluginService), serving websocket-sharp,\n' +
     '                which replies 501 to any non-WebSocket request.\n' +
     'FOREIGN STAMP = a SIBLING JEST WORKER answered. Its app has a different RSA\n' +
-    '                keypair and route table, so this surfaces as a spurious 401 or 404.\n\n' +
+    '                keypair and route table, so this surfaces as a spurious 401 or 404.\n' +
+    'WRONG REQUEST = THIS worker\'s own app answered correctly, but for a DIFFERENT\n' +
+    '                request — a same-worker response mixup. See round twenty in\n' +
+    '                docs/decisions/api-suite-flakiness.md for why NO STAMP and\n' +
+    '                FOREIGN STAMP cannot see this class.\n\n' +
     'Find the listener with:  lsof -nP -iTCP -sTCP:LISTEN | grep <port>\n' +
     'Not retried or skipped on purpose — see docs/decisions/api-suite-flakiness.md.',
   );
@@ -191,6 +290,8 @@ afterEach(() => {
 // afterEach throw and fail the control that just proved it works.
 module.exports = {
   __setStampForControl: (v) => { state.stampValue = v; },
+  __forceWrongEchoForControl: (v) => { state.forceEchoValue = v; },
+  __clearForceWrongEchoForControl: () => { delete state.forceEchoValue; },
   __drainViolationsForControl: () => state.violations.splice(0, state.violations.length),
   __ID: ID,
 };

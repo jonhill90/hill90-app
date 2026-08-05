@@ -197,6 +197,43 @@ describe('identity guard control (#179)', () => {
     expect(violations[0].got).toBe('other-worker:9');
   });
 
+  // ARM D (WRONG REQUEST) — round twenty (issue #432). Arms A/B/C prove this
+  // worker's app is distinguishable from a foreign process or a sibling worker;
+  // none of them can prove a response belongs to the REQUEST that supposedly
+  // caused it, because the stamp they check is a WORKER constant, identical on
+  // every response this worker's app ever writes. That gap was found investigating
+  // a real wrong-status flake that was proven, by exhaustive code-path reading,
+  // IMPOSSIBLE for the app's own logic to produce — in a run where this guard
+  // recorded zero violations. This test forces the specific thing arms A-C cannot
+  // see: a response correctly stamped as OURS, but carrying a per-request echo
+  // that does not match what was actually sent.
+  test('arm D — WRONG REQUEST: a correctly-stamped response for a DIFFERENT request is a violation', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end('ok');
+    });
+    await listen(server, 0);
+    const port = (server.address() as net.AddressInfo).port;
+
+    guard.__forceWrongEchoForControl('not-the-real-nonce');
+    let header: string | undefined;
+    try {
+      header = await get({ port, path: '/', method: 'GET' });
+    } finally {
+      guard.__clearForceWrongEchoForControl();
+    }
+    await close(server);
+
+    // The worker stamp is still correct — this arm is specifically about a
+    // RIGHT worker, WRONG request, not a foreign or sibling responder.
+    expect(header).toBe(guard.__ID);
+
+    const violations = guard.__drainViolationsForControl();
+    expect(violations).toHaveLength(1);
+    expect(violations[0].kind).toBe('WRONG REQUEST');
+    expect(violations[0].echoedNonce).toBe('not-the-real-nonce');
+  });
+
   // #350's own ask named both instruments — "capturing whatever the identity
   // guard AND the auth401 probe wrote" — and the first shipped fix (#352)
   // only wired up the probe. Before the write added alongside this test, a
