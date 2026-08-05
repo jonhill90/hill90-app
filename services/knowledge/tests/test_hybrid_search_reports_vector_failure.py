@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncpg
 import pytest
 
 from app.services import shared_store
@@ -31,19 +32,24 @@ from app.services import shared_store
 class _Pool:
     """fetch() returns FTS rows for the keyword-search SQL and, for the
     vector-search SQL (identified by the pgvector `<=>` operator, which only
-    appears in vector_search_chunks's query), does one of: raise, return a
-    real match, or return genuinely zero rows — same fake-pool shape used
-    elsewhere in this suite (see test_list_sources_bounded.py).
+    appears in vector_search_chunks's query), does one of: raise a generic
+    error, raise UndefinedColumnError specifically, return a real match, or
+    return genuinely zero rows — same fake-pool shape used elsewhere in this
+    suite (see test_list_sources_bounded.py).
     """
 
     def __init__(self, *, vector_mode: str):
-        assert vector_mode in ("raises", "matches", "empty")
+        assert vector_mode in ("raises", "undefined_column", "matches", "empty")
         self._vector_mode = vector_mode
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         if "<=>" in sql:
             if self._vector_mode == "raises":
                 raise RuntimeError("simulated pgvector connection failure")
+            if self._vector_mode == "undefined_column":
+                raise asyncpg.exceptions.UndefinedColumnError(
+                    "column sch.embedding does not exist"
+                )
             if self._vector_mode == "empty":
                 return []
             return [
@@ -80,6 +86,28 @@ async def test_vector_search_failure_is_reported_not_disguised_as_hybrid():
 
     # The gap: nothing before this fix could tell a caller the vector arm
     # died rather than genuinely matching zero chunks.
+    assert outcome.vector_search_ok is False
+
+
+@pytest.mark.asyncio
+async def test_missing_embedding_column_is_reported_the_same_way_not_specially_hidden():
+    # Review on #407: vector_search_chunks special-cased UndefinedColumnError
+    # (a database that predates the embedding column) and returned []
+    # without raising — so hybrid_search_chunks never saw a failure at all,
+    # took the "ran, matched zero rows" branch, and reported
+    # vector_search_ok=True. But a missing column means the vector arm
+    # STRUCTURALLY COULD NOT run — that's not "no data yet", it's the same
+    # "search happened where it couldn't have" lie this file exists to
+    # remove, one layer down. UndefinedColumnError must propagate like any
+    # other failure and land in the same except Exception branch above.
+    pool = _Pool(vector_mode="undefined_column")
+
+    outcome = await shared_store.hybrid_search_chunks(
+        pool, "query", query_embedding=[0.1, 0.2, 0.3],
+    )
+
+    assert len(outcome.results) == 1
+    assert outcome.results[0]["chunk_id"] == "c-fts-1"
     assert outcome.vector_search_ok is False
 
 

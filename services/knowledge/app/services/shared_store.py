@@ -605,48 +605,48 @@ async def vector_search_chunks(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    try:
-        rows = await pool.fetch(
-            f"""SELECT
-                    sch.id AS chunk_id,
-                    sch.content,
-                    sch.chunk_index,
-                    sch.token_estimate,
-                    1 - (sch.embedding <=> $1::vector) AS score,
-                    sd.id AS document_id,
-                    sd.title AS document_title,
-                    ss.id AS source_id,
-                    ss.title AS source_title,
-                    ss.source_url,
-                    sc.id AS collection_id,
-                    sc.name AS collection_name
-                FROM shared_chunks sch
-                JOIN shared_documents sd ON sch.document_id = sd.id
-                JOIN shared_sources ss ON sd.source_id = ss.id
-                JOIN shared_collections sc ON ss.collection_id = sc.id
-                WHERE {where}
-                  AND ss.status = 'active'
-                ORDER BY sch.embedding <=> $1::vector
-                LIMIT ${idx}""",
-            *params,
-        )
-        return [_serialize(dict(r)) for r in rows]
-    except asyncpg.exceptions.UndefinedColumnError:
-        # The one genuinely-expected failure: a database that predates the
-        # embedding column. Real "no data yet", not a broken query.
-        return []
+    rows = await pool.fetch(
+        f"""SELECT
+                sch.id AS chunk_id,
+                sch.content,
+                sch.chunk_index,
+                sch.token_estimate,
+                1 - (sch.embedding <=> $1::vector) AS score,
+                sd.id AS document_id,
+                sd.title AS document_title,
+                ss.id AS source_id,
+                ss.title AS source_title,
+                ss.source_url,
+                sc.id AS collection_id,
+                sc.name AS collection_name
+            FROM shared_chunks sch
+            JOIN shared_documents sd ON sch.document_id = sd.id
+            JOIN shared_sources ss ON sd.source_id = ss.id
+            JOIN shared_collections sc ON ss.collection_id = sc.id
+            WHERE {where}
+              AND ss.status = 'active'
+            ORDER BY sch.embedding <=> $1::vector
+            LIMIT ${idx}""",
+        *params,
+    )
+    return [_serialize(dict(r)) for r in rows]
 
 
 @dataclass
 class HybridSearchOutcome:
     """`vector_search_ok` distinguishes "the vector arm ran and matched
-    nothing" from "the vector arm never ran, or died" — vector_search_chunks
-    itself deliberately swallows its own exceptions and returns [] either
-    way (a DB hiccup should not 500 a search FTS could still answer), which
-    means this is the only place that distinction survives. Callers use it
-    to report an honest search_type instead of one inferred from "was an
-    embedding generated", which stays true even when the vector query
-    itself failed after a real embedding was produced.
+    nothing" from "the vector arm never ran, or died". vector_search_chunks
+    itself raises on any failure now — it does not swallow exceptions or
+    decide gracefully-vs-not on its own. hybrid_search_chunks is what catches
+    that and decides: it is the one place with enough context to tell "ran,
+    matched zero rows" (vector_search_ok=True) apart from "the query itself
+    broke" (vector_search_ok=False), and it is the only place this
+    distinction survives — not because vector_search_chunks hides it, but
+    because vector_search_chunks's own contract is "raise or return real
+    rows", nothing softer. Callers use vector_search_ok to report an honest
+    search_type instead of one inferred from "was an embedding generated",
+    which stays true even when the vector query itself failed after a real
+    embedding was produced.
     """
 
     results: list[dict[str, Any]]
