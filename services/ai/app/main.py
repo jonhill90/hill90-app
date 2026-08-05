@@ -663,19 +663,30 @@ async def chat_completions(request: Request, claims: AgentClaims = Depends(requi
         )
     except Exception as e:
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        async with get_db_conn() as conn:
-            await log_usage(
-                conn=conn,
-                agent_id=claims.sub,
-                model_name=resolved_model,
-                request_type="chat.completion",
-                status="error",
-                latency_ms=elapsed_ms,
-                delegation_id=delegation_id,
-                owner=owner,
-                requested_model=policy_result.requested_model,
-                provider_model_id=policy_result.provider_model_id,
-            )
+        # This write exists ONLY because the proxy call above already failed.
+        # Unguarded, a metering failure here (the same class of DB blip the
+        # proxy call itself may have hit) would replace the deliberate 502
+        # below with an unrelated crash — losing the "LiteLLM proxy error"
+        # diagnostic entirely. usage.py's own docstring states the invariant
+        # this call must honour: "Every caller wraps this in a handler that
+        # logs and continues." The success path below already does; this one
+        # didn't.
+        try:
+            async with get_db_conn() as conn:
+                await log_usage(
+                    conn=conn,
+                    agent_id=claims.sub,
+                    model_name=resolved_model,
+                    request_type="chat.completion",
+                    status="error",
+                    latency_ms=elapsed_ms,
+                    delegation_id=delegation_id,
+                    owner=owner,
+                    requested_model=policy_result.requested_model,
+                    provider_model_id=policy_result.provider_model_id,
+                )
+        except Exception as usage_exc:
+            logger.warning("usage_log_failed", error=str(usage_exc))
         logger.error("proxy_error", agent_id=claims.sub, model=resolved_model, error=str(e))
         raise HTTPException(status_code=502, detail="LiteLLM proxy error")
     finally:
@@ -856,19 +867,26 @@ async def embeddings(request: Request, claims: AgentClaims = Depends(require_age
         )
     except Exception as e:
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        async with get_db_conn() as conn:
-            await log_usage(
-                conn=conn,
-                agent_id=claims.sub,
-                model_name=resolved_model,
-                request_type="embedding",
-                status="error",
-                latency_ms=elapsed_ms,
-                delegation_id=delegation_id,
-                owner=owner,
-                requested_model=policy_result.requested_model,
-                provider_model_id=policy_result.provider_model_id,
-            )
+        # Same reasoning as chat_completions' identical error path: this
+        # write only runs because the proxy call already failed, so a
+        # second, unguarded DB failure here must not replace the deliberate
+        # 502 below.
+        try:
+            async with get_db_conn() as conn:
+                await log_usage(
+                    conn=conn,
+                    agent_id=claims.sub,
+                    model_name=resolved_model,
+                    request_type="embedding",
+                    status="error",
+                    latency_ms=elapsed_ms,
+                    delegation_id=delegation_id,
+                    owner=owner,
+                    requested_model=policy_result.requested_model,
+                    provider_model_id=policy_result.provider_model_id,
+                )
+        except Exception as usage_exc:
+            logger.warning("usage_log_failed", error=str(usage_exc))
         logger.error("proxy_error", agent_id=claims.sub, model=resolved_model, error=str(e))
         raise HTTPException(status_code=502, detail="LiteLLM proxy error")
     finally:
