@@ -283,6 +283,28 @@ jobs:
             exit 1
           }
 
+  # services/cli — the TypeScript agent-chat terminal, a different package
+  # from services/knowledge/cli (Go) above. Had no test at all until the
+  # silent-success sweep that found it: streamResponse() returned an empty
+  # generator on any non-2xx status instead of throwing, so a chat session
+  # with an expired token, a deleted thread, or a downstream 500 printed
+  # "agent> " followed by a blank line — indistinguishable from the agent
+  # legitimately saying nothing. Same class this job's Go sibling above
+  # exists for: a test nobody runs is a test that cannot fail.
+  cli-node:
+    name: services/cli (node)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm test
+
   sql-identifiers:
     name: sql identifiers (api)
     runs-on: ubuntu-latest

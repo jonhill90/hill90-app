@@ -62,7 +62,11 @@ export class Hill90Client {
       headers: { 'Authorization': `Bearer ${this.token}` },
     });
 
-    if (!res.ok || !res.body) return;
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`stream ${threadId}: ${res.status} ${text}`);
+    }
+    if (!res.body) return;
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
