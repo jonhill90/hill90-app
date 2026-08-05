@@ -240,6 +240,9 @@ export default function ConnectionsClient({ session }: { session: Session }) {
       if (res.ok) {
         await fetchConnections()
         await fetchHealth()
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to validate connections')
       }
     } catch {
       alert('Failed to validate connections')
