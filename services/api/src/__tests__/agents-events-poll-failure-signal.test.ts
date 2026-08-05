@@ -138,19 +138,38 @@ describe('agents.ts /:id/events inference poll failure signal', () => {
 
   // POSITIVE CONTROL, direction one: sustained failure. Default cadence is
   // 3000ms, so failureThresholdFor(3000) = ceil(10000/3000) = 4.
+  //
+  // WAIT ON THE CONDITION, NOT A FIXED DELAY (app#432 round — local batches
+  // showed a bare `await new Promise(r => setImmediate(r))` here failing
+  // 5/20 full-suite runs under real parallel load, 0/20 once this switched
+  // to polling; h#725's lesson applies just as much here — a longer FIXED
+  // wait only makes the failure less likely, and the margin that's enough
+  // on one machine is wrong on a smaller CI runner). `pollTick.fn()` is
+  // awaited directly, so every in-process effect of a tick (the mocked
+  // `getRecentInference` call, and either `sse.write()` or `recordFailure()`
+  // — see createPollFailureSignal in services/sse-writer.ts) is already
+  // complete before it returns. Below threshold, recordFailure() does not
+  // write anything at all, so `errorFrames()` is correct immediately — no
+  // wait of any kind is needed or waited on. Only the FINAL, threshold-
+  // crossing tick writes a real SSE frame, and that write still has to
+  // cross a real socket (app.listen() + http.get) before `body` reflects
+  // it — THAT is the one genuinely async gap, and it's the one thing this
+  // test polls for.
   it('a poll that keeps failing emits the error frame within the stated bound (4 consecutive 3s failures)', async () => {
     const { pollTick } = await connect();
 
     for (let i = 0; i < 3; i++) {
       mockQuery.mockRejectedValueOnce(new Error('db down'));
       await pollTick.fn();
-      await new Promise((r) => setImmediate(r));
     }
-    expect(errorFrames()).toHaveLength(0); // 3 failures, below threshold 4
+    // 3 failures, below threshold 4 — recordFailure() alone writes nothing,
+    // so there is nothing async to wait on here; the state is settled the
+    // moment pollTick.fn() returns.
+    expect(errorFrames()).toHaveLength(0);
 
     mockQuery.mockRejectedValueOnce(new Error('db down'));
     await pollTick.fn();
-    await new Promise((r) => setImmediate(r));
+    await waitUntil(() => errorFrames().length === 1, 'the error frame to arrive over the real SSE socket');
 
     const frames = errorFrames();
     expect(frames).toHaveLength(1);
@@ -158,16 +177,18 @@ describe('agents.ts /:id/events inference poll failure signal', () => {
   });
 
   // POSITIVE CONTROL, direction two: one transient blip, then recovery.
+  // Same reasoning as above: neither tick here crosses the failure
+  // threshold or returns rows, so createPollFailureSignal never calls
+  // sse.write() — nothing is written, so there is nothing to wait for and
+  // the assertion is correct the instant pollTick.fn() resolves.
   it('one failed poll followed by a successful one emits nothing', async () => {
     const { pollTick } = await connect();
 
     mockQuery.mockRejectedValueOnce(new Error('db down'));
     await pollTick.fn();
-    await new Promise((r) => setImmediate(r));
 
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await pollTick.fn();
-    await new Promise((r) => setImmediate(r));
 
     expect(errorFrames()).toHaveLength(0);
   });
@@ -175,15 +196,20 @@ describe('agents.ts /:id/events inference poll failure signal', () => {
   it('does not end the stream — inconsistent-looking with the one-shot 502, but deliberate: recoverable vs not', async () => {
     const { pollTick } = await connect();
 
+    // Same reasoning as the sustained-failure test above: only the 4th,
+    // threshold-crossing tick writes anything, so nothing is awaited inside
+    // the loop — only after it, once a real write is actually expected.
     for (let i = 0; i < 4; i++) {
       mockQuery.mockRejectedValueOnce(new Error('db down'));
       await pollTick.fn();
-      await new Promise((r) => setImmediate(r));
     }
+    await waitUntil(() => errorFrames().length === 1, 'the error frame to arrive over the real SSE socket');
 
     expect(errorFrames()).toHaveLength(1);
 
     // Still open: a subsequent successful poll still delivers data normally.
+    // This write is a data row, not an error frame — waited on by its own
+    // observable content rather than errorFrames()'s count.
     mockQuery.mockResolvedValueOnce({
       rows: [{
         id: 'row-1', agent_id: 'test-agent', model_name: 'gpt-4o-mini',
@@ -193,7 +219,7 @@ describe('agents.ts /:id/events inference poll failure signal', () => {
       }],
     });
     await pollTick.fn();
-    await new Promise((r) => setImmediate(r));
+    await waitUntil(() => body.includes('"id":"inference-row-1"'), 'the recovered data row to arrive over the real SSE socket');
 
     expect(body).toContain('"id":"inference-row-1"');
   });

@@ -3618,3 +3618,177 @@ what mechanism the 400 actually arrived. The guard now watches for exactly this 
 forward, permanently, in every run.
 
 Full writeup and the contradiction-resolution evidence: issue #432.
+
+## Round twenty-one (2026-08-05, same day) — a correction to the shape classification, the guard's first real measurement period, and one mechanism found, fixed, and verified
+
+**Lead with the correction, because it changes how every number above should be read.**
+Round nineteen's shape classification sorted 54 collected failures by pattern-matching
+literal text — `"Exceeded timeout of"` for timeout, `"socket hang up"` for
+crash-transport — and reported 33% timing-shaped, 67% branch-shaped (wrong-status plus
+two crash-exceptions). That classification is now known to be imperfect at the boundary
+it draws. This round root-caused a genuine timing defect —
+`agents-events-poll-failure-signal.test.ts` racing a real SSE socket against an
+insufficient wait — and its failure mode is a plain `toHaveLength` assertion mismatch,
+not either literal string. A failure caused by timing does not have to *look* like a
+timeout; it can just as easily present as "the value isn't there yet," which reads
+indistinguishably from a wrong-status defect to a text-pattern classifier. This
+specific mechanism, in this specific file, would have been counted in the 61-67%
+branch-shaped bucket, not the 33% timing bucket, in every prior round's count.
+
+**Stated plainly: the 33% timing / 67% branch-shaped split from round nineteen is
+neither confirmed nor refuted by this round's work.** It was never re-measured here.
+What this round shows is that the split's boundary is porous in at least one direction
+— some real fraction of what was counted as branch-shaped may actually be timing-caused,
+manifesting as a wrong value rather than a timeout. That's a correction to how the
+number should be read, stated because these figures have been relayed upward as
+measured facts; it is not a new measurement of the true ratio, and nobody should quote
+"33%" as more precise than it is until the classification itself is redone with this in
+mind.
+
+### The guard's first real measurement period: zero, stated with the count behind it
+
+Per the ask that opened this round: has the WRONG REQUEST check (round twenty, #434)
+caught anything since it shipped (merged 2026-08-05 12:00:05 -0400)? **No** — measured
+directly, not inferred. Every one of the 30 completed `services/api (jest)` CI job runs
+since the merge, across pushes to `main` and PR branches through the latest run this
+session, shows `conclusion: success`. Since a guard violation fails the job by
+construction, a clean job conclusion is decisive: the guard would have failed the run.
+Confirmed further by downloading and inspecting 4 of those runs' `api-flake-evidence`
+artifacts directly — `identityguard.jsonl` is absent from all 4 (it writes only on a
+real violation, so absence means zero, not "didn't execute"). This session's own 80
+fresh local full-suite runs (three 20-run batches, below) add zero further violations.
+**A single captured instance would have settled more than the rest of this round put
+together; there isn't one yet.** The guard stays armed on every future run — this is a
+negative result with its sample size stated, not a claim the underlying anomaly doesn't
+exist.
+
+### The timing slice, taken on directly for the first time
+
+Prior rounds classified the timing-shaped 33% but never chased an individual instance of
+it — the wrong-status majority absorbed every prior round's attention. This round did,
+per the explicit instruction not to reach for more sampling but to work one popuation
+directly.
+
+**Structural hypothesis going in, stated with its own falsifier.** 834 `supertest`
+calls plus 14 test files with a real `app.listen()`/`createServer()` (needed for
+WebSocket upgrade or long-lived SSE, which supertest's implicit ephemeral-listen can't
+serve) under this machine's 10-way local parallelism (`os.cpus().length - 1`; CI's
+`ubuntu-latest` runners have materially fewer cores and would default to fewer jest
+workers) is a plausible generic contention story. **What would falsify it:** if
+generic, failures should scatter roughly evenly across the real-listener files,
+weighted by each file's socket volume — not concentrate in one.
+
+**That's not what happened.** A 20-run full-suite batch (`--maxWorkers=10`, local
+default) failed 11/20 (55%). `agents-events-poll-failure-signal.test.ts` alone
+accounted for 14 of the batch's roughly 30 individual test-failure instances — present
+in 5/20 runs overall (25%) and 5/11 failing runs (45%) — while every other failing test
+in the batch appeared at most twice. **The generic contention theory is falsified as
+stated**: it does not predict one file dominating this hard while thirteen other
+real-listener files barely register.
+
+**The mechanism, found by reading the file's own docstring against its code — the same
+method as always: read the claim, then check it.** The file deliberately mocks
+`global.setInterval` to capture the tick function rather than waiting on real wall-clock
+time (documented reason: `failureThresholdFor(3000)` is 4, and a real-timer version
+would need ~12s per direction). But the SSE frame it emits still crosses a real socket
+— `app.listen()` + `http.get`, the same technique `routes-agents-events.test.ts` uses,
+because an open SSE stream never completes for supertest's `request()`. The only guard
+between writing that frame and asserting on data received through it was a bare
+`await new Promise(r => setImmediate(r))` — one event-loop tick. Reading
+`services/sse-writer.ts`'s `createPollFailureSignal` confirmed the asymmetry: below
+threshold, `recordFailure()` writes nothing at all; only the threshold-crossing tick (or
+a tick that returns real rows) calls `sse.write()`. So most of the file's waits were
+guarding a socket delivery that, most of the time, hadn't happened in one tick — the
+test's own margin, not the app, not generic contention.
+
+**Diagnostic experiment, not shipped, confirming the mechanism before touching the real
+fix.** Patched all six waits in a scratch copy to a real `setTimeout(r, 15)` (reverted
+immediately after), reran 20 more full-suite runs at the same worker count: 0/20 runs
+failed this file (vs. 5/20 baseline), and the two batches' failure sets did not overlap
+at all — the patched batch's 9 failures were spread one-or-two-deep across unrelated
+files, consistent with the general background population this investigation has
+already characterized. Fisher's exact on the 5/20 vs. 0/20 split: **p ≈ 0.047**. This
+confirmed the mechanism. It was never proposed as the fix — see below.
+
+### The fix: wait on the condition, not a fixed delay — and why the fixed delay was rejected even though it "worked"
+
+**A longer fixed wait was rejected on principle, not just on style, per the h#725
+lesson already learned once in the sibling Hill90 repo: a fixed delay makes a race less
+likely, not impossible, and the margin that happens to be enough on an 11-core machine
+is not the margin CI's smaller runner needs.** The 15ms figure above was a diagnostic
+to confirm the mechanism, never a candidate to ship.
+
+**What the test is actually waiting for, made explicit rather than assumed.** Because
+`pollTick.fn()` is awaited directly (the test captured and calls the real interval
+callback itself, not a real timer), every IN-PROCESS effect of a tick — the mocked
+`getRecentInference` call, and the call into `sse.write()` if any — is already complete
+the moment `pollTick.fn()` returns. The only genuinely async gap left is the real
+socket hop: `sse.write()` returns once the frame is queued on the Node stream, not once
+the test's own `http.get` `'data'` handler has actually received and parsed it. That
+delivery is directly observable from the test — `errorFrames().length` reaching the
+expected count, or `body` containing the expected marker — so it is exactly the kind of
+condition the file's own `waitUntil(predicate, what, timeoutMs)` helper (already used
+elsewhere in this same file, to wait for "the inference poll interval to be armed") was
+built for.
+
+**A second, equally important half of the fix: most of the waits were never actually
+guarding anything, and removing them is as much the fix as adding `waitUntil` to the
+one that mattered.** Every sub-threshold failure and every empty-rows success calls
+`recordFailure()`/`recordSuccess()` with no write at all (confirmed by reading
+`createPollFailureSignal`) — so `errorFrames()` is correct the instant `pollTick.fn()`
+resolves, with nothing to race and nothing to wait for. The bare `setImmediate()` after
+those ticks was not a weak version of a needed wait; it was dead weight around a
+condition that was already deterministic. Only the threshold-crossing tick (both
+sustained-failure tests) and the recovery tick (the third test) write anything real,
+and only those two call sites now use `waitUntil` — bounded (`timeoutMs`, default
+4000ms, already the file's convention), polling as fast as the machine allows, and
+failing with a named, specific message (`'the error frame to arrive over the real SSE
+socket'` / `'the recovered data row to arrive over the real SSE socket'`) rather than a
+bare assertion mismatch if the condition genuinely never becomes true.
+
+**The condition was fully observable from the test in every case here — nothing in this
+file needed a code-side change to become observable.** Worth stating because it will
+not always be true: if a test needed to wait on an effect with no client-visible
+signal at all (an internal counter never surfaced, a write with no distinguishing
+content), that would be a real finding about the code — an argument for adding an
+observable signal, not for tolerating a fixed delay in the test. This file did not
+turn out to be that case.
+
+**Verified, not asserted:** the test passes solo, fast, with no artificial delay
+(17ms/6ms/20ms per test, 3/3 pass). A fresh 20-run full-suite batch at the same
+`--maxWorkers=10` this file failed 5/20 times at: **0/20 failures for this file**,
+overall batch rate 8/20 (40%, ordinary noise against the 30-55% range this
+investigation has measured throughout — not a general fix, and not read as one). The
+8 failures that did occur were 7 different, unrelated tests, none repeating, consistent
+with the already-characterized background population. `tsc --noEmit` clean, `eslint`
+clean (0 errors, pre-existing `any`-typing warnings only).
+
+### Honesty about scope, stated because it is why this result is trustworthy
+
+**One file. One mechanism. p ≈ 0.047 on a 5-vs-0-of-20 split. Measured entirely on an
+11-core local machine, not CI's smaller runner — the mechanism (a real socket hop
+outrunning a single-tick wait under contention) is not machine-specific in kind, but
+its trigger rate is; CI may see this file fail less often in absolute terms for the same
+underlying reason, or the same margin-per-tick issue could exist elsewhere and simply
+not have surfaced in twenty runs.** This does not explain the branch-shaped majority —
+the 8 failures in the fixed batch are exactly as unexplained as before this round
+started. It closes one real, mechanistically-verified, now-fixed contributor to what
+this session observed as timing-shaped flakiness; it is not a general fix for the
+suite's flake rate, and the correction above means it may not even be fully accounted
+for under the "timing" label it would previously have been filed under.
+
+### Handoff
+
+- The identity guard has a real measurement period now (30 CI runs, 0 violations) —
+  worth restating in a future round once that count is materially larger.
+- The 33%/67% shape split needs re-classification, not re-quotation, given the boundary
+  case found here — a failure's TEXT (timeout vs. wrong-value) is not a reliable proxy
+  for its CAUSE (timing vs. branch) at the boundary.
+- `agents-events-poll-failure-signal.test.ts` is fixed and verified; if it reappears in
+  a future batch's failure list, that is new information, not a recurrence of this
+  round's finding.
+- The branch-shaped majority remains the largest untouched population in this
+  investigation, unchanged by this round.
+
+Full writeup, both batches' raw data, and the diagnostic-vs-real-fix distinction:
+issue #432.
