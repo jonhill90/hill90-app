@@ -326,11 +326,15 @@ async def search_shared(
     query_embedding = await generate_embedding(q)
 
     if query_embedding:
-        results = await shared_store.hybrid_search_chunks(
+        outcome = await shared_store.hybrid_search_chunks(
             pool, q, query_embedding,
             owner=owner, collection_id=collection_id, limit=limit,
         )
-        search_type = "hybrid"
+        results = outcome.results
+        # See routes/shared.py's identical comment: search_type now reflects
+        # whether the vector query actually ran, not just whether an
+        # embedding was generated for it.
+        search_type = "hybrid" if outcome.vector_search_ok else "fts"
     else:
         results = await shared_store.search_chunks(
             pool, q,

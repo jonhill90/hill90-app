@@ -56,7 +56,7 @@ async def search_shared(
     query_embedding = await generate_embedding(q)
 
     if query_embedding:
-        results = await shared_store.hybrid_search_chunks(
+        outcome = await shared_store.hybrid_search_chunks(
             pool,
             q,
             query_embedding,
@@ -64,7 +64,13 @@ async def search_shared(
             collection_id=collection_id,
             limit=limit,
         )
-        search_type = "hybrid"
+        results = outcome.results
+        # search_type used to be set the moment an embedding existed, before
+        # the vector query itself even ran — so a request whose embedding
+        # generated fine but whose vector search then failed (a real DB
+        # error, not "zero matches") still reported "hybrid". This reflects
+        # what actually happened, not what was attempted.
+        search_type = "hybrid" if outcome.vector_search_ok else "fts"
     else:
         results = await shared_store.search_chunks(
             pool,

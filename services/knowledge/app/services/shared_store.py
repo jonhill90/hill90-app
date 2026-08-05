@@ -6,6 +6,7 @@ Follows patterns established in knowledge_store.py.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from typing import Any
@@ -577,7 +578,11 @@ async def vector_search_chunks(
 ) -> list[dict[str, Any]]:
     """Semantic vector search using pgvector cosine similarity.
 
-    Falls back gracefully if embedding column doesn't exist or has no data.
+    Raises on failure — genuinely zero matches (no rows) is a normal return,
+    a broken query is not, and the two must stay distinguishable to the one
+    caller (hybrid_search_chunks), which is where the graceful FTS fallback
+    belongs. Swallowing it here made "the column doesn't exist yet" and "the
+    connection just died" indistinguishable to every caller, forever.
     """
     import json
 
@@ -600,35 +605,52 @@ async def vector_search_chunks(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    try:
-        rows = await pool.fetch(
-            f"""SELECT
-                    sch.id AS chunk_id,
-                    sch.content,
-                    sch.chunk_index,
-                    sch.token_estimate,
-                    1 - (sch.embedding <=> $1::vector) AS score,
-                    sd.id AS document_id,
-                    sd.title AS document_title,
-                    ss.id AS source_id,
-                    ss.title AS source_title,
-                    ss.source_url,
-                    sc.id AS collection_id,
-                    sc.name AS collection_name
-                FROM shared_chunks sch
-                JOIN shared_documents sd ON sch.document_id = sd.id
-                JOIN shared_sources ss ON sd.source_id = ss.id
-                JOIN shared_collections sc ON ss.collection_id = sc.id
-                WHERE {where}
-                  AND ss.status = 'active'
-                ORDER BY sch.embedding <=> $1::vector
-                LIMIT ${idx}""",
-            *params,
-        )
-        return [_serialize(dict(r)) for r in rows]
-    except Exception as exc:
-        logger.warning("Vector search failed (falling back to FTS): %s", exc)
-        return []
+    rows = await pool.fetch(
+        f"""SELECT
+                sch.id AS chunk_id,
+                sch.content,
+                sch.chunk_index,
+                sch.token_estimate,
+                1 - (sch.embedding <=> $1::vector) AS score,
+                sd.id AS document_id,
+                sd.title AS document_title,
+                ss.id AS source_id,
+                ss.title AS source_title,
+                ss.source_url,
+                sc.id AS collection_id,
+                sc.name AS collection_name
+            FROM shared_chunks sch
+            JOIN shared_documents sd ON sch.document_id = sd.id
+            JOIN shared_sources ss ON sd.source_id = ss.id
+            JOIN shared_collections sc ON ss.collection_id = sc.id
+            WHERE {where}
+              AND ss.status = 'active'
+            ORDER BY sch.embedding <=> $1::vector
+            LIMIT ${idx}""",
+        *params,
+    )
+    return [_serialize(dict(r)) for r in rows]
+
+
+@dataclass
+class HybridSearchOutcome:
+    """`vector_search_ok` distinguishes "the vector arm ran and matched
+    nothing" from "the vector arm never ran, or died". vector_search_chunks
+    itself raises on any failure now — it does not swallow exceptions or
+    decide gracefully-vs-not on its own. hybrid_search_chunks is what catches
+    that and decides: it is the one place with enough context to tell "ran,
+    matched zero rows" (vector_search_ok=True) apart from "the query itself
+    broke" (vector_search_ok=False), and it is the only place this
+    distinction survives — not because vector_search_chunks hides it, but
+    because vector_search_chunks's own contract is "raise or return real
+    rows", nothing softer. Callers use vector_search_ok to report an honest
+    search_type instead of one inferred from "was an embedding generated",
+    which stays true even when the vector query itself failed after a real
+    embedding was produced.
+    """
+
+    results: list[dict[str, Any]]
+    vector_search_ok: bool
 
 
 async def hybrid_search_chunks(
@@ -640,7 +662,7 @@ async def hybrid_search_chunks(
     collection_id: str | None = None,
     limit: int = 20,
     vector_weight: float = 0.6,
-) -> list[dict[str, Any]]:
+) -> HybridSearchOutcome:
     """Hybrid search combining FTS keyword matching and vector similarity.
 
     If no embedding is provided, falls back to FTS-only.
@@ -652,15 +674,24 @@ async def hybrid_search_chunks(
     )
 
     if not query_embedding:
-        return fts_results
+        return HybridSearchOutcome(results=fts_results, vector_search_ok=False)
 
-    # Run vector search
-    vec_results = await vector_search_chunks(
-        pool, query_embedding, owner=owner, collection_id=collection_id, limit=limit
-    )
+    # vector_search_chunks raises on a real failure now — caught HERE,
+    # specifically, so "ran and matched zero rows" (vector_search_ok=True,
+    # empty list) stays distinguishable from "the query itself broke"
+    # (vector_search_ok=False). Collapsing those two into the same "empty"
+    # value is exactly the shape this function used to have.
+    try:
+        vec_results = await vector_search_chunks(
+            pool, query_embedding, owner=owner, collection_id=collection_id, limit=limit
+        )
+    except Exception as exc:
+        logger.warning("Vector search failed (falling back to FTS): %s", exc)
+        return HybridSearchOutcome(results=fts_results, vector_search_ok=False)
 
     if not vec_results:
-        return fts_results
+        # Ran fine, genuinely nothing to merge — still a real hybrid search.
+        return HybridSearchOutcome(results=fts_results, vector_search_ok=True)
 
     # Merge: build a map of chunk_id -> result, blend scores
     merged: dict[str, dict[str, Any]] = {}
@@ -692,7 +723,7 @@ async def hybrid_search_chunks(
         )
 
     results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
-    return results
+    return HybridSearchOutcome(results=results, vector_search_ok=True)
 
 
 # ---------------------------------------------------------------------------
