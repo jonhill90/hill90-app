@@ -16,6 +16,9 @@ jest.mock('../db/pool', () => ({
   getPool: () => ({ query: mockQuery }),
 }));
 
+const mockAuditLog = jest.fn();
+jest.mock('../helpers/audit', () => ({ auditLog: (...a: unknown[]) => mockAuditLog(...a) }));
+
 jest.mock('../services/docker', () => ({
   createAndStartContainer: jest.fn(),
   stopAndRemoveContainer: jest.fn(),
@@ -48,10 +51,13 @@ const userBToken = makeToken('user-b', ['user']);
 describe('User Models CRUD', () => {
   beforeEach(() => {
     mockQuery.mockReset();
+    mockAuditLog.mockReset();
+    jest.spyOn(console, 'error').mockImplementation(() => {});
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     delete process.env.DATABASE_URL;
   });
 
@@ -266,5 +272,30 @@ describe('User Models CRUD', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ deleted: true });
+  });
+
+  it('B4 (#424): a failed stale-policy cleanup is audited, not just console.error\'d — the model delete still succeeds', async () => {
+    // Delete returns model with name and owner
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'model-1', name: 'my-gpt4', created_by: 'regular-user' }] });
+    // Stale cleanup UPDATE throws
+    mockQuery.mockRejectedValueOnce(new Error('connection reset'));
+
+    const res = await request(app)
+      .delete('/user-models/model-1')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    // Non-blocking, deliberately: the model delete already succeeded and
+    // must not be undone over a best-effort cleanup step failing.
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true });
+
+    // THE ASSERTION THAT MATTERS: before this fix the only trace of this
+    // failure was a console.error nobody reads. It must now be audited.
+    const failed = mockAuditLog.mock.calls.find((c) => c[0] === 'stale_policy_cleanup_failed');
+    expect(failed).toBeDefined();
+    expect(failed![1]).toBe('model-1');
+    expect(failed![2]).toBe('regular-user');
+    expect(failed![4]).toMatchObject({ model_name: 'my-gpt4', owner_sub: 'regular-user' });
+    expect(String(failed![4]?.error)).toMatch(/connection reset/);
   });
 });
