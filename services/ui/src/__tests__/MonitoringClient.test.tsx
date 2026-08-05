@@ -41,7 +41,19 @@ function mockFetch(overrides: Record<string, unknown> = {}) {
       })
     }
     if (url.includes('/api/usage')) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides.usage ?? { total_requests: 42, total_cost: '1.23' }) })
+      // Real shape (#370): COUNT/SUM results are bigint/numeric, both of which
+      // node-postgres returns as STRINGS, and the field is `total_cost_usd`,
+      // never `total_cost`. A fixture using numbers or the wrong field name
+      // can't detect a component reading either wrong — this one deliberately
+      // matches the API's actual response, not the component's assumption of it.
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(overrides.usage ?? {
+          total_requests: '42',
+          total_tokens: '100000',
+          total_cost_usd: '1.230000',
+        }),
+      })
     }
     if (url.includes('/api/shared-knowledge/stats')) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides.knowledge ?? {}) })
@@ -106,6 +118,22 @@ describe('MonitoringClient', () => {
     await waitFor(() => {
       const unhealthy = screen.getAllByLabelText('unhealthy')
       expect(unhealthy.length).toBeGreaterThan(0)
+    })
+  })
+
+  // #370: the Usage widget's Cost card read `usage.total_cost`, a field the
+  // real /api/usage response has never had (it's `total_cost_usd`), so it
+  // silently rendered $0.0000 forever regardless of the real total — no
+  // crash, no error, a plausible-looking wrong number. The old fixture used
+  // the SAME wrong field name as the component, so mock and component agreed
+  // with each other and neither was ever checked against the real API.
+  it('renders the actual total_cost_usd from a string-numeric API response, not a stale $0.0000', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      usage: { total_requests: '7', total_tokens: '9000', total_cost_usd: '4.560000' },
+    }))
+    render(<MonitoringClient />)
+    await waitFor(() => {
+      expect(screen.getByText('$4.5600')).toBeInTheDocument()
     })
   })
 })
