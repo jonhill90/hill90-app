@@ -8,6 +8,7 @@ Unknown types emit work_completed stub.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -335,7 +336,15 @@ class AgentRuntime:
         )
 
     def _check_auth(self, request: Request) -> bool:
-        """Validate Bearer token against WORK_TOKEN."""
+        """Validate Bearer token against WORK_TOKEN.
+
+        Constant-time comparison (hmac.compare_digest), matching the api's
+        own chat-callback token check (services/api/src/routes/chat.ts,
+        crypto.timingSafeEqual) — the same class of secret, a static Bearer
+        token gating an internal endpoint on the trusted network. A plain
+        `==` short-circuits on the first mismatching byte, a real timing
+        side-channel on WORK_TOKEN.
+        """
         if not self._work_token:
             return False
 
@@ -344,4 +353,4 @@ class AgentRuntime:
             return False
 
         token = auth_header[7:]  # len("Bearer ") == 7
-        return token == self._work_token
+        return hmac.compare_digest(token, self._work_token)

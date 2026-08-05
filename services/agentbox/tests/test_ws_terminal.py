@@ -53,6 +53,31 @@ class TestWsTerminalAuth:
             with client.websocket_connect("/terminal/ws?token=anything"):
                 pass
 
+    # THE ASSERTION THAT MATTERS (cross-service sibling-drift sweep, same
+    # finding as runtime.py's _check_auth — see that file's identical
+    # comment). Plain `token != work_token` is a timing side-channel on the
+    # same WORK_TOKEN secret; the api's own comparable check
+    # (chat.ts, crypto.timingSafeEqual) is constant-time. Functional
+    # correctness is already covered above; this is the only test that can
+    # tell "constant-time" from "happens to return the same answer."
+    def test_auth_uses_constant_time_comparison(self):
+        import hmac as hmac_module
+        from unittest.mock import patch
+
+        app = _create_test_app()
+        client = TestClient(app)
+        with patch.object(hmac_module, "compare_digest", wraps=hmac_module.compare_digest) as spy:
+            # A correct token passes auth and proceeds to spawn a PTY, which
+            # may itself fail in a sandboxed test environment for reasons
+            # unrelated to auth — irrelevant here, only whether the auth
+            # check itself used a constant-time comparison.
+            try:
+                with client.websocket_connect(f"/terminal/ws?token={WORK_TOKEN}"):
+                    pass
+            except Exception:
+                pass
+        assert spy.called, "expected the token check to call hmac.compare_digest, not a plain !="
+
 
 class TestWsTerminalResize:
     def test_resize_message_format(self):
