@@ -51,9 +51,25 @@ export default function ChatLayout({ session, activeThreadId }: Props) {
       if (res.ok) {
         const data = await res.json()
         setThreads(data)
+      } else {
+        // Cross-service sibling of app#440 (the CLI's streamResponse
+        // silently returning empty on a failed request) — a non-2xx here
+        // used to leave threads at its initial [], rendering identically
+        // to a genuinely empty inbox. This is the most-trafficked chat
+        // surface, so a transient 500 silently told the user they had no
+        // chat history at all.
+        let detail = ''
+        try {
+          const data = await res.json()
+          detail = data.error || ''
+        } catch {
+          // Body wasn't JSON — the status code is still worth surfacing.
+        }
+        setError(detail || `Failed to load conversations (${res.status})`)
       }
     } catch (err) {
       console.error('Failed to fetch threads:', err)
+      setError('Failed to load conversations')
     } finally {
       setLoading(false)
     }
