@@ -45,6 +45,10 @@ export default function UsageClient() {
   const [toDate, setToDate] = useState(today)
   const [agentFilter, setAgentFilter] = useState('')
   const [modelFilter, setModelFilter] = useState('')
+  // A failed grouped-usage fetch used to leave groupedData at its initial
+  // [], rendering "No usage data yet" — identical to a genuinely fresh
+  // agent with nothing to show. This is the usage chart itself.
+  const [groupedError, setGroupedError] = useState(false)
 
   const agentName = useCallback((id: string) =>
     agents.find((a) => a.id === id || a.agent_id === id)?.name ?? id.substring(0, 8),
@@ -74,10 +78,14 @@ export default function UsageClient() {
       if (groupedRes.ok) {
         const data = await groupedRes.json()
         setGroupedData(data.data || [])
+        setGroupedError(false)
+      } else {
+        setGroupedError(true)
       }
       if (agentsRes.ok) setAgents(await agentsRes.json())
     } catch (err) {
       console.error('Failed to fetch usage:', err)
+      setGroupedError(true)
     } finally {
       setLoading(false)
     }
@@ -185,7 +193,14 @@ export default function UsageClient() {
       </div>
 
       {/* Data table */}
-      {groupedData.length === 0 ? (
+      {groupedError ? (
+        <div
+          className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+          data-testid="usage-error"
+        >
+          <p className="text-sm text-red-400">Could not load usage data — try refreshing the page</p>
+        </div>
+      ) : groupedData.length === 0 ? (
         <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 text-center">
           <p className="text-mountain-400 mb-4">No usage data yet</p>
           <p className="text-sm text-mountain-500">
