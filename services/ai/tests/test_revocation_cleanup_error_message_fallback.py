@@ -44,6 +44,20 @@ class _RaisingAcquire:
         return False
 
 
+class _LongMessagePool:
+    def acquire(self):
+        return _LongMessageAcquire()
+
+
+class _LongMessageAcquire:
+    async def __aenter__(self):
+        # Longer than the [:200] bound both cited precedents apply.
+        raise RuntimeError("x" * 500)
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
 @pytest.fixture(autouse=True)
 def _fast_sleep(monkeypatch):
     real_sleep = asyncio.sleep
@@ -73,6 +87,35 @@ async def test_an_exception_with_no_message_still_records_something_readable():
         assert manager.last_cleanup_error is not None
         assert manager.last_cleanup_error != ""
         assert "_EmptyMessageError" in manager.last_cleanup_error
+    finally:
+        manager.stop_cleanup_loop()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_a_long_exception_message_is_bounded_like_its_precedents():
+    """Landed without the [:200] truncation both cited precedents
+    (usage_gaps.py:47, proxy.py:176) apply — and last_cleanup_error is
+    served on /health/ready, so an unbounded exception message goes into
+    a health response with no size limit.
+    """
+    manager = RevocationManager()
+    manager.start_cleanup_loop(_LongMessagePool(), interval_seconds=0)
+    task = manager._cleanup_task
+    assert task is not None
+
+    try:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert not task.done(), "the cleanup loop died on a raising cycle"
+
+        assert manager.last_cleanup_error is not None
+        # THE ASSERTION THAT MATTERS: bounded the same way as the two
+        # precedents this file's own docstring cites.
+        assert len(manager.last_cleanup_error) <= 200
     finally:
         manager.stop_cleanup_loop()
         with pytest.raises(asyncio.CancelledError):
