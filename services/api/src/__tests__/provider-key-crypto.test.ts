@@ -1,4 +1,4 @@
-import { encryptProviderKey, decryptProviderKey } from '../services/provider-key-crypto';
+import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
 import crypto from 'crypto';
 
 const TEST_KEY = crypto.randomBytes(32).toString('hex');
@@ -49,5 +49,76 @@ describe('provider-key-crypto', () => {
     expect(() => encryptProviderKey('test', 'aabbcc')).toThrow(
       'PROVIDER_KEY_ENCRYPTION_KEY must be 32 bytes'
     );
+  });
+
+  // app#396: every caller of decryptProviderKey (mcp-servers.ts, agents.ts,
+  // webhook-dispatch.ts) needs to distinguish "the key is wrong" from any
+  // other 500-shaped failure, so it can log something an operator can act
+  // on instead of an indistinguishable generic error. That distinction only
+  // works if the wrapped type is stable across every way a decrypt can fail.
+  describe('ProviderKeyDecryptionError — the type callers need to distinguish this failure', () => {
+    it('wrong key throws ProviderKeyDecryptionError specifically', () => {
+      const plaintext = 'sk-test-key-abc123';
+      const { encrypted, nonce } = encryptProviderKey(plaintext, TEST_KEY);
+      const wrongKey = crypto.randomBytes(32).toString('hex');
+      expect(() => decryptProviderKey(encrypted, nonce, wrongKey)).toThrow(ProviderKeyDecryptionError);
+    });
+
+    it('tampered ciphertext throws ProviderKeyDecryptionError specifically', () => {
+      const plaintext = 'sk-test-key-abc123';
+      const { encrypted, nonce } = encryptProviderKey(plaintext, TEST_KEY);
+      const tampered = Buffer.from(encrypted);
+      tampered[0] ^= 0xff;
+      expect(() => decryptProviderKey(tampered, nonce, TEST_KEY)).toThrow(ProviderKeyDecryptionError);
+    });
+
+    it('a malformed key configured for decrypt also throws ProviderKeyDecryptionError, not the raw "must be 32 bytes" error', () => {
+      const plaintext = 'sk-test-key-abc123';
+      const { encrypted, nonce } = encryptProviderKey(plaintext, TEST_KEY);
+      expect(() => decryptProviderKey(encrypted, nonce, 'aabbcc')).toThrow(ProviderKeyDecryptionError);
+    });
+
+    it('never mentions the key or the plaintext in its message', () => {
+      const plaintext = 'sk-super-secret-do-not-leak';
+      const { encrypted, nonce } = encryptProviderKey(plaintext, TEST_KEY);
+      const wrongKey = crypto.randomBytes(32).toString('hex');
+      try {
+        decryptProviderKey(encrypted, nonce, wrongKey);
+        throw new Error('expected decryptProviderKey to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ProviderKeyDecryptionError);
+        const message = (err as Error).message;
+        expect(message).not.toContain(plaintext);
+        expect(message).not.toContain(wrongKey);
+        expect(message).not.toContain(TEST_KEY);
+      }
+    });
+
+    it('malformed ciphertext (too short for an auth tag) stays a plain Error, not ProviderKeyDecryptionError — a data-integrity problem is not a key problem', () => {
+      const tooShort = Buffer.from('short');
+      const nonce = crypto.randomBytes(12);
+      expect(() => decryptProviderKey(tooShort, nonce, TEST_KEY)).toThrow('Ciphertext too short');
+      try {
+        decryptProviderKey(tooShort, nonce, TEST_KEY);
+      } catch (err) {
+        expect(err).not.toBeInstanceOf(ProviderKeyDecryptionError);
+      }
+    });
+
+    it('encryptProviderKey with an invalid key length is UNCHANGED — still the plain "must be 32 bytes" error, not wrapped', () => {
+      // Only decryptProviderKey's failures are wrapped. encryptProviderKey's
+      // own key-length check is a caller-input-validation error at the point
+      // of writing new ciphertext, a different situation from "this key
+      // cannot open ciphertext someone else wrote" — kept distinguishable on
+      // purpose, and this pins the existing message so it doesn't drift.
+      expect(() => encryptProviderKey('test', 'aabbcc')).toThrow(
+        'PROVIDER_KEY_ENCRYPTION_KEY must be 32 bytes'
+      );
+      try {
+        encryptProviderKey('test', 'aabbcc');
+      } catch (err) {
+        expect(err).not.toBeInstanceOf(ProviderKeyDecryptionError);
+      }
+    });
   });
 });

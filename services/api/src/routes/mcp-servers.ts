@@ -14,7 +14,7 @@ import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isAdmin } from '../helpers/elevated-scope';
-import { encryptProviderKey, decryptProviderKey } from '../services/provider-key-crypto';
+import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
 
 const router = Router();
 
@@ -67,7 +67,17 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
 
     res.json(rows.map(withConnectionDisplay));
   } catch (err: any) {
-    console.error('[mcp-servers] List error:', err);
+    // app#396: distinguish the one class of 500 that isn't a real server
+    // bug — a decrypt failure means PROVIDER_KEY_ENCRYPTION_KEY is missing
+    // or does not match what encrypted this row, not that anything here is
+    // broken. Same response to the client either way (leaking which is true
+    // is not this route's job), but the log line is now the one an operator
+    // can actually act on instead of a generic "something failed".
+    if (err instanceof ProviderKeyDecryptionError) {
+      console.error('[mcp-servers] List error — decryption key mismatch:', err);
+    } else {
+      console.error('[mcp-servers] List error:', err);
+    }
     res.status(500).json({ error: 'Failed to list MCP servers' });
   }
 });
@@ -165,7 +175,12 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
       })),
     });
   } catch (err: any) {
-    console.error('[mcp-servers] Get error:', err);
+    // app#396: see the List route's identical branch above.
+    if (err instanceof ProviderKeyDecryptionError) {
+      console.error('[mcp-servers] Get error — decryption key mismatch:', err);
+    } else {
+      console.error('[mcp-servers] Get error:', err);
+    }
     res.status(500).json({ error: 'Failed to get MCP server' });
   }
 });

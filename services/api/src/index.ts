@@ -5,6 +5,7 @@ import './bootstrap-redaction';
 import { app } from './app';
 import { getPool, closePool } from './db/pool';
 import { runMigrations } from './db/migrate';
+import { runProviderKeyCanary } from './services/provider-key-canary';
 import { runReconcilePass, startAgentReconciler, stopAgentReconciler } from './services/agent-reconciler';
 import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
 import { attachTerminalProxyFromConfig } from './services/terminal-wiring';
@@ -46,6 +47,43 @@ async function start() {
     } catch (err) {
       throw new Error(
         'database migrations failed — refusing to serve on an unverified schema',
+        { cause: err },
+      );
+    }
+
+    // app#396: PROVIDER_KEY_ENCRYPTION_KEY decrypts four tables now, not
+    // one, and the key stored in SOPS and the key a running container
+    // actually held had ALREADY drifted apart the night this went from one
+    // consumer to four — found only because someone happened to compare two
+    // hashes by hand. A self-encrypt-then-decrypt round trip would not have
+    // caught that: any 32-byte key passes it, including a freshly wrong
+    // one. This reads back a row that genuinely exists, encrypted under
+    // whatever key was current when it was written, and proves THIS
+    // process's key can still open it — same doctrine as the migration
+    // check just above: an unverified piece of config that would otherwise
+    // only surface per-feature, per-request, in whichever of several
+    // different failure shapes that feature happens to have, must not get
+    // to serve as if it were fine.
+    //
+    // NOTHING TO VERIFY (an empty estate, zero encrypted rows in any of the
+    // four tables) is reported as its own status, not folded into
+    // "verified" — those are different claims, and this codebase has
+    // already been burned once by a status tracker that couldn't tell them
+    // apart (see CLAUDE.md's own account of that, elsewhere in this repo).
+    try {
+      const result = await runProviderKeyCanary(getPool());
+      if (result.status === 'verified') {
+        console.log(`[startup] Provider-key canary: verified (decrypted an existing row from ${result.source})`);
+      } else {
+        console.log('[startup] Provider-key canary: nothing to verify (zero encrypted rows across provider_connections/mcp_servers/agents/agent_webhooks)');
+      }
+    } catch (err) {
+      throw new Error(
+        'PROVIDER_KEY_ENCRYPTION_KEY cannot decrypt existing stored ciphertext — refusing ' +
+        'to start on a key that would make encrypted data in provider_connections, ' +
+        'mcp_servers, agents, or agent_webhooks unreadable. This is not a schema problem; ' +
+        'check whether the key configured for this container matches the key that last ' +
+        'wrote that data (see docs/reference/secret-layout.md and app#396).',
         { cause: err },
       );
     }
