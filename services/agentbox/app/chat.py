@@ -318,6 +318,16 @@ def _ensure_tmux_session() -> None:
     The terminal WebSocket handler (ws_terminal.py) normally creates
     the session on first viewer connect, but chat may run before any
     viewer connects. This ensures send-keys has a target.
+
+    RAISES on a genuine creation failure rather than returning normally. This
+    used to swallow `new-session`'s result entirely — a real failure (tmux
+    missing, resource exhaustion, a name collision) left this function
+    returning as if the session existed, and every caller then proceeded to
+    send-keys and poll for output that could never arrive. Both callers
+    (_run_direct_command, _run_visible_command) already run inside a
+    try/except that turns a raised exception into status="error" /
+    success=False — raising here reuses that existing, already-correct path
+    instead of inventing a new one.
     """
     # Check if session exists
     result = subprocess.run(
@@ -330,11 +340,14 @@ def _ensure_tmux_session() -> None:
 
     # Create detached session with zsh
     zsh = shutil.which("zsh") or "/bin/bash"  # noqa: F841 - resolved but never passed to tmux below; looks unfinished, left for investigation
-    subprocess.run(
+    created = subprocess.run(
         ["tmux", "new-session", "-d", "-s", TMUX_SESSION, "-x", "120", "-y", "40"],
         capture_output=True,
         timeout=5,
     )
+    if created.returncode != 0:
+        detail = (created.stderr or b"").decode("utf-8", "replace").strip()[:200]
+        raise RuntimeError(f"tmux new-session failed: {detail or 'no output'}")
     logger.info("[terminal] Created tmux session '%s'", TMUX_SESSION)
 
 
@@ -445,16 +458,28 @@ def _run_direct_command(user_message: str) -> str:
     Terminal shows exactly what a user would see — just the command
     and its output. No wrappers, no tee, no sentinels.
     Output is captured via tmux capture-pane after the prompt returns.
+
+    RAISES if send-keys itself fails to deliver the command (session vanished,
+    tmux crashed) rather than proceeding to poll a session nothing was ever
+    sent to. This used to discard send-keys' result entirely: a failure here
+    meant the command never ran anywhere, and the only symptom was
+    _wait_and_capture eventually timing out and returning "Timed out after
+    60s." as the successful terminal output — status="complete" delivered to
+    the caller for a command that was never executed. Same fix as
+    _run_visible_command's sibling send-keys check; this path never got it.
     """
     cmd = user_message.strip().lstrip("$>#").strip()
     _ensure_tmux_session()
 
     # Send the raw command — exactly like a user typing it
-    subprocess.run(
+    sent = subprocess.run(
         ["tmux", "send-keys", "-t", TMUX_SESSION, cmd, "Enter"],
         timeout=5,
         capture_output=True,
     )
+    if sent.returncode != 0:
+        detail = (sent.stderr or b"").decode("utf-8", "replace").strip()[:200]
+        raise RuntimeError(f"tmux send-keys failed: {detail or 'no output'}")
 
     logger.info("[terminal-cmd] Direct command in tmux: %s", cmd[:100])
 
@@ -986,13 +1011,28 @@ def _run_tool_loop(
 
             tool_duration = int((time.monotonic() - tool_start) * 1000)
 
+            # tool_result already carries the tool's own real outcome as a JSON
+            # "success" field — every tool in this codebase returns that shape
+            # (execute_tool_call's own contract; runtime.py's _run_shell derives
+            # its own success the same way). This used to hardcode True here
+            # regardless, so a tool that itself reported success=false — a
+            # failing shell command, a write that couldn't complete — was still
+            # logged in this event, the audit trail for every tool call any
+            # agent makes, as having succeeded. Defaults to False (not True) on
+            # a malformed result: reporting a success we did not observe is the
+            # defect being fixed, so an unreadable result is not treated as one.
+            try:
+                tool_success = bool(json.loads(tool_result).get("success", False))
+            except (json.JSONDecodeError, AttributeError):
+                tool_success = False
+
             emitter.emit(
                 type="tool_call_complete",
                 tool="chat",
                 input_summary=f"tool={func_name}",
                 output_summary=f"duration={tool_duration}ms result_len={len(tool_result)}",
                 duration_ms=tool_duration,
-                success=True,
+                success=tool_success,
                 correlation_id=correlation_id,
                 metadata={"work_id": work_id, "tool_call_id": tc_id},
             )

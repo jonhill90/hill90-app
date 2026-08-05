@@ -1039,9 +1039,17 @@ async def _execute_tmux(args: dict) -> str:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
 
         elif action == "list_windows":
+            # Every sibling action above falls through to the shared
+            # `if result.returncode != 0` check below. This one returned early
+            # with success hardcoded, so a failing `tmux list-windows` (session
+            # gone, tmux crashed) reported success with an empty windows list —
+            # indistinguishable from "a session with no windows," which is not
+            # a real state a tmux session can be in.
             cmd = ["tmux", "list-windows", "-t", TMUX_SESSION, "-F",
                    "#{window_index}:#{window_name} #{window_active}"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return json.dumps({"success": False, "error": result.stderr.strip()})
             return json.dumps({"success": True, "windows": result.stdout.strip()})
 
         else:

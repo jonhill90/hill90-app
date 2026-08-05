@@ -472,6 +472,74 @@ class TestToolLoop:
         assert final_body["input_tokens"] == 70  # 20 + 50
         assert final_body["output_tokens"] == 25  # 10 + 15
 
+    # THE ASSERTION THAT MATTERS. `tool_call_complete` hardcoded success=True
+    # regardless of what the tool actually reported — `tool_result` right next
+    # to it in the same emitter.emit call already carries the real outcome as
+    # a JSON "success" field (execute_tool_call's own contract, matched by
+    # runtime.py's _run_shell deriving success=result.get("success", False)
+    # from the identical shape). This is the audit trail for every tool call
+    # any agent makes; a failing tool call was recorded as having succeeded.
+    @patch("app.chat.execute_tool_call")
+    @patch("app.chat.requests.post")
+    def test_tool_call_complete_reports_the_tool_own_failure(
+        self, mock_post, mock_tool, emitter, monkeypatch
+    ):
+        """A tool that reports success=false must not be logged as succeeding."""
+        em, log_path = emitter
+        monkeypatch.setenv("CHAT_CALLBACK_TOKEN", "cb-token")
+        monkeypatch.setenv("MODEL_ROUTER_TOKEN", "mr-token")
+
+        tool_call_response = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "tc-1",
+                            "type": "function",
+                            "function": {"name": "execute_command", "arguments": '{"command": "false"}'},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+                "model": "gpt-4o-mini",
+            },
+        )
+        final_response = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "choices": [{"message": {"content": "It failed."}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 15},
+                "model": "gpt-4o-mini",
+            },
+        )
+        cb_ok = MagicMock(status_code=200, text="ok")
+        mock_post.side_effect = [tool_call_response, cb_ok, final_response, cb_ok]
+
+        async def _fake_failing_tool(*args, **kwargs):
+            return json.dumps({"success": False, "exit_code": 1, "stdout": "", "stderr": "command failed"})
+        mock_tool.side_effect = _fake_failing_tool
+
+        handle_chat(
+            {
+                "thread_id": "t1", "message_id": "m1",
+                "messages": [{"role": "user", "content": "Run false"}],
+                "model": "gpt-4o-mini",
+                "callback_url": "http://api:3000/cb",
+            },
+            soul="", rules="", work_id="w1", emitter=em,
+            tools_config=ToolsConfig(shell=ShellConfig(enabled=True)),
+        )
+
+        events = _read_events(log_path)
+        tool_events = [e for e in events if e["type"] == "tool_call_complete"]
+        assert len(tool_events) == 1
+        assert tool_events[0]["success"] is False, (
+            f"tool reported success=false but the event logged success={tool_events[0]['success']}"
+        )
+
     @patch("app.chat.execute_tool_call")
     @patch("app.chat.requests.post")
     def test_tool_loop_max_iterations(self, mock_post, mock_tool, emitter, monkeypatch):
@@ -714,6 +782,113 @@ class TestTerminalDispatch:
         assert len(send_keys_calls) >= 1
         tmux_cmd = send_keys_calls[0][-2]
         assert tmux_cmd == "ls -a"  # Exactly the raw command, nothing else
+
+    # THE ASSERTION THAT MATTERS. `test_terminal_dispatch_direct_command_skips_claude`
+    # above only ever mocks subprocess.run to return returncode=0 — every tmux call
+    # succeeds, so it cannot distinguish "the code checks tmux's result" from "the
+    # code ignores it entirely and reports success regardless." Both versions pass
+    # that test identically. This is the failing-command counterpart _run_visible_
+    # command already has (test_structured_truth.py) — _run_direct_command and its
+    # _ensure_tmux_session dependency never got the same treatment, even though they
+    # are the higher-traffic path (any short message classifies as 'command').
+    #
+    # tmux new-session returning a real failure (tmux missing, resource exhaustion,
+    # a session name collision) previously left _ensure_tmux_session returning
+    # normally, and _run_direct_command's own send-keys call was never checked
+    # either — so a command that never ran anywhere was still delivered to the user
+    # as status="complete" with whatever _wait_and_capture produced while polling a
+    # session that was never created (typically a timeout message, after wasting the
+    # full COMMAND_TIMEOUT).
+    @patch("app.chat._wait_and_capture")
+    @patch("app.chat.subprocess.run")
+    @patch("app.chat._should_use_terminal", return_value=True)
+    @patch("app.chat.requests.post")
+    def test_terminal_dispatch_reports_error_when_tmux_session_cannot_be_created(
+        self, mock_post, mock_terminal, mock_subprocess, mock_capture, emitter, monkeypatch
+    ):
+        """tmux new-session failing must surface as status=error, not status=complete."""
+        em, log_path = emitter
+        monkeypatch.setenv("CHAT_CALLBACK_TOKEN", "cb-token")
+        mock_post.return_value = MagicMock(status_code=200)
+
+        def fake_run(cmd, **kwargs):
+            if "has-session" in cmd:
+                return MagicMock(returncode=1)  # no session yet
+            if "new-session" in cmd:
+                return MagicMock(returncode=1, stderr=b"failed to connect to server")
+            # A careless caller that ignores new-session's failure and sends keys
+            # anyway would hit exactly this: tmux send-keys against a session that
+            # was never created genuinely fails too. Returned, not raised — the
+            # test must fail on OBSERED BEHAVIOR (a poll that should not happen),
+            # not on an artificial crash from an unhandled mock branch.
+            return MagicMock(returncode=1, stderr=b"can't find session")
+
+        mock_subprocess.side_effect = fake_run
+
+        handle_chat(
+            {
+                "thread_id": "t1", "message_id": "m1",
+                "messages": [{"role": "user", "content": "ls -a"}],
+                "model": "gpt-4o-mini",
+                "callback_url": "http://api:3000/cb",
+            },
+            soul="You are an agent.", rules="",
+            work_id="w1", emitter=em,
+        )
+
+        assert not mock_capture.called, "must not poll for output from a session that was never created"
+
+        cb_bodies = [c[1]["json"] for c in mock_post.call_args_list]
+        final_status = cb_bodies[-1]["status"]
+        assert final_status == "error", (
+            f"expected the final callback to report status=error, got {final_status!r} "
+            f"(bodies: {cb_bodies})"
+        )
+
+        events = _read_events(log_path)
+        complete_events = [e for e in events if e["type"] == "terminal_task_complete"]
+        assert complete_events == [], "must not emit terminal_task_complete for a command that never ran"
+
+    @patch("app.chat._wait_and_capture")
+    @patch("app.chat.subprocess.run")
+    @patch("app.chat._should_use_terminal", return_value=True)
+    @patch("app.chat.requests.post")
+    def test_terminal_dispatch_reports_error_when_send_keys_fails(
+        self, mock_post, mock_terminal, mock_subprocess, mock_capture, emitter, monkeypatch
+    ):
+        """tmux send-keys failing (session exists, keys never delivered) must also error."""
+        em, log_path = emitter
+        monkeypatch.setenv("CHAT_CALLBACK_TOKEN", "cb-token")
+        mock_post.return_value = MagicMock(status_code=200)
+
+        def fake_run(cmd, **kwargs):
+            if "has-session" in cmd:
+                return MagicMock(returncode=0)  # session already exists
+            if "send-keys" in cmd:
+                return MagicMock(returncode=1, stderr=b"can't find session")
+            return MagicMock(returncode=0)
+
+        mock_subprocess.side_effect = fake_run
+
+        handle_chat(
+            {
+                "thread_id": "t1", "message_id": "m1",
+                "messages": [{"role": "user", "content": "ls -a"}],
+                "model": "gpt-4o-mini",
+                "callback_url": "http://api:3000/cb",
+            },
+            soul="You are an agent.", rules="",
+            work_id="w1", emitter=em,
+        )
+
+        assert not mock_capture.called, "must not poll for output when the command was never sent"
+
+        cb_bodies = [c[1]["json"] for c in mock_post.call_args_list]
+        final_status = cb_bodies[-1]["status"]
+        assert final_status == "error", (
+            f"expected the final callback to report status=error, got {final_status!r} "
+            f"(bodies: {cb_bodies})"
+        )
 
     @patch("app.chat._should_use_terminal", return_value=True)
     @patch("app.chat.requests.post")

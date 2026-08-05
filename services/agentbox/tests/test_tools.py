@@ -1,7 +1,7 @@
 """Tests for app.tools — tool definitions and dispatcher."""
 
 import json
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -225,3 +225,32 @@ class TestWebSearch:
         parsed = json.loads(result)
         assert parsed["success"] is False
         assert "500" in parsed["error"]
+
+
+class TestTmuxListWindows:
+    """`_execute_tmux`'s other five actions all check `result.returncode` before
+    reporting success (see the `if result.returncode != 0` guard shared by every
+    branch below). `list_windows` alone returns success unconditionally, straight
+    off `result.stdout` — the same shape already fixed once in this codebase for
+    chat.py's terminal-dispatch path. Untested until now: no test file referenced
+    `_execute_tmux` or the `tmux` tool name at all.
+    """
+
+    @pytest.mark.asyncio
+    @patch("app.tools.subprocess.run")
+    async def test_list_windows_failure_is_not_reported_as_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="can't find session: agent")
+        result = await execute_tool_call("tmux", {"action": "list_windows"})
+        parsed = json.loads(result)
+        assert parsed["success"] is False, f"expected failure to be reported, got: {parsed}"
+
+    @pytest.mark.asyncio
+    @patch("app.tools.subprocess.run")
+    async def test_list_windows_success_still_reports_success(self, mock_run):
+        """POSITIVE CONTROL — a fix that always returns False would also pass the
+        test above for the wrong reason. This pins the success path too."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="0:zsh 1", stderr="")
+        result = await execute_tool_call("tmux", {"action": "list_windows"})
+        parsed = json.loads(result)
+        assert parsed["success"] is True
+        assert parsed["windows"] == "0:zsh 1"
