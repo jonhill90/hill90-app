@@ -129,7 +129,54 @@ async def ws_terminal_handler(websocket: WebSocket, work_token: str | None) -> N
         # Main loop: WebSocket → PTY
         try:
             while True:
-                message = await websocket.receive()
+                # Raced against reader_task rather than a bare `await
+                # websocket.receive()`. The reader has its own top-level
+                # try/except (#347 made its failures visible in the log),
+                # so it never raises here — it just ENDS, cleanly, on PTY
+                # EOF or any error it already caught. Before this, nothing
+                # downstream of that ever looked at reader_task again until
+                # this loop happened to exit some OTHER way, so a dead
+                # reader left the client connected to a relay that could
+                # never produce output again — no error, no close frame, a
+                # session that looks live and is not. Racing the two here
+                # is what lets the loop notice the moment it happens instead
+                # of only when the client eventually gives up on its own.
+                receive_task = asyncio.create_task(websocket.receive())
+                try:
+                    done, _pending = await asyncio.wait(
+                        {receive_task, reader_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if receive_task not in done:
+                        receive_task.cancel()
+                        try:
+                            await receive_task
+                        except (asyncio.CancelledError, WebSocketDisconnect):
+                            pass
+                        logger.warning(
+                            "Terminal PTY reader ended for pid=%s; closing session "
+                            "so the client is not left connected to a dead relay",
+                            pid,
+                        )
+                        try:
+                            await websocket.close(code=1011, reason="terminal session ended")
+                        except Exception as close_exc:
+                            # Best-effort: the socket may already be gone, which is
+                            # exactly the state we were trying to get out of. Logged
+                            # rather than swallowed blind — a close that fails for
+                            # some OTHER reason should not vanish the same way the
+                            # bug this fixes did.
+                            logger.debug(
+                                "Closing terminal session for pid=%s after a dead "
+                                "reader raised %s: %s",
+                                pid, type(close_exc).__name__, close_exc,
+                            )
+                        break
+
+                    message = receive_task.result()
+                except WebSocketDisconnect:
+                    break
 
                 if message.get("type") == "websocket.disconnect":
                     break
