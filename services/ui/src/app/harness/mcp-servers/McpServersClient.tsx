@@ -21,6 +21,7 @@ interface McpServer {
 export default function McpServersClient() {
   const [servers, setServers] = useState<McpServer[]>([])
   const [loading, setLoading] = useState(true)
+  const [serversError, setServersError] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState({
@@ -34,8 +35,11 @@ export default function McpServersClient() {
       if (res.ok) {
         const data = await res.json()
         if (Array.isArray(data)) setServers(data)
+        setServersError(false)
+      } else {
+        setServersError(true)
       }
-    } catch { /* ignore */ }
+    } catch { setServersError(true) }
     finally { setLoading(false) }
   }, [])
 
@@ -200,7 +204,11 @@ export default function McpServersClient() {
         </div>
       )}
 
-      {servers.length === 0 && !showForm ? (
+      {serversError ? (
+        <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3" data-testid="servers-error">
+          <p className="text-sm text-red-400">Could not load MCP servers — try refreshing the page</p>
+        </div>
+      ) : servers.length === 0 && !showForm ? (
         <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 flex flex-col items-center justify-center text-center">
           <div className="mb-4 rounded-full bg-navy-700 p-4"><Server className="h-8 w-8 text-mountain-400" /></div>
           <h2 className="text-lg font-semibold text-white mb-2">No MCP servers configured</h2>

@@ -451,6 +451,25 @@ describe('SkillsClient', () => {
     expect(screen.getByText('No skills match your search')).toBeInTheDocument()
   })
 
+  it('shows an error state, not the empty state, when the skills fetch fails', async () => {
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/skills' && (!opts || !opts.method || opts.method === 'GET')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      }
+      if (url === '/api/tools' && (!opts || !opts.method || opts.method === 'GET')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_TOOLS) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<SkillsClient />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('skills-error')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('No skills yet')).not.toBeInTheDocument()
+  })
+
   // AI-226: Search filters by description too
   it('search filters by description', async () => {
     render(<SkillsClient />)

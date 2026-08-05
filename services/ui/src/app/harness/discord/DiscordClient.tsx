@@ -33,6 +33,7 @@ export default function DiscordClient() {
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null)
   const [agents, setAgents] = useState<Array<{ id: string; name: string; agent_id: string }>>([])
   const [loading, setLoading] = useState(true)
+  const [bindingsError, setBindingsError] = useState(false)
   const [showBindingForm, setShowBindingForm] = useState(false)
   const [showLinkForm, setShowLinkForm] = useState(false)
   const [bindingForm, setBindingForm] = useState({ channel_id: '', guild_id: '', agent_id: '' })
@@ -49,6 +50,9 @@ export default function DiscordClient() {
       if (bindingsRes.ok) {
         const data = await bindingsRes.json()
         if (Array.isArray(data)) setBindings(data)
+        setBindingsError(false)
+      } else {
+        setBindingsError(true)
       }
       if (statusRes.ok) setBotStatus(await statusRes.json())
       if (agentsRes.ok) {
@@ -62,7 +66,7 @@ export default function DiscordClient() {
         const data = await linksRes.json()
         if (Array.isArray(data)) setUserLinks(data)
       }
-    } catch { /* ignore */ }
+    } catch { setBindingsError(true) }
     finally { setLoading(false) }
   }, [])
 
@@ -191,7 +195,11 @@ export default function DiscordClient() {
           </div>
         )}
 
-        {bindings.length === 0 ? (
+        {bindingsError ? (
+          <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3" data-testid="bindings-error">
+            <p className="text-sm text-red-400">Could not load channel bindings — try refreshing the page</p>
+          </div>
+        ) : bindings.length === 0 ? (
           <p className="text-sm text-mountain-500">No channels bound yet. Bind a Discord channel to an agent to start.</p>
         ) : (
           <div className="space-y-2">
