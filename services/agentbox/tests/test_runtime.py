@@ -492,6 +492,43 @@ class TestWorkEvents:
         raw = log_path.read_text()
         assert "test-token-123" not in raw
 
+    # THE ASSERTION THAT MATTERS (app#436). _run_chat calls handle_chat(),
+    # which is void, then unconditionally emits work_completed with
+    # success=True — regardless of what handle_chat actually did. Its sibling
+    # _run_shell, in the same file, derives success from the real JSON
+    # result (`result.get("success", False)`); that asymmetry is the defect.
+    #
+    # A chat payload with no callback_url is the cleanest way to force a
+    # genuine, deterministic handle_chat failure with no mocking: it is
+    # handle_chat's OWN first validation check, and it already emits its own
+    # work_failed event before returning normally (not raising) — so this
+    # also demonstrates the visible, concrete symptom of the bug as it
+    # stands today: BOTH a work_failed AND a work_completed/success=True
+    # event land for the exact same work item, contradicting each other.
+    @pytest.mark.asyncio
+    async def test_work_completed_reports_failure_when_handle_chat_fails(self, tmp_path):
+        """work_completed's success must reflect what handle_chat did, not assume it."""
+        runtime, _, log_path = _make_runtime(tmp_path)
+        request = _MockRequest(
+            headers={"authorization": "Bearer test-token-123"},
+            # No callback_url — handle_chat's own first validation check.
+            body='{"type":"chat","payload":{}}',
+        )
+        await runtime.handle_work(request)
+        time.sleep(0.5)
+
+        events = [json.loads(line) for line in log_path.read_text().strip().split("\n") if line]
+        failed = [e for e in events if e["type"] == "work_failed"]
+        completed = [e for e in events if e["type"] == "work_completed"]
+
+        assert len(failed) == 1, "handle_chat's own validation should have emitted work_failed"
+        assert len(completed) == 1, "runtime's own wrapper should still emit its work_completed"
+        assert completed[0]["success"] is False, (
+            f"handle_chat failed validation, but work_completed reported "
+            f"success={completed[0]['success']!r} — the same work item now has a "
+            f"work_failed event AND a contradicting work_completed/success=true event"
+        )
+
 
 class TestWorkFailedEvents:
     @pytest.mark.asyncio
