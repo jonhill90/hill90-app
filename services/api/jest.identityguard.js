@@ -22,6 +22,26 @@
 // Test-side only. No production file is touched.
 const http = require('http');
 const net = require('net');
+const fs = require('fs');
+const path = require('path');
+
+// #350's own ask named this explicitly and the shipped fix (#352) only
+// covered jest.auth401.js: "capturing whatever the identity guard AND the
+// auth401 probe wrote." Before this, a real violation's only evidence was
+// the thrown Error's message — visible in the raw CI job log until GitHub's
+// retention window closes it, and never a durable artifact. Same trap
+// #350 named for the probe, same fix: write unconditionally, on the
+// occurrence, to a workspace-relative path the existing "Collect AUTH_401_PROBE
+// evidence" artifact step already picks up (it globs the whole
+// test-artifacts/ directory, not a single filename).
+const EVIDENCE_OUT = process.env.IDENTITY_GUARD_OUT || 'test-artifacts/identityguard.jsonl';
+try { fs.mkdirSync(path.dirname(EVIDENCE_OUT), { recursive: true }); } catch (e) {}
+function recordViolation(v) {
+  try {
+    const testName = (typeof expect !== 'undefined' && expect.getState) ? expect.getState().currentTestName : '';
+    fs.appendFileSync(EVIDENCE_OUT, JSON.stringify({ ts: Date.now(), test: testName, ...v }) + '\n');
+  } catch (e) {}
+}
 
 // SHARED STATE, NOT MODULE STATE — and this is load-bearing, not style. This file
 // is a setupFilesAfterEnv entry, so Jest re-executes it fresh (new module registry,
@@ -137,6 +157,14 @@ if (!state.patched) {
 afterEach(() => {
   if (state.violations.length === 0) return;
   const v = state.violations.splice(0, state.violations.length);
+  // Written here, not at push time: the control test's deliberate violations
+  // are drained via __drainViolationsForControl() BEFORE this runs (see that
+  // function's own comment — draining is what stops the control itself from
+  // failing), so they never reach this line. Only a violation that actually
+  // survives to fail a real test is recorded — which is the ones the durable
+  // evidence exists for, not the synthetic ones every CI run generates on
+  // purpose.
+  v.forEach(recordViolation);
   const lines = v.map((x) => x.kind === 'NO STAMP'
     ? `  NO STAMP       ${x.statusLine}  from 127.0.0.1:${x.port}\n${x.head.split('\r\n').map((l) => '      ' + l).join('\n')}`
     : `  FOREIGN STAMP  ${x.statusLine}  from 127.0.0.1:${x.port}\n      produced by ${x.got}, this worker is ${x.expected}`);
