@@ -75,7 +75,24 @@ describe('GET /shared-knowledge/graph', () => {
       .get('/shared-knowledge/graph?limit=7')
       .set('Authorization', `Bearer ${userToken}`);
 
-    expect(mockGetGraph).toHaveBeenCalledWith(7);
+    // Cross-service sibling-drift sweep (app#445 family): this route never
+    // called scopeToOwner, unlike its /collections sibling — a 'user'-role
+    // caller (sub 'u1', not admin) is now scoped to their own sub.
+    expect(mockGetGraph).toHaveBeenCalledWith(7, 'u1');
+  });
+
+  it('does not scope an admin caller', async () => {
+    const adminToken = jwt.sign(
+      { sub: 'admin-1', resource_access: { 'hill90-ui': { roles: ['admin', 'user'] } } },
+      privateKey,
+      { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '5m' },
+    );
+
+    await request(app)
+      .get('/shared-knowledge/graph')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(mockGetGraph).toHaveBeenCalledWith(expect.any(Number), undefined);
   });
 
   it('forwards the upstream status instead of flattening it', async () => {

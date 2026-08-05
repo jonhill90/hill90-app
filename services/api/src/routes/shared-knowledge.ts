@@ -39,7 +39,14 @@ router.get('/graph', requireRole('user'), async (req: Request, res: Response) =>
     // WITH the queries rather than being reimplemented here over paginated
     // responses: the count belongs next to the data it counts, and two copies
     // of that logic is how the twin defects in this repository start.
-    const { status, data } = await skProxy.getGraph(page.limit ?? DEFAULT_PAGE);
+    //
+    // Cross-service sibling-drift sweep (app#445 family): this route never
+    // called scopeToOwner, unlike its own siblings below (/collections etc.)
+    // — a plain `user`-role caller could see every other user's private
+    // collection and source names via the graph. Scoped identically now.
+    const scope = scopeToOwner(req);
+    const owner = scope.where === '1=1' ? undefined : (req as any).user.sub;
+    const { status, data } = await skProxy.getGraph(page.limit ?? DEFAULT_PAGE, owner);
     res.status(status).json(data);
   } catch (err: any) {
     console.error('[shared-knowledge] Graph error:', err);
@@ -50,7 +57,11 @@ router.get('/graph', requireRole('user'), async (req: Request, res: Response) =>
 router.get('/stats', requireRole('user'), async (req: Request, res: Response) => {
   try {
     const since = req.query.since as string | undefined;
-    const result = await skProxy.getStats(since);
+    // Same fix as /graph above — this route never called scopeToOwner either,
+    // leaking every user's top_collections/top_sources names to any caller.
+    const scope = scopeToOwner(req);
+    const owner = scope.where === '1=1' ? undefined : (req as any).user.sub;
+    const result = await skProxy.getStats(since, owner);
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('[shared-knowledge] Stats error:', err);

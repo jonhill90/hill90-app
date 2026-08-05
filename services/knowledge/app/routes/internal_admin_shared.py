@@ -390,18 +390,26 @@ async def get_stats(
     # request that supplied `since`. Typing it here also gets ISO-8601 parsing and a
     # 422 on malformed input from FastAPI, instead of a crash deep in the driver.
     since: datetime | None = Query(None, description="ISO timestamp to scope time-based stats"),
+    # Cross-service sibling-drift sweep (app#445 family): every other route in
+    # this file's api-side twin (routes/shared-knowledge.ts) derives owner from
+    # scopeToOwner before proxying. This one didn't, so a non-admin caller saw
+    # every user's top_collections/top_sources names. owner=None (admin) is
+    # unchanged.
+    owner: str | None = Query(None, description="Scope stats to this owner; omitted/None for admin (unscoped)"),
 ) -> dict[str, Any]:
     _verify_service_token(request)
     pool = request.app.state.pool
-    return await shared_store.get_shared_stats(pool, since=since)
+    return await shared_store.get_shared_stats(pool, since=since, owner=owner)
 
 @router.get("/graph")
 async def knowledge_graph(
     request: Request,
     limit: int = Query(100, ge=1, le=500),
+    # Same fix as /stats above — see shared_store.knowledge_graph's docstring.
+    owner: str | None = Query(None, description="Scope the graph to this owner; omitted/None for admin (unscoped)"),
 ) -> dict[str, Any]:
     """The shared-knowledge graph, from the service that owns the tables (#300)."""
     _verify_service_token(request)
     pool = request.app.state.pool
-    return await shared_store.knowledge_graph(pool, limit)
+    return await shared_store.knowledge_graph(pool, limit, owner=owner)
 

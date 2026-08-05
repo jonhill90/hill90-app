@@ -140,6 +140,46 @@ async def test_every_list_is_bounded_by_the_callers_limit():
 
 
 @pytest.mark.asyncio
+async def test_owner_none_applies_no_scoping_predicate():
+    # Admin caller (owner=None): unchanged behaviour — no WHERE beyond the
+    # sources list's existing status filter, and no owner param anywhere.
+    pool = _pool(totals={"collections": 0, "sources": 0, "agents_with_knowledge": 0,
+                          "requesters_with_retrievals": 0})
+    await shared_store.knowledge_graph(pool, limit=5, owner=None)
+
+    collections_sql, sources_sql = pool.conn.sql[0], pool.conn.sql[1]
+    assert "created_by" not in collections_sql
+    assert "created_by" not in sources_sql
+    assert pool.conn.args[0] == (5,)
+    assert pool.conn.args[1] == (5,)
+    totals_sql, totals_args = pool.conn.sql[4], pool.conn.args[4]
+    assert "created_by" not in totals_sql
+    assert totals_args == ()
+
+
+@pytest.mark.asyncio
+async def test_owner_scoping_adds_the_same_predicate_as_list_collections_search_chunks():
+    # Cross-service sibling-drift sweep (app#445 family): this function used to
+    # take no owner at all, unlike its api-side sibling routes which all call
+    # scopeToOwner. This pins the fix's SQL shape — the same
+    # `created_by = $owner OR visibility = 'shared'` predicate used elsewhere
+    # in this file — rather than merely trusting the assembly logic above.
+    pool = _pool(totals={"collections": 0, "sources": 0, "agents_with_knowledge": 0,
+                          "requesters_with_retrievals": 0})
+    await shared_store.knowledge_graph(pool, limit=5, owner="user-1")
+
+    collections_sql, sources_sql = pool.conn.sql[0], pool.conn.sql[1]
+    assert "created_by = $2 OR visibility = 'shared'" in collections_sql
+    assert "sc.created_by = $2 OR sc.visibility = 'shared'" in sources_sql
+    assert pool.conn.args[0] == (5, "user-1")
+    assert pool.conn.args[1] == (5, "user-1")
+
+    totals_sql, totals_args = pool.conn.sql[4], pool.conn.args[4]
+    assert "created_by = $1 OR visibility = 'shared'" in totals_sql
+    assert totals_args == ("user-1",)
+
+
+@pytest.mark.asyncio
 async def test_agents_are_counted_with_COUNT_DISTINCT_because_the_list_is_grouped():
     # A plain COUNT(*) there would count entries rather than agents, and the
     # figure would disagree with the list it describes.

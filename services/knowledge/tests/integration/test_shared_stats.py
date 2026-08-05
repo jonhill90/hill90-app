@@ -51,12 +51,15 @@ async def _ingest_source(app_client, collection_id, title, content, owner):
     return resp.json()
 
 
-async def _admin_search(app_client, q, requester_id, requester_type="user"):
+async def _admin_search(app_client, q, requester_id, requester_type="user", collection_id=None):
     """Helper for internal admin search. Returns response JSON."""
+    params = {"q": q, "requester_id": requester_id, "requester_type": requester_type}
+    if collection_id is not None:
+        params["collection_id"] = collection_id
     resp = await app_client.get(
         "/internal/admin/shared/search",
         headers=INTERNAL_HEADERS,
-        params={"q": q, "requester_id": requester_id, "requester_type": requester_type},
+        params=params,
     )
     assert resp.status_code == 200, f"search failed: {resp.text}"
     return resp.json()
@@ -369,6 +372,53 @@ class TestSharedStats:
 
         all_keys = _collect_keys(data)
         assert "query" not in all_keys
+
+    async def test_stats_owner_scoping_hides_other_owners_private_collections(self, app_client):
+        """Cross-service sibling-drift sweep (app#445 family): /stats never
+        scoped top_collections/top_sources by owner, unlike every other route
+        in this file's api-side twin (routes/shared-knowledge.ts calls
+        scopeToOwner before proxying every OTHER route). Proves the fix
+        against a real Postgres: a non-admin caller scoped to owner-a must not
+        see owner-b's PRIVATE collection in top_collections/top_sources, and
+        an unscoped (admin) caller must see both.
+        """
+        cid_a = await _create_collection(app_client, "Owner A Private", "owner-a", visibility="private")
+        await _ingest_source(
+            app_client, cid_a, "Owner A Doc",
+            "Rust ownership and borrow checker semantics.",
+            "owner-a",
+        )
+        cid_b = await _create_collection(app_client, "Owner B Private", "owner-b", visibility="private")
+        await _ingest_source(
+            app_client, cid_b, "Owner B Doc",
+            "Rust ownership and borrow checker semantics.",
+            "owner-b",
+        )
+
+        # Retrieve against each collection explicitly so shared_retrievals
+        # records a collection_id (and chunk_ids) for both.
+        await _admin_search(app_client, "Rust", "req-a", collection_id=cid_a)
+        await _admin_search(app_client, "Rust", "req-b", collection_id=cid_b)
+
+        # Admin (unscoped): sees both.
+        resp = await app_client.get("/internal/admin/shared/stats", headers=INTERNAL_HEADERS)
+        admin_names = {c["name"] for c in resp.json()["usage"]["top_collections"]}
+        assert {"Owner A Private", "Owner B Private"} <= admin_names
+
+        # Scoped to owner-a: must see its own collection, must NOT see
+        # owner-b's private one.
+        resp = await app_client.get(
+            "/internal/admin/shared/stats",
+            headers=INTERNAL_HEADERS,
+            params={"owner": "owner-a"},
+        )
+        scoped_names = {c["name"] for c in resp.json()["usage"]["top_collections"]}
+        assert "Owner A Private" in scoped_names
+        assert "Owner B Private" not in scoped_names
+
+        scoped_source_titles = {s["title"] for s in resp.json()["usage"]["top_sources"]}
+        assert "Owner A Doc" in scoped_source_titles
+        assert "Owner B Doc" not in scoped_source_titles
 
     async def test_stats_no_requester_id_leak(self, app_client):
         """Stats response must not contain 'requester_id' or 'requester_name' keys."""
