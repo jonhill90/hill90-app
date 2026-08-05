@@ -73,6 +73,10 @@ export default function WorkflowsClient() {
   const [workflows, setWorkflows] = useState<Workflow[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
   const [loading, setLoading] = useState(true)
+  // A failed workflows fetch used to leave `workflows` at [] with no trace
+  // of why — "No workflows yet" read identically for a real 500 and a
+  // genuinely empty estate.
+  const [loadError, setLoadError] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -95,8 +99,14 @@ export default function WorkflowsClient() {
   const fetchWorkflows = useCallback(async () => {
     try {
       const res = await fetch('/api/workflows')
-      if (res.ok) { const data = await res.json(); if (Array.isArray(data)) setWorkflows(data) }
-    } catch { /* ignore */ }
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) setWorkflows(data)
+        setLoadError(false)
+      } else {
+        setLoadError(true)
+      }
+    } catch { setLoadError(true) }
     finally { setLoading(false) }
   }, [])
 
@@ -324,7 +334,14 @@ export default function WorkflowsClient() {
       )}
 
       {/* Workflow List */}
-      {workflows.length === 0 && !showForm ? (
+      {loadError ? (
+        <div
+          className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+          data-testid="workflows-error"
+        >
+          <p className="text-sm text-red-400">Could not load workflows — try refreshing the page</p>
+        </div>
+      ) : workflows.length === 0 && !showForm ? (
         <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 flex flex-col items-center justify-center text-center">
           <div className="mb-4 rounded-full bg-navy-700 p-4"><Zap className="h-8 w-8 text-mountain-400" /></div>
           <h2 className="text-lg font-semibold text-white mb-2">No workflows yet</h2>

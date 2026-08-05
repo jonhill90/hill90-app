@@ -140,6 +140,26 @@ describe('ModelsClient', () => {
     })
   })
 
+  it('shows an error banner, not "No models defined yet", when the models fetch fails', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/user-models') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+      }
+      if (url === '/api/provider-connections') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_CONNECTIONS) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<ModelsClient />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('models-error')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Could not load models — try refreshing the page')).toBeInTheDocument()
+    expect(screen.queryByText('No models defined yet')).not.toBeInTheDocument()
+  })
+
   it('shows connection-first hint when no connections exist', async () => {
     mockFetchResponses([], [])
 

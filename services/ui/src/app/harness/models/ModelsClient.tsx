@@ -71,6 +71,10 @@ export default function ModelsClient() {
   const [models, setModels] = useState<UserModel[]>([])
   const [connections, setConnections] = useState<ProviderConnection[]>([])
   const [loading, setLoading] = useState(true)
+  // A failed models fetch used to leave `models` at [] with no trace of
+  // why — "No models defined yet" read identically for a real 500 and a
+  // genuinely empty estate.
+  const [loadError, setLoadError] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
@@ -104,10 +108,16 @@ export default function ModelsClient() {
         fetch('/api/user-models'),
         fetch('/api/provider-connections'),
       ])
-      if (modelsRes.ok) setModels(await modelsRes.json())
+      if (modelsRes.ok) {
+        setModels(await modelsRes.json())
+        setLoadError(false)
+      } else {
+        setLoadError(true)
+      }
       if (connsRes.ok) setConnections(await connsRes.json())
     } catch (err) {
       console.error('Failed to fetch data:', err)
+      setLoadError(true)
     } finally {
       setLoading(false)
     }
@@ -722,7 +732,14 @@ export default function ModelsClient() {
       )}
 
       {/* Models table */}
-      {models.length === 0 ? (
+      {loadError ? (
+        <div
+          className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3"
+          data-testid="models-error"
+        >
+          <p className="text-sm text-red-400">Could not load models — try refreshing the page</p>
+        </div>
+      ) : models.length === 0 ? (
         <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 text-center">
           <p className="text-mountain-400 mb-4">No models defined yet</p>
           <p className="text-sm text-mountain-500">
