@@ -927,6 +927,8 @@ async def _execute_git(args: dict) -> str:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                return json.dumps({"success": False, "error": (stderr or b"").decode().strip()})
             output = (stdout or b"").decode().strip()
             return json.dumps({"success": True, "output": output or "Working tree clean"})
 
@@ -964,6 +966,8 @@ async def _execute_git(args: dict) -> str:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                return json.dumps({"success": False, "error": (stderr or b"").decode().strip()})
             output = (stdout or b"").decode().strip()
             return json.dumps({"success": True, "output": output or "No changes"})
 
@@ -989,6 +993,8 @@ async def _execute_git(args: dict) -> str:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                return json.dumps({"success": False, "error": (stderr or b"").decode().strip()})
             return json.dumps({"success": True, "output": (stdout or b"").decode().strip() or "Unstaged"})
 
         else:
