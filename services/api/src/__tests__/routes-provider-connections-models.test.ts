@@ -175,6 +175,60 @@ describe('Provider Connections — Model Listing', () => {
     expect(res.status).toBe(404);
   });
 
+  // app#396: services/ai's /internal/list-provider-models returns HTTP 200
+  // with `{models: [], error: "..."}` when the provider key can't be
+  // decrypted — deliberately, so a decrypt failure doesn't read as a
+  // transport error. Axios does not throw on a 200, so this response landed
+  // in the SUCCESS branch — a different code path from B3/B4 above, which
+  // both exercise axios REJECTING. Before the fix, `response.data?.models
+  // || []` was the only field read there, so `error` was silently dropped
+  // and a decrypt failure rendered to the user as "this provider has no
+  // models" instead of the real reason.
+  it('B7 (app#396): a 200 response carrying models:[] AND error forwards the error, not just the empty list', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'conn-1', provider: 'openai',
+        api_key_encrypted: Buffer.from('enc'), api_key_nonce: Buffer.from('nonce'),
+        api_base_url: null,
+      }],
+    });
+
+    // A RESOLVED axios call, status 200, exactly what services/ai sends on
+    // a decrypt failure — not a rejection, which is what B3/B4 test.
+    mockAxiosPost.mockResolvedValueOnce({
+      data: { models: [], error: 'Failed to decrypt provider key' },
+    });
+
+    const res = await request(app)
+      .get('/provider-connections/conn-1/models')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.models).toEqual([]);
+    // THE ASSERTION THAT MATTERS: the error survives the round trip.
+    expect(res.body.error).toBe('Failed to decrypt provider key');
+  });
+
+  it('a 200 response with models and no error still omits the error key entirely, not error: undefined', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'conn-1', provider: 'openai',
+        api_key_encrypted: Buffer.from('enc'), api_key_nonce: Buffer.from('nonce'),
+        api_base_url: null,
+      }],
+    });
+    mockAxiosPost.mockResolvedValueOnce({
+      data: { models: [{ id: 'openai/gpt-4o' }] },
+    });
+
+    const res = await request(app)
+      .get('/provider-connections/conn-1/models')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect('error' in res.body).toBe(false);
+  });
+
   // B4: AI service timeout
   it('B4: AI service timeout returns actionable error', async () => {
     mockQuery.mockResolvedValueOnce({
