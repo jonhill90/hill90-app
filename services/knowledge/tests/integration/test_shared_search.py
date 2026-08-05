@@ -1,5 +1,7 @@
 """Integration tests for shared knowledge FTS search."""
 
+from unittest.mock import patch
+
 import pytest
 
 pytestmark = pytest.mark.integration
@@ -128,3 +130,77 @@ class TestSearchReturnsProvenance:
         assert "chunk_index" in result
         assert "score" in result
         assert "headline" in result
+
+
+class TestAdminSearchScoreTypeMatchesSearchType:
+    """The knowledge sweep's retrieval pass (app#442 family): a caller reading
+    score_type learns how to interpret the `score` field on each result — a
+    raw ts_rank is not on the same scale as a blended hybrid score, and the
+    twin agent-facing route (routes/shared.py) already derives score_type
+    from search_type: `"hybrid" if search_type == "hybrid" else "ts_rank"`.
+
+    This admin route hardcoded `"score_type": "ts_rank"` unconditionally,
+    even when search_type == "hybrid" and every result's `score` field is
+    actually the blended fts/vector score computed in
+    hybrid_search_chunks — not a ts_rank at all. A caller trusting
+    score_type to interpret score would misread the number's meaning and
+    scale on every hybrid admin search, exactly the twin-drift shape #234's
+    own rule exists to catch.
+    """
+
+    async def test_score_type_reflects_hybrid_when_search_type_is_hybrid(
+        self, app_client
+    ):
+        cid = await _setup_collection(
+            app_client, "Score Type Col", "user-score-type", "shared"
+        )
+        await _ingest_source(
+            app_client, cid, "Score Type Source",
+            "Specific content about distributed systems for score type test.",
+            "user-score-type",
+        )
+
+        async def one_vector(_q):
+            return [0.05] * 1536
+
+        with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):
+            resp = await app_client.get(
+                "/internal/admin/shared/search",
+                headers=HEADERS,
+                params={"q": "distributed systems", "requester_id": "user-score-type"},
+            )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["search_type"] == "hybrid", (
+            "test setup did not actually exercise the hybrid path"
+        )
+        assert data["score_type"] == "hybrid", (
+            f"search_type is 'hybrid' but score_type reported "
+            f"{data['score_type']!r} — a caller cannot tell the score field "
+            f"is a blended hybrid score, not a raw ts_rank"
+        )
+
+    async def test_score_type_is_ts_rank_for_a_genuine_fts_only_search(self, app_client):
+        # POSITIVE CONTROL — a fix that hardcoded score_type="hybrid" would
+        # also pass the test above for the wrong reason.
+        cid = await _setup_collection(
+            app_client, "FTS Only Score Type Col", "user-fts-score-type", "shared"
+        )
+        await _ingest_source(
+            app_client, cid, "FTS Only Source",
+            "Specific content about relational databases for fts only test.",
+            "user-fts-score-type",
+        )
+
+        with patch("app.services.embeddings.generate_embedding", return_value=None):
+            resp = await app_client.get(
+                "/internal/admin/shared/search",
+                headers=HEADERS,
+                params={"q": "relational databases", "requester_id": "user-fts-score-type"},
+            )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["search_type"] == "fts"
+        assert data["score_type"] == "ts_rank"
