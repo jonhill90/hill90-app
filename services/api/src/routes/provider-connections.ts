@@ -419,7 +419,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
     await client.query('COMMIT');
     res.json({ deleted: true });
   } catch (err) {
-    // app#487 follow-up: guarded, not rethrown. This route (unlike the
+    // app#489: guarded, not rethrown. This route (unlike the
     // identical connect/BEGIN/work/COMMIT/ROLLBACK-in-catch shape in
     // chat.ts and discord-internal.ts) builds a specific response from
     // `err` right here rather than rethrowing to app.ts's generic terminal

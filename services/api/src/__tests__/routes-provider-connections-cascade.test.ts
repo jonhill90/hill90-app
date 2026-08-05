@@ -237,7 +237,7 @@ describe('Provider Connections — JSONB Cascade', () => {
     expect(mockClientRelease).toHaveBeenCalled();
   });
 
-  // F6 (app#487 follow-up): the catch block's own ROLLBACK was unguarded,
+  // F6 (app#489): the catch block's own ROLLBACK was unguarded,
   // unlike the identical connect/BEGIN/work/COMMIT/ROLLBACK-in-catch shape
   // in chat.ts and discord-internal.ts, both of which wrap their ROLLBACK
   // in `.catch(() => {})` before rethrowing the original error. Matching
