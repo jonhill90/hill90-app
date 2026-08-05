@@ -24,6 +24,7 @@ import {
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
+import { isValidCronExpression } from '../helpers/cron';
 
 // app#374: agents.env_vars stored operator-supplied environment variables —
 // including, per the UI's own AgentClaudeConfig.tsx form, a raw Anthropic
@@ -3503,14 +3504,6 @@ router.delete('/:id/webhooks/:webhookId', requireRole('admin'), async (req: Requ
 // PUT /agents/:id/schedule — update agent auto-start schedule
 // ───────────────────────────────────────────────────────────────────
 
-const CRON_FIELD_RE = /^(\*|[0-9,\-\/]+)$/;
-
-function isValidCron(expr: string): boolean {
-  const fields = expr.trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-  return fields.every(f => CRON_FIELD_RE.test(f));
-}
-
 router.put('/:id/schedule', requireRole('user'), async (req: Request, res: Response) => {
   try {
     const scope = scopeToOwner(req);
@@ -3528,8 +3521,15 @@ router.put('/:id/schedule', requireRole('user'), async (req: Request, res: Respo
     const { schedule_cron, schedule_enabled } = req.body;
 
     if (schedule_cron !== undefined && schedule_cron !== null && schedule_cron !== '') {
-      if (typeof schedule_cron !== 'string' || !isValidCron(schedule_cron)) {
-        res.status(400).json({ error: 'Invalid cron expression. Must be 5 fields: minute hour day month weekday' });
+      // app#485: the field-count-plus-regex check this replaced accepted
+      // out-of-range values (e.g. "60" in the minute field, which this
+      // route's own regex `[0-9,\-\/]+` matched but no cron implementation
+      // treats as valid) and, unlike routes/workflows.ts's validator, never
+      // accepted a 6-field (with-seconds) expression at all. Shared with
+      // that route's validator now, backed by the same library the
+      // scheduler parses with — see helpers/cron.ts.
+      if (typeof schedule_cron !== 'string' || !isValidCronExpression(schedule_cron)) {
+        res.status(400).json({ error: 'Invalid cron expression' });
         return;
       }
     }
