@@ -174,6 +174,32 @@ describe('Workflows routes', () => {
       expect(res.body.error).toContain('cron');
     });
 
+    it('POSITIVE CONTROL (app#487): rejects a cron with valid field COUNT but out-of-range VALUES', async () => {
+      // The pre-fix validator only checked "5 or 6 whitespace-separated
+      // fields" — this string passes that check but every field is out of
+      // range, and cron-parser (what the scheduler actually uses to compute
+      // next_run_at) rejects it. Before this fix the row was written anyway
+      // (the agent-exists check and INSERT below are queued so a pre-fix
+      // run reaches, and succeeds at, both — proving the row really would
+      // have been written, not just that validation was skipped), with
+      // next_run_at silently never set.
+      mockQuery.mockResolvedValueOnce({ rows: [{ id: 'agent-uuid' }] });
+      mockQuery.mockResolvedValueOnce({ rows: [{ ...MOCK_WORKFLOW, schedule_cron: '99 99 99 99 99' }] });
+
+      const res = await request(app)
+        .post('/workflows')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({
+          name: 'Out Of Range Cron',
+          agent_id: 'agent-uuid',
+          schedule_cron: '99 99 99 99 99',
+          prompt: 'test',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('cron');
+    });
+
     it('returns 404 for non-existent agent', async () => {
       mockQuery.mockResolvedValueOnce({ rows: [] });
 
