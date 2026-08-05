@@ -28,6 +28,7 @@ import tasksRouter from './routes/tasks';
 import storageRouter from './routes/storage';
 import notificationsRouter from './routes/notifications';
 import workflowsRouter from './routes/workflows';
+import workflowsWebhookRouter from './routes/workflows-webhook';
 import mcpServersRouter from './routes/mcp-servers';
 import { modelRouterRefreshHandler } from './services/model-router-refresh';
 import discordInternalRouter from './routes/discord-internal';
@@ -213,6 +214,17 @@ export function createApp(opts: AppOptions = {}): Application {
 
   // Notifications
   app.use('/notifications', requireAuth, notificationsRouter);
+
+  // Genuinely public: the inbound workflow webhook trigger authenticates
+  // via its own 256-bit token, not a Keycloak session — see that route's
+  // header for why the token alone is sufficient. MUST be mounted before
+  // the requireAuth-guarded /workflows below: Express falls through to the
+  // next matching app.use when a router has no route for the request, so
+  // every other /workflows/* path passes through this one untouched and
+  // still reaches requireAuth exactly as before. Reversing this order
+  // would make requireAuth run first and reintroduce the exact defect this
+  // split exists to fix.
+  app.use('/workflows', workflowsWebhookRouter);
   app.use('/workflows', requireAuth, workflowsRouter);
   app.use('/mcp-servers', requireAuth, mcpServersRouter);
   app.use('/discord', requireAuth, discordRouter);
