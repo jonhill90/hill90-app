@@ -1948,6 +1948,54 @@ describe('Chat stale sweeper', () => {
     expect(typeof startStaleSweeper).toBe('function');
     expect(typeof stopStaleSweeper).toBe('function');
   });
+
+  // THE ASSERTION THAT MATTERS. chatCallbackHandler's own guarded UPDATE treats
+  // status IN ('pending', 'thinking') as the equivalence class of "still open" —
+  // a message legitimately sits at 'thinking' between an intermediate progress
+  // callback and the final complete/error one. If that FINAL callback is lost
+  // (agentbox's _deliver_callback is fire-and-forget, no retry — the network
+  // blip, an API restart mid-delivery, a misconfigured token), the message is
+  // stuck at 'thinking' forever: the agent already did the work and generated a
+  // real answer, but the user's chat UI shows "thinking..." with no error and
+  // no recovery. The sweeper exists specifically to catch a message nothing
+  // will ever terminate — but its own WHERE clause only matches 'pending',
+  // missing the other half of the exact state set its sibling handler defines.
+  // A message that reaches 'thinking' is, perversely, in the state with LESS
+  // of a safety net than one that never started at all.
+  it('sweeps stale THINKING messages, not only pending ones', async () => {
+    jest.useFakeTimers();
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+
+    const { startStaleSweeper, stopStaleSweeper } = await import('../routes/chat');
+    try {
+      startStaleSweeper();
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      const sweepCall = mockQuery.mock.calls.find(
+        ([sql]) => typeof sql === 'string'
+          && sql.includes("SET status = 'error'")
+          && sql.includes('Response timed out')
+      );
+      expect(sweepCall).toBeDefined();
+      const sql = String(sweepCall![0]);
+
+      // Matches chatCallbackHandler's own guard exactly, not a looser check —
+      // a fix that widened this to ANY status (dropping the terminal-state
+      // exclusion) would be a worse bug and must not pass this test either.
+      expect(sql).toMatch(/status\s+IN\s*\(\s*'pending'\s*,\s*'thinking'\s*\)/i);
+
+      // Keyed on updated_at, not created_at — a 'thinking' message refreshed
+      // by repeated progress callbacks must not be swept out from under an
+      // agent that is still actively working. Keying this off created_at
+      // would make this fix itself a regression: it would sweep a message
+      // making real progress the moment it turned 2 minutes old.
+      expect(sql).toMatch(/updated_at\s*<\s*NOW\(\)/i);
+      expect(sql).not.toMatch(/created_at\s*<\s*NOW\(\)/i);
+    } finally {
+      stopStaleSweeper();
+      jest.useRealTimers();
+    }
+  });
 });
 
 // ── SSE stream ──
