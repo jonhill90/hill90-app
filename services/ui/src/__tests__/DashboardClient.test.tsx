@@ -394,6 +394,86 @@ describe('DashboardClient', () => {
     expect(viewUsageLink).toHaveAttribute('href', '/harness/usage')
   })
 
+  // Browser half of the silent-failure sweep: a failed /api/agents must not
+  // render the same as a genuinely empty estate on the page every session
+  // lands on first.
+  describe('a failed /api/agents renders an error, not an empty estate', () => {
+    function mockFetchWithFailedAgents() {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+        }
+        if (url === '/api/services/health') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_HEALTH) })
+        }
+        if (url === '/api/user-models') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_MODELS) })
+        }
+        if (typeof url === 'string' && url.startsWith('/api/usage')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_USAGE) })
+        }
+        if (url === '/api/chat') {
+          return Promise.resolve({
+            ok: true,
+            headers: { get: () => null },
+            json: () => Promise.resolve([]),
+          })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+    }
+
+    it('Active Agents shows an error, not "No active agents"', async () => {
+      mockFetchWithFailedAgents()
+      render(<DashboardClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('active-agents-error')).toBeInTheDocument()
+      })
+      expect(screen.getByText('Could not load agents — try refreshing')).toBeInTheDocument()
+      expect(screen.queryByText('No active agents')).not.toBeInTheDocument()
+    })
+
+    it('Platform Overview shows an error instead of silently not rendering', async () => {
+      mockFetchWithFailedAgents()
+      render(<DashboardClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('platform-overview-error')).toBeInTheDocument()
+      })
+      expect(screen.queryByText('Platform Overview')).not.toBeInTheDocument()
+    })
+
+    it('a genuinely empty (but successful) agent list still shows "No active agents"', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+        }
+        if (url === '/api/services/health') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_HEALTH) })
+        }
+        if (url === '/api/user-models') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_MODELS) })
+        }
+        if (typeof url === 'string' && url.startsWith('/api/usage')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_USAGE) })
+        }
+        if (url === '/api/chat') {
+          return Promise.resolve({ ok: true, headers: { get: () => null }, json: () => Promise.resolve([]) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<DashboardClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('No active agents')).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('active-agents-error')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('platform-overview-error')).not.toBeInTheDocument()
+    })
+  })
+
   it('auto-refreshes after 60 seconds', async () => {
     render(<DashboardClient session={MOCK_SESSION as any} />)
 

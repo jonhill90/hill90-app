@@ -427,6 +427,26 @@ describe('SharedKnowledgeClient', () => {
     })
   })
 
+  // Browser half of the silent-failure sweep: a failed collections fetch
+  // must not render the same as "no collections yet" — the exact example
+  // named ("a knowledge collection").
+  it('shows an error banner, not "No collections yet", when the collections fetch fails', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/shared-knowledge/collections') {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<SharedKnowledgeClient />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('collections-error')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Could not load collections — try refreshing the page')).toBeInTheDocument()
+    expect(screen.queryByText('No collections yet')).not.toBeInTheDocument()
+  })
+
   it('shows collection filter in search tab', async () => {
     render(<SharedKnowledgeClient />)
 

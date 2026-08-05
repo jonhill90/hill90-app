@@ -385,4 +385,41 @@ describe('AgentsClient', () => {
       expect(screen.queryByText(WARNING_TEXT)).not.toBeInTheDocument()
     })
   })
+
+  // Browser half of the silent-failure sweep: a failed /api/agents must not
+  // render the same as "no agents yet" on the main list page.
+  describe('a failed agents load renders an error, not an empty estate', () => {
+    it('shows an error banner, not "No agents yet"', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<AgentsClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('agents-list-error')).toBeInTheDocument()
+      })
+      expect(screen.getByText('Could not load agents — try refreshing the page')).toBeInTheDocument()
+      expect(screen.queryByText('No agents yet')).not.toBeInTheDocument()
+    })
+
+    it('a genuinely empty (but successful) agent list still shows "No agents yet"', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<AgentsClient session={MOCK_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('No agents yet')).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('agents-list-error')).not.toBeInTheDocument()
+    })
+  })
 })

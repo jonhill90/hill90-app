@@ -181,4 +181,43 @@ describe('UsageClient', () => {
     expect(headers[2]).toHaveTextContent('Tokens')
     expect(headers[3]).toHaveTextContent('Cost')
   })
+
+  // Browser half of the silent-failure sweep: a failed grouped-usage fetch
+  // must not render the same as "no usage data yet" on the exact chart
+  // named as the example.
+  describe('a failed grouped-usage fetch renders an error, not an empty chart', () => {
+    it('shows an error banner, not "No usage data yet"', async () => {
+      mockFetch.mockImplementation((url: string) => {
+        if (typeof url === 'string' && url.startsWith('/api/usage') && url.includes('group_by')) {
+          return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) })
+        }
+        if (typeof url === 'string' && url.startsWith('/api/usage')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_SUMMARY) })
+        }
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<UsageClient />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('usage-error')).toBeInTheDocument()
+      })
+      expect(screen.getByText('Could not load usage data — try refreshing the page')).toBeInTheDocument()
+      expect(screen.queryByText('No usage data yet')).not.toBeInTheDocument()
+    })
+
+    it('a genuinely empty (but successful) grouped result still shows "No usage data yet"', async () => {
+      mockFetchResponses({ data: [], group_by: 'agent' })
+
+      render(<UsageClient />)
+
+      await waitFor(() => {
+        expect(screen.getByText('No usage data yet')).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('usage-error')).not.toBeInTheDocument()
+    })
+  })
 })
