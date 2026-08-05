@@ -25,6 +25,7 @@ export default function PoliciesClient() {
   const [policies, setPolicies] = useState<ModelPolicy[]>([])
   const [userModels, setUserModels] = useState<UserModel[]>([])
   const [loading, setLoading] = useState(true)
+  const [policiesError, setPoliciesError] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -44,10 +45,16 @@ export default function PoliciesClient() {
         fetch('/api/model-policies'),
         fetch('/api/user-models'),
       ])
-      if (policiesRes.ok) setPolicies(await policiesRes.json())
+      if (policiesRes.ok) {
+        setPolicies(await policiesRes.json())
+        setPoliciesError(false)
+      } else {
+        setPoliciesError(true)
+      }
       if (modelsRes.ok) setUserModels(await modelsRes.json())
     } catch (err) {
       console.error('Failed to fetch data:', err)
+      setPoliciesError(true)
     } finally {
       setLoading(false)
     }
@@ -292,7 +299,11 @@ export default function PoliciesClient() {
       )}
 
       {/* Policies table */}
-      {policies.length === 0 ? (
+      {policiesError ? (
+        <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3" data-testid="policies-error">
+          <p className="text-sm text-red-400">Could not load policies — try refreshing the page</p>
+        </div>
+      ) : policies.length === 0 ? (
         <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 text-center">
           <p className="text-mountain-400 mb-4">No model policies yet</p>
           <p className="text-sm text-mountain-500">

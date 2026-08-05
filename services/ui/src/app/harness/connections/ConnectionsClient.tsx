@@ -49,6 +49,7 @@ const HEALTH_REFRESH_MS = 60_000
 export default function ConnectionsClient({ session }: { session: Session }) {
   const [connections, setConnections] = useState<ProviderConnection[]>([])
   const [loading, setLoading] = useState(true)
+  const [connectionsError, setConnectionsError] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
@@ -66,9 +67,13 @@ export default function ConnectionsClient({ session }: { session: Session }) {
       const res = await fetch('/api/provider-connections')
       if (res.ok) {
         setConnections(await res.json())
+        setConnectionsError(false)
+      } else {
+        setConnectionsError(true)
       }
     } catch (err) {
       console.error('Failed to fetch connections:', err)
+      setConnectionsError(true)
     } finally {
       setLoading(false)
     }
@@ -391,7 +396,11 @@ export default function ConnectionsClient({ session }: { session: Session }) {
           )}
 
           {/* Connection list */}
-          {connections.length === 0 ? (
+          {connectionsError ? (
+            <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3" data-testid="connections-error">
+              <p className="text-sm text-red-400">Could not load connections — try refreshing the page</p>
+            </div>
+          ) : connections.length === 0 ? (
             <div className="rounded-lg border border-navy-700 bg-navy-800 p-12 text-center">
               <p className="text-mountain-400 mb-4">No provider connections yet</p>
               <button

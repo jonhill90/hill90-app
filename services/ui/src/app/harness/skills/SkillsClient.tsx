@@ -46,6 +46,7 @@ export default function SkillsClient() {
   const [skills, setSkills] = useState<Skill[]>([])
   const [allTools, setAllTools] = useState<Tool[]>([])
   const [loading, setLoading] = useState(true)
+  const [skillsError, setSkillsError] = useState(false)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -76,9 +77,16 @@ export default function SkillsClient() {
   const fetchSkills = useCallback(async () => {
     try {
       const res = await fetch('/api/skills')
-      if (res.ok) { const data = await res.json(); if (Array.isArray(data)) setSkills(data) }
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) setSkills(data)
+        setSkillsError(false)
+      } else {
+        setSkillsError(true)
+      }
     } catch (err) {
       console.error('Failed to fetch skills:', err)
+      setSkillsError(true)
     } finally {
       setLoading(false)
     }
@@ -349,7 +357,11 @@ export default function SkillsClient() {
       )}
 
       {/* Skills list */}
-      {filteredSkills.length === 0 ? (
+      {skillsError ? (
+        <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3 mb-6" data-testid="skills-error">
+          <p className="text-sm text-red-400">Could not load skills — try refreshing the page</p>
+        </div>
+      ) : filteredSkills.length === 0 ? (
         <p className="text-sm text-mountain-500 mb-6">
           {searchQuery ? 'No skills match your search' : 'No skills yet'}
         </p>

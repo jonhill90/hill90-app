@@ -30,6 +30,7 @@ export default function ToolsClient() {
 
   const [tools, setTools] = useState<Tool[]>([])
   const [loading, setLoading] = useState(true)
+  const [toolsError, setToolsError] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
@@ -44,9 +45,16 @@ export default function ToolsClient() {
   const fetchTools = useCallback(async () => {
     try {
       const res = await fetch('/api/tools')
-      if (res.ok) { const data = await res.json(); if (Array.isArray(data)) setTools(data) }
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) setTools(data)
+        setToolsError(false)
+      } else {
+        setToolsError(true)
+      }
     } catch (err) {
       console.error('Failed to fetch tools:', err)
+      setToolsError(true)
     } finally {
       setLoading(false)
     }
@@ -236,7 +244,11 @@ export default function ToolsClient() {
         </div>
       )}
 
-      {tools.length === 0 ? (
+      {toolsError ? (
+        <div className="rounded-lg border border-red-700/50 bg-red-900/20 px-4 py-3 mb-6" data-testid="tools-error">
+          <p className="text-sm text-red-400">Could not load tools — try refreshing the page</p>
+        </div>
+      ) : tools.length === 0 ? (
         <p className="text-sm text-mountain-500 mb-6">No tools yet</p>
       ) : (
         <div className="space-y-3">

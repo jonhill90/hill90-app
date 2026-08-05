@@ -86,6 +86,22 @@ describe('ToolsClient', () => {
     expect(screen.getByText('Binary')).toBeInTheDocument()
   })
 
+  it('shows an error state, not the empty state, when the tools fetch fails', async () => {
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/tools' && (!opts || !opts.method || opts.method === 'GET')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<ToolsClient />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tools-error')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('No tools yet')).not.toBeInTheDocument()
+  })
+
   it('T6: renders dependency catalog subtitle', async () => {
     render(<ToolsClient />)
 
