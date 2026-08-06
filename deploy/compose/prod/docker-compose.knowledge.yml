@@ -28,6 +28,15 @@ services:
     build:
       context: ../../../services/knowledge
       dockerfile: Dockerfile
+      args:
+        # Stamps com.hill90.revision onto the IMAGE (see the Dockerfile's own
+        # ARG GIT_REVISION). Without this the ARG's default applied and the
+        # image was built and labelled the literal string "unstamped" on
+        # every deploy — app#558. The CONTAINER label below, set separately
+        # via compose `labels:`, was correct the whole time, which is why
+        # nobody noticed: check_deploy_drift.sh reads the container's label,
+        # not the image's.
+        GIT_REVISION: ${DEPLOY_REVISION:-unstamped}
     image: hill90/knowledge:${VERSION:-latest}
     container_name: ${CONTAINER_PREFIX:-}app-knowledge
     restart: unless-stopped
