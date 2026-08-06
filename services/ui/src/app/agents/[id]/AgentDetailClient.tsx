@@ -15,6 +15,7 @@ import AgentClaudeConfig from './AgentClaudeConfig'
 import AgentKnowledge from './AgentKnowledge'
 import { Camera, Download } from 'lucide-react'
 import AgentAvatar from '@/components/AgentAvatar'
+import Toast, { useToast, failureMessage } from '@/components/Toast'
 
 interface Agent {
   id: string
@@ -186,6 +187,18 @@ export default function AgentDetailClient({
   const avatarInputRef = useRef<HTMLInputElement>(null)
   const [avatarUploading, setAvatarUploading] = useState(false)
   const [avatarVersion, setAvatarVersion] = useState(0)
+
+  // app#(this sweep): Start/Stop/Reconcile/Delete/Clone/Assign-Skill/Remove-Skill
+  // all had `res.json()` on the failure branch with no `.catch()`, and their
+  // outer `catch` only `console.error`'d — so a non-JSON error body (a 502/504
+  // from a proxy timeout, not a hypothetical) made the action fail completely
+  // silently: the button stopped loading and nothing told the user. Every SAVE
+  // handler below this point (identity, autonomy, tags, env vars, schedule)
+  // already alerts unconditionally in its catch — only these action buttons
+  // were missed. Routed through the same Toast/failureMessage pair
+  // AgentClaudeConfig.tsx and AgentWebhooks.tsx already use (#217), rather than
+  // inventing a fourth error-reporting convention for this one file.
+  const { toast, showToast } = useToast()
 
   const isAdmin = session.user?.roles?.includes('admin')
 
@@ -386,13 +399,13 @@ export default function AgentDetailClient({
     try {
       const res = await fetch(`/api/agents/${agentId}/${action}`, { method: 'POST' })
       if (!res.ok) {
-        const data = await res.json()
-        alert(data.error || `Failed to ${action} agent`)
+        showToast('error', await failureMessage(`Could not ${action} the agent`, res))
+      } else {
+        await fetchAgent()
+        await fetchToolInstalls()
       }
-      await fetchAgent()
-      await fetchToolInstalls()
-    } catch (err) {
-      console.error(`Failed to ${action}:`, err)
+    } catch {
+      showToast('error', `Could not ${action} the agent: the request did not complete`)
     } finally {
       setActionLoading(false)
     }
@@ -403,12 +416,12 @@ export default function AgentDetailClient({
     try {
       const res = await fetch(`/api/agents/${agentId}/reconcile-tools`, { method: 'POST' })
       if (!res.ok) {
-        const data = await res.json()
-        alert(data.error || 'Failed to reconcile tools')
+        showToast('error', await failureMessage('Could not reconcile tools', res))
+      } else {
+        await fetchToolInstalls()
       }
-      await fetchToolInstalls()
-    } catch (err) {
-      console.error('Failed to reconcile tools:', err)
+    } catch {
+      showToast('error', 'Could not reconcile tools: the request did not complete')
     } finally {
       setActionLoading(false)
     }
@@ -422,11 +435,10 @@ export default function AgentDetailClient({
       if (res.ok) {
         router.push('/agents')
       } else {
-        const data = await res.json()
-        alert(data.error || 'Failed to delete agent')
+        showToast('error', await failureMessage('Could not delete the agent', res))
       }
-    } catch (err) {
-      console.error('Failed to delete:', err)
+    } catch {
+      showToast('error', 'Could not delete the agent: the request did not complete')
     } finally {
       setActionLoading(false)
     }
@@ -440,11 +452,10 @@ export default function AgentDetailClient({
         const cloned = await res.json()
         router.push(`/agents/${cloned.id}`)
       } else {
-        const data = await res.json()
-        alert(data.error || 'Failed to clone agent')
+        showToast('error', await failureMessage('Could not clone the agent', res))
       }
-    } catch (err) {
-      console.error('Failed to clone:', err)
+    } catch {
+      showToast('error', 'Could not clone the agent: the request did not complete')
     } finally {
       setActionLoading(false)
     }
@@ -483,15 +494,14 @@ export default function AgentDetailClient({
         body: JSON.stringify({ skill_id: skillId }),
       })
       if (!res.ok) {
-        const data = await res.json()
-        alert(data.error || 'Failed to assign skill')
+        showToast('error', await failureMessage('Could not assign the skill', res))
         return
       }
       setShowAssignPicker(false)
       await fetchAgent()
       await fetchToolInstalls()
-    } catch (err) {
-      console.error('Failed to assign skill:', err)
+    } catch {
+      showToast('error', 'Could not assign the skill: the request did not complete')
     }
   }
 
@@ -502,14 +512,13 @@ export default function AgentDetailClient({
         method: 'DELETE',
       })
       if (!res.ok) {
-        const data = await res.json()
-        alert(data.error || 'Failed to remove skill')
+        showToast('error', await failureMessage('Could not remove the skill', res))
         return
       }
       await fetchAgent()
       await fetchToolInstalls()
-    } catch (err) {
-      console.error('Failed to remove skill:', err)
+    } catch {
+      showToast('error', 'Could not remove the skill: the request did not complete')
     }
   }
 
@@ -709,6 +718,7 @@ export default function AgentDetailClient({
 
   return (
     <>
+      <Toast toast={toast} />
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-4">

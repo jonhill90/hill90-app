@@ -46,6 +46,36 @@ describe('CancelButton', () => {
     })
   })
 
+  // Lowest-value finding of this sweep's four, fixed anyway while in the
+  // file, and labeled as the low one: nothing was believed-saved-and-lost
+  // here, the pending response just kept running with no clue why Cancel
+  // didn't work.
+  it('alerts, rather than doing nothing, when the server rejects the cancel', async () => {
+    vi.stubGlobal('alert', vi.fn())
+    mockFetch.mockResolvedValue({ ok: false, status: 500 })
+
+    render(<CancelButton threadId="thread-1" hasPending={true} />)
+
+    fireEvent.click(screen.getByTestId('cancel-button'))
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalled()
+    })
+  })
+
+  it('alerts, rather than doing nothing, when the request itself fails', async () => {
+    vi.stubGlobal('alert', vi.fn())
+    mockFetch.mockRejectedValue(new Error('network down'))
+
+    render(<CancelButton threadId="thread-1" hasPending={true} />)
+
+    fireEvent.click(screen.getByTestId('cancel-button'))
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalled()
+    })
+  })
+
   it('shows cancelling state while request is in flight', async () => {
     let resolveReq: (v: any) => void
     mockFetch.mockReturnValue(new Promise(r => { resolveReq = r }))
