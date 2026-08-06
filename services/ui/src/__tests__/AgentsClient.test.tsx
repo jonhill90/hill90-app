@@ -302,6 +302,45 @@ describe('AgentsClient', () => {
     expect(links[0].textContent).toBe('ResearchBot')
   })
 
+  // This sweep's finding #2, and the strongest single piece of evidence in
+  // it: handleBulkStart/handleBulkStop/handleBulkDelete below already catch
+  // a per-item res.json() failure correctly (each pushes to an `errors[]`
+  // array that is always alerted) — only this single-row action path had
+  // `res.json()` with no `.catch()` feeding an outer catch that only
+  // console.error'd. A clean twin: one sibling right, the other not.
+  //
+  // THE ASSERTION THAT MATTERS is not "no unhandled rejection" — a version
+  // that swallows the error into silence passes that too, which is the same
+  // defect wearing a different coat (hit twice already today, #513 and
+  // #518). What has to be checked is whether the USER sees something.
+  describe('a non-JSON error body on the single-agent action no longer fails silently (this sweep)', () => {
+    it('Start on a single row alerts, rather than doing nothing, on a body res.json() cannot parse', async () => {
+      vi.stubGlobal('alert', vi.fn())
+      mockFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === '/api/agents') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+        }
+        if (url === '/api/agents/agent-2/start' && opts?.method === 'POST') {
+          return Promise.resolve({ ok: false, status: 502, json: () => Promise.reject(new Error('not json')) })
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      })
+
+      render(<AgentsClient session={MOCK_SESSION as any} />)
+      await waitFor(() => {
+        expect(screen.getByText('WriterBot')).toBeInTheDocument()
+      })
+
+      const writerCard = screen.getByTestId('agent-card-agent-2')
+      fireEvent.click(within(writerCard).getByText('Start'))
+
+      await waitFor(() => {
+        expect(window.alert).toHaveBeenCalled()
+      })
+      expect((window.alert as any).mock.calls[0][0]).toContain('start agent')
+    })
+  })
+
   // app#408: #406 made POST /:id/start return a `warnings` array when
   // AKM/model-router token generation failed but the container still
   // launched. This is the human half — the UI must render it, visibly

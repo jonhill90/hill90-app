@@ -142,7 +142,22 @@ export default function WorkflowsClient() {
   }, [selectedId, fetchRuns, fetchSteps])
 
   const handleSubmit = async () => {
-    const body = { ...form, output_config: JSON.parse(form.output_config || '{}'), schedule_cron: form.trigger_type === 'webhook' ? null : form.schedule_cron }
+    // Deliberately its own try/catch, separate from the network one below,
+    // and it runs BEFORE any fetch. JSON.parse used to run inline in the
+    // body-construction expression, outside every try block in this
+    // function — a catch added around the fetch call could never have
+    // caught it, because the throw already happened before that call was
+    // reached. Malformed JSON typed into Output Config made Save silently
+    // do nothing: an unhandled rejection from an async onClick, no message,
+    // no clue why. Validating first (not "add a catch") is the actual fix.
+    let parsedOutputConfig: Record<string, unknown>
+    try {
+      parsedOutputConfig = JSON.parse(form.output_config || '{}')
+    } catch {
+      alert('Output Config is not valid JSON')
+      return
+    }
+    const body = { ...form, output_config: parsedOutputConfig, schedule_cron: form.trigger_type === 'webhook' ? null : form.schedule_cron }
     const url = editingId ? `/api/workflows/${editingId}` : '/api/workflows'
     const method = editingId ? 'PUT' : 'POST'
     try {

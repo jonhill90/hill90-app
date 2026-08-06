@@ -14,15 +14,21 @@ export default function CancelButton({ threadId, hasPending, onCancelled }: Prop
 
   if (!hasPending) return null
 
+  // Lowest-value of this sweep's four fixes, fixed anyway while in the file:
+  // a failed cancel left the pending response running with nothing telling
+  // the user it hadn't stopped, but nothing was believed-saved-and-lost —
+  // the response just kept generating, same as if Cancel were never clicked.
   const handleCancel = async () => {
     setCancelling(true)
     try {
       const res = await fetch(`/api/chat/${threadId}/cancel`, { method: 'POST' })
       if (res.ok) {
         onCancelled?.()
+      } else {
+        alert('Could not cancel — the response may still be running')
       }
     } catch {
-      // ignore
+      alert('Could not cancel: the request did not complete')
     } finally {
       setCancelling(false)
     }
