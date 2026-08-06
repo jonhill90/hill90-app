@@ -151,6 +151,26 @@ describe('ChatView', () => {
     expect(screen.queryByTestId('older-messages-notice')).not.toBeInTheDocument()
   })
 
+  // The 'backfill' listener a few lines below (in ChatView.tsx) wraps its
+  // own JSON.parse: "A malformed notice must not break the stream; the
+  // messages that follow are still good." The 'message' listener did not —
+  // this proves it now does, matching its sibling's own justification.
+  it('a malformed message frame is dropped, not left to break the rest of the stream', async () => {
+    render(<ChatView {...defaultProps} />)
+    const es = MockEventSource.instances[0]
+
+    // Raw, deliberately-invalid JSON — bypasses the emit() helper, which
+    // always JSON.stringifies a real payload.
+    for (const cb of es.listeners['message'] || []) cb({ data: '{not valid json' })
+
+    emit(es, 'message', msg(1))
+
+    // THE ASSERTION THAT MATTERS: the malformed frame did not take the
+    // listener down with it — a real message sent right after still
+    // renders.
+    await waitFor(() => expect(screen.getAllByTestId('chat-message')).toHaveLength(1))
+  })
+
   it('shows no notice at all when the server sent no backfill frame', async () => {
     // An older API deployed in front of this UI sends no such event. Absence
     // must read as "nothing to say", never as a truncation warning on a
