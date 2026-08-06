@@ -200,6 +200,27 @@ class TestIsBlockedIp:
     def test_blocks_broadcast(self) -> None:
         assert _is_blocked_ip("255.255.255.255") is True
 
+    def test_blocks_reserved(self) -> None:
+        """`addr.is_reserved`. IPv4 addresses in the Class E block
+        (240.0.0.0/4) are the obvious example, but in this Python version
+        `is_private` is already True for the entire block — so an IPv4-only
+        test here would pass even with the `is_reserved` branch deleted,
+        proven by removing it and finding those addresses still blocked via
+        `is_private`. `64:ff9b::1` (the well-known NAT64 prefix, RFC 6052)
+        is reserved but NOT private, which genuinely isolates this branch —
+        confirmed by removing `is_reserved` from _is_blocked_ip and seeing
+        only this assertion fail, not the IPv4 one below."""
+        assert _is_blocked_ip("64:ff9b::1") is True
+        assert _is_blocked_ip("240.0.0.1") is True  # blocked, but via is_private, not this branch
+
+    def test_blocks_multicast(self) -> None:
+        """`addr.is_multicast` — IPv4 224.0.0.0/4 and its IPv6 equivalent.
+        Same unexercised-branch shape as is_reserved above: removing this
+        check left the full suite green with nothing added."""
+        assert _is_blocked_ip("224.0.0.1") is True
+        assert _is_blocked_ip("239.255.255.255") is True
+        assert _is_blocked_ip("ff02::1") is True
+
     def test_allows_public_ip(self) -> None:
         assert _is_blocked_ip("8.8.8.8") is False
         assert _is_blocked_ip("1.1.1.1") is False
@@ -266,6 +287,77 @@ class TestRedirectRevalidation:
 
             with pytest.raises(FetchError, match="blocked|internal"):
                 await fetch_and_extract("https://redirect.example.com/go")
+
+    @pytest.mark.asyncio
+    async def test_blocks_redirect_to_private_ip_on_SECOND_hop_not_just_first(self) -> None:
+        """A chain where hop 1 is SAFE and hop 2 targets a blocked address
+        must still be caught. The test above only proves the block fires
+        when the blocked address is the very first redirect target; it
+        cannot distinguish "re-validates every hop" from "only checks hop
+        1" because it has no hop 2.
+
+        Hop 2's redirect target is a HOSTNAME that resolves (via mocked
+        DNS) to a private IP — not an IP literal — because `_validate_url`
+        independently blocks IP literals like `http://127.0.0.1/...` on
+        its own, before `_resolve_and_check` ever runs. An earlier version
+        of this test used an IP-literal hop-2 target and passed even after
+        mutating the redirect loop to skip re-validation past hop 1 —
+        `_validate_url`'s unmutated IP-literal check was silently covering
+        for the mutated code, and the test proved nothing about per-hop
+        DNS re-validation. Using a hostname closes that gap: verified by
+        mutating the source to `if redirects == 1:` around the
+        `_resolve_and_check` call — this test then failed (the fetch
+        proceeded to a third hop and returned 200 instead of raising),
+        and the three other redirect tests in this class stayed green
+        against that same mutation, because none of them has a blocked
+        target past hop 1 either."""
+
+        def dns_side_effect(hostname, *args, **kwargs):
+            if hostname == "internal-service.example.com":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 443))]
+            return PUBLIC_DNS
+
+        with (
+            patch("app.services.web_page_fetcher.socket.getaddrinfo") as mock_dns,
+            patch("app.services.web_page_fetcher.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_dns.side_effect = dns_side_effect
+
+            hop1_redirect = _make_streaming_response(
+                status_code=302,
+                headers={"location": "https://safe-hop.example.com/next"},
+                is_redirect=True,
+            )
+            hop2_redirect_to_blocked = _make_streaming_response(
+                status_code=302,
+                headers={"location": "http://internal-service.example.com/secret"},
+                is_redirect=True,
+            )
+            # Only reached if the mutation lets hop 2 through unchecked —
+            # gives the mutated run a clean "fetch succeeded" failure mode
+            # instead of an unrelated mock-exhaustion error.
+            hop3_leaked_content = _make_streaming_response(
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=b"<html><body>leaked</body></html>",
+            )
+
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.build_request = MagicMock(return_value=MagicMock())
+            mock_client.send = AsyncMock(
+                side_effect=[hop1_redirect, hop2_redirect_to_blocked, hop3_leaked_content]
+            )
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(FetchError, match="blocked|internal"):
+                await fetch_and_extract("https://redirect.example.com/go")
+
+            # Only the first two hops should have been attempted — proves
+            # the rejection happened AT hop 2, not because hop 1 itself
+            # failed, and not because the fetch ran to completion.
+            assert mock_client.send.call_count == 2
 
     @pytest.mark.asyncio
     async def test_redirect_revalidates_scheme(self) -> None:
