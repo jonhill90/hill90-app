@@ -70,13 +70,37 @@ function validateRoutingConfig(config: any): { valid: boolean; error?: string } 
   return { valid: true };
 }
 
-async function validateRouteConnectionOwnership(pool: any, routes: RouteEntry[], ownerSub: string): Promise<string | null> {
+// app#595. POST's OWN single-model connection check a few lines below
+// (createdBy === null ? ... platform-owned ... : ... caller-owned ...)
+// already branches on whether the MODEL being written is a platform model —
+// a platform model's connection must also be platform-owned (created_by IS
+// NULL), never the caller's own sub, since a platform connection's
+// created_by can never equal any caller's sub. This router-model twin had
+// no such branch, at either of its two call sites (POST's create path and
+// PUT's update path): every route's connection_id was checked against
+// `created_by = ownerSub` unconditionally, so a platform router model's
+// routes — created_by IS NULL, connections also created_by IS NULL — could
+// never satisfy the check, admin included. (app#451 is the identical gap
+// on PUT's single-model connection check, a separate fix, not yet landed
+// on this branch — mentioned for the shape, not assumed present here.)
+//
+// FAILS CLOSED, not open, confirmed before writing this fix: the check stays
+// scoped to `ownerSub` in the non-platform branch exactly as before, so it
+// can only ever fail to match a row it should have matched (a legitimate
+// platform-connection route on a platform model) — never match a row it
+// shouldn't. There is no path here that lets a caller attach a connection
+// they do not own; there is only a path that incorrectly refused a
+// legitimate admin action on a platform router model.
+async function validateRouteConnectionOwnership(
+  pool: any, routes: RouteEntry[], ownerSub: string, isPlatformModel: boolean
+): Promise<string | null> {
   const connectionIds = [...new Set(routes.map(r => r.connection_id))];
   const placeholders = connectionIds.map((_, i) => `$${i + 1}`).join(', ');
-  const result = await pool.query(
-    `SELECT id FROM provider_connections WHERE id IN (${placeholders}) AND created_by = $${connectionIds.length + 1}`,
-    [...connectionIds, ownerSub]
-  );
+  const query = isPlatformModel
+    ? `SELECT id FROM provider_connections WHERE id IN (${placeholders}) AND created_by IS NULL`
+    : `SELECT id FROM provider_connections WHERE id IN (${placeholders}) AND created_by = $${connectionIds.length + 1}`;
+  const params = isPlatformModel ? connectionIds : [...connectionIds, ownerSub];
+  const result = await pool.query(query, params);
   const ownedIds = new Set(result.rows.map((r: any) => r.id));
   for (const cid of connectionIds) {
     if (!ownedIds.has(cid)) return cid;
@@ -155,8 +179,11 @@ router.post('/', async (req: Request, res: Response) => {
       res.status(400).json({ error: validation.error });
       return;
     }
-    // Validate all route connection_ids are owned by caller
-    const unownedId = await validateRouteConnectionOwnership(pool, routing_config.routes, user.sub);
+    // Validate all route connection_ids are owned by caller — or, for a
+    // platform router model (createdBy already resolved to null above by
+    // `platform && isAdmin(req)`), platform-owned. See
+    // validateRouteConnectionOwnership's own comment (app#595).
+    const unownedId = await validateRouteConnectionOwnership(pool, routing_config.routes, user.sub, createdBy === null);
     if (unownedId) {
       res.status(400).json({ error: 'Connection not found or not owned by you' });
       return;
@@ -302,7 +329,12 @@ router.put('/:id', async (req: Request, res: Response) => {
         res.status(400).json({ error: validation.error });
         return;
       }
-      const unownedId = await validateRouteConnectionOwnership(pool, routing_config.routes, user.sub);
+      // isPlatformModel comes from the EXISTING row, not any request field —
+      // created_by cannot change via this route. (The single-model
+      // connection check just below has the identical gap, tracked
+      // separately as app#451 — not fixed on this branch.)
+      const isPlatformModel = existing.rows[0].created_by === null;
+      const unownedId = await validateRouteConnectionOwnership(pool, routing_config.routes, user.sub, isPlatformModel);
       if (unownedId) {
         res.status(400).json({ error: 'Connection not found or not owned by you' });
         return;
