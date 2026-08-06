@@ -16,9 +16,9 @@ async def log_usage(
     request_type: str,
     status: str,
     latency_ms: int,
-    input_tokens: int = 0,
-    output_tokens: int = 0,
-    cost_usd: float = 0.0,
+    input_tokens: int | None = 0,
+    output_tokens: int | None = 0,
+    cost_usd: float | None = 0.0,
     delegation_id: str | None = None,
     owner: str | None = None,
     requested_model: str | None = None,
@@ -33,6 +33,18 @@ async def log_usage(
     never happened. Noting it HERE rather than at the thirteen call sites is
     deliberate: a bound that lives at each site is one drift away from covering
     twelve of them.
+
+    THE DEFAULT STAYS 0/0.0, DELIBERATELY (app#549). Most callers here are
+    policy/rate-limit/budget denials — the request never reached a provider,
+    so 0 is the true count, not a placeholder for "didn't check." Passing
+    input_tokens=None/output_tokens=None/cost_usd=None explicitly is for the
+    narrower case where a provider call was attempted and no response was
+    ever received at all (a network fault before any bytes came back) — cost
+    may be real and non-zero, and this service has no way to know. The
+    model_usage columns already permit NULL (no NOT NULL constraint; see
+    migration 004), so no schema change was needed to make that
+    distinguishable from a genuine zero: `WHERE cost_usd = 0` and
+    `WHERE cost_usd IS NULL` are different, honest questions.
     """
     try:
         await _insert(conn, locals())
