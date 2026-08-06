@@ -165,3 +165,55 @@ class TestSharedGraphOwnerScoping:
         admin_resp = await app_client.get("/internal/admin/shared/graph", headers=INTERNAL_HEADERS)
         assert admin_resp.status_code == 200
         assert "human-graph-req-x" in {n["label"] for n in admin_resp.json()["nodes"] if n["type"] == "user"}
+
+    # h#603 review, resolved: the node/edge fix above scoped retrieval_edges
+    # and its requester nodes at the SQL level, but the totals block's
+    # `requesters_with_retrievals` count sat three lines below its two
+    # scoped siblings (collections, sources) with no WHERE clause at all —
+    # a magnitude leak, not an identity leak: a scoped caller couldn't see
+    # WHO searched an invisible collection, but could still learn HOW MANY
+    # distinct people, platform-wide, had ever searched anything. Proved
+    # against a real Postgres because the fix is in the SQL, same as #460.
+    async def test_totals_requesters_with_retrievals_is_scoped_not_platform_wide(self, app_client):
+        cid = await _create_collection(app_client, "Graph Totals Private", "graph-totals-owner", visibility="private")
+        await _ingest_source(
+            app_client, cid, "Graph Totals Private Doc",
+            "Content that only the owner of this private collection should surface in search.",
+            "graph-totals-owner",
+        )
+        # A requester the scoped caller below must never learn exists,
+        # searching a collection that caller cannot see.
+        await _admin_search(app_client, "surface in search", "human-graph-totals-hidden", collection_id=cid)
+
+        # A second requester into a collection the scoped caller DOES own,
+        # so the scoped total is not simply zero — it must count exactly
+        # the one requester visible to it, not zero and not the platform total.
+        cid_visible = await _create_collection(app_client, "Graph Totals Visible", "graph-totals-scoped", visibility="private")
+        await _ingest_source(
+            app_client, cid_visible, "Graph Totals Visible Doc",
+            "Content the scoped caller owns and can see in the graph totals.",
+            "graph-totals-scoped",
+        )
+        await _admin_search(app_client, "scoped caller owns", "human-graph-totals-visible", collection_id=cid_visible)
+
+        admin_resp = await app_client.get("/internal/admin/shared/graph", headers=INTERNAL_HEADERS)
+        assert admin_resp.status_code == 200
+        admin_total = admin_resp.json()["total"]["requesters_with_retrievals"]
+        # Platform-wide total must include both requesters just created.
+        assert admin_total >= 2
+
+        scoped_resp = await app_client.get(
+            "/internal/admin/shared/graph",
+            headers=INTERNAL_HEADERS,
+            params={"owner": "graph-totals-scoped"},
+        )
+        assert scoped_resp.status_code == 200
+        scoped_total = scoped_resp.json()["total"]["requesters_with_retrievals"]
+
+        # The load-bearing assertion: the scoped total must be strictly less
+        # than the admin total (it excludes the hidden requester) and must
+        # equal exactly the one requester into the collection this caller
+        # owns — not zero (which would just mean the query dropped
+        # everything) and not the platform-wide count (the leak).
+        assert scoped_total == 1
+        assert scoped_total < admin_total

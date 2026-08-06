@@ -1287,13 +1287,31 @@ async def knowledge_graph(
             "WHERE status = 'active'" if owner is None
             else "WHERE status = 'active' AND collection_id IN (SELECT id FROM shared_collections WHERE created_by = $1 OR visibility = 'shared')"
         )
+        # Same predicate, same reason, as retrieval_edges above — joined
+        # through to shared_collections rather than filtered against a
+        # bounded page's source_ids. Missing until h#603's review: this
+        # count was the one total in the block still counting every
+        # requester in shared_retrievals unconditionally, three lines below
+        # its two scoped siblings, in the PR whose purpose is closing this
+        # exact class of leak.
+        totals_requesters_where = (
+            "" if owner is None
+            else "WHERE (sc.created_by = $1 OR sc.visibility = 'shared')"
+        )
         totals = await conn.fetchrow(
             f"""SELECT
                  (SELECT count(*) FROM shared_collections {totals_collections_where}) AS collections,
                  (SELECT count(*) FROM shared_sources {totals_sources_where}) AS sources,
                  (SELECT count(DISTINCT agent_id) FROM knowledge_entries WHERE status = 'active')
                    AS agents_with_knowledge,
-                 (SELECT count(DISTINCT requester_id) FROM shared_retrievals)
+                 (SELECT count(DISTINCT r.requester_id)
+                    FROM shared_retrievals r
+                    CROSS JOIN LATERAL unnest(r.chunk_ids) AS cid
+                    JOIN shared_chunks sc2 ON sc2.id = cid
+                    JOIN shared_documents sd ON sd.id = sc2.document_id
+                    JOIN shared_sources s ON s.id = sd.source_id
+                    JOIN shared_collections sc ON sc.id = s.collection_id
+                    {totals_requesters_where})
                    AS requesters_with_retrievals""",
             *(() if owner is None else (owner,)),
         )
