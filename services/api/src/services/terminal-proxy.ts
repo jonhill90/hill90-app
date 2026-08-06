@@ -527,10 +527,30 @@ export function attachTerminalProxy(
       // Wait for the closes; do not sleep for a guessed interval. Each socket resolves
       // as it goes, so the normal case costs milliseconds and the timeout is a ceiling
       // for a peer that never answers rather than a delay everyone pays.
+      //
+      // ONE CLIENT'S FAILURE MUST NOT SINK THE REST (app#538). `client.close()` can
+      // throw synchronously — `ws` validates `code`/`reason` itself, and both are
+      // shared across every client in this call, so a single bad pair used to fail
+      // EVERY session at once, not just one. A synchronous throw inside a Promise
+      // executor auto-rejects that promise, which used to reject the whole
+      // `Promise.all` and, from there, `closeAllSessions` itself — aborting
+      // `shutdown()` before it reached `server.close()` and `closePool()`, leaving
+      // every live terminal to die with no close frame at all (1006, not 1001) and
+      // the DB pool never cleanly closed. Measured directly, not assumed: a repro
+      // with three live sessions and an oversized `reason` produced zero close
+      // frames and skipped both of those steps every time. Caught here instead, so
+      // one failure degrades to "that one session gets 1006 like any other broken
+      // peer" rather than "shutdown gives up on everyone and falls back to the
+      // process-wide unhandledRejection backstop instead of exiting cleanly".
       const drained = Promise.all(
         live.map((client) => new Promise<void>((resolve) => {
           client.once('close', () => resolve());
-          client.close(code, reason);
+          try {
+            client.close(code, reason);
+          } catch (err) {
+            console.error('[terminal-proxy] closeAllSessions: client.close() threw for one session — leaving it to the connection timeout instead of aborting shutdown for everyone else:', err);
+            resolve();
+          }
         })),
       );
 
