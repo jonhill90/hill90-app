@@ -17,6 +17,16 @@ services:
     build:
       context: ../../../services/ui
       dockerfile: Dockerfile
+      args:
+        # Stamps com.hill90.revision onto the IMAGE (see the Dockerfile's own
+        # ARG GIT_REVISION, added by app#561 — the twin fix for the four
+        # services #558/#560 found with no ARG at all to receive this).
+        # Without this the ARG's default applies and the image is built and
+        # labelled the literal string "unstamped" on every deploy. The
+        # CONTAINER label below, set separately via compose `labels:`, is
+        # correct regardless — check_deploy_drift.sh reads the container's
+        # label, not the image's.
+        GIT_REVISION: ${DEPLOY_REVISION:-unstamped}
     image: hill90/ui:${VERSION:-latest}
     container_name: ${CONTAINER_PREFIX:-}app-ui
     # V8 ignores the cgroup limit (see docker-compose.api.yml). Via `command`

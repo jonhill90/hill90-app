@@ -19,3 +19,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8001/health')"
 
 CMD ["opentelemetry-instrument", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+
+# What commit produced this image (app#561, the twin of #228/#558 for the
+# services whose Dockerfiles never had this stamp). Defaults to `unstamped`
+# rather than failing: a build that forgets the arg should still work and
+# should SAY it is unknown, not claim a revision it does not have.
+ARG GIT_REVISION=unstamped
+LABEL com.hill90.revision=$GIT_REVISION
