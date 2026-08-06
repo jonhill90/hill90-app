@@ -22,13 +22,26 @@ const router = Router();
 // could never be created could still be reached by editing an existing
 // row, silently corrupting a field this same file guards on create. One
 // shared check, used by both routes, so they cannot diverge again.
-// Falsy (undefined/null/'') means "not provided" for both callers — POST's
-// own `transport || 'stdio'` default and PUT's COALESCE both already treat
-// a falsy value as "no change", so this validator does too, rather than
-// inventing stricter behaviour neither route asked for.
+//
+// UNDEFINED/NULL MEANS "NOT PROVIDED" — TRUE EMPTY STRING DOES NOT, and the
+// first version of this fix conflated the two. `PUT`'s SQL is
+// `transport = COALESCE($3, transport)`: COALESCE only falls back to the
+// existing value on SQL NULL, and '' is not NULL, so `transport: ''` would
+// have been WRITTEN — walking straight past the enum check below it, since
+// an earlier version of this function treated '' as falsy and exempted it
+// same as undefined/null. Confirmed directly rather than assumed:
+// `SELECT COALESCE('', 'stdio')` returns '', not 'stdio'. Same shape as
+// app#580's schedule_cron fix a few files over in this same sweep — an
+// explicitly-sent empty string is PROVIDED input, not an omission, and
+// since `transport` is a NOT NULL column there is no meaningful "clear the
+// field" operation for PUT to honour anyway. So: '' is INVALID input,
+// rejected by both routes, not "no change" — POST's own `transport ||
+// 'stdio'` default now only ever fires for a truly OMITTED transport
+// (undefined), since an explicit '' is caught here first, before that line
+// is ever reached.
 const VALID_TRANSPORTS = ['stdio', 'sse', 'http'];
 function invalidTransportError(transport: unknown): string | null {
-  if (!transport) return null;
+  if (transport === undefined || transport === null) return null;
   if (!VALID_TRANSPORTS.includes(transport as string)) {
     return `transport must be one of: ${VALID_TRANSPORTS.join(', ')}`;
   }

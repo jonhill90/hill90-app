@@ -155,6 +155,23 @@ describe('MCP Servers routes', () => {
       expect(res.body.error).toContain('transport');
     });
 
+    // Review follow-up (app#449): '' used to be silently coerced to
+    // 'stdio' by `transport || 'stdio'`, since the pre-fix validator
+    // exempted every falsy value including ''. Now that '' is explicitly
+    // invalid input rather than "not provided", it must 400 here too —
+    // POST and PUT agreeing on the same contract is the whole point of
+    // sharing invalidTransportError between them.
+    it("app#449 (review follow-up): rejects transport: '' as invalid input rather than defaulting to stdio", async () => {
+      const res = await request(app)
+        .post('/mcp-servers')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: 'Test', transport: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('transport');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
     it('non-admin cannot create platform server', async () => {
       const res = await request(app)
         .post('/mcp-servers')
@@ -214,6 +231,27 @@ describe('MCP Servers routes', () => {
       expect(res.body.error).toContain('transport');
       // THE ASSERTION THAT MATTERS: a 400 that still reaches the UPDATE
       // query is the same defect wearing a different status code.
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    // Found in review of the fix above, not by a new sweep: an earlier
+    // version of invalidTransportError treated '' as falsy and exempted it
+    // from validation the same as undefined/null — but PUT's SQL is
+    // `transport = COALESCE($3, transport)`, and COALESCE only falls back
+    // to the existing value on SQL NULL. '' is not NULL, so `transport: ''`
+    // would have been WRITTEN, walking straight past the enum check this
+    // very PR added. POST's `transport || 'stdio'` masked the identical gap
+    // on create (it coerces '' to 'stdio' rather than writing it), which is
+    // exactly why this asymmetry survived a test-first change: nothing
+    // exercised '' specifically until now.
+    it("app#449 (review follow-up): rejects transport: '' as invalid input, not silently coalesced — and writes nothing", async () => {
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ transport: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('transport');
       expect(mockQuery).not.toHaveBeenCalled();
     });
 
