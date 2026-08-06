@@ -169,25 +169,48 @@ export default function DiscordClient() {
           vault with no bot container ever having existed to use it, which
           was production's real state; this banner is unconditional, not
           gated on whether any bindings exist yet, so it is visible before
-          a binding is ever created, not only after. */}
+          a binding is ever created, not only after.
+
+          THREE VISUAL STATES, not two (app#508's second half). `deployed`
+          alone used to gate a binary running/not-running badge — but
+          `deployed` now means "a container object exists" (true for a
+          merely STOPPED bot too, a legitimate binding target), so branching
+          on it alone would have shown the green "Running" badge for a bot
+          that is not actually running. `status` carries the distinction
+          that actually matters here: 'ready' is the only state that gets
+          the green badge and no warning; 'stopped' is informational, amber,
+          and explicitly not phrased as "will never work"; 'not_deployed'
+          and 'unknown' keep the red badge — a caller cannot rely on either. */}
       <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 mb-6" data-testid="bot-status-card">
         <div className="flex items-center gap-3">
           <MessageSquare className="h-5 w-5 text-[#5865F2]" />
           <h2 className="text-lg font-semibold text-white">Bot Status</h2>
-          {botStatus?.deployed ? (
+          {botStatus?.status === 'ready' ? (
             <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-brand-900/30 text-brand-400">
               <CheckCircle className="w-3 h-3" /> Running
+            </span>
+          ) : botStatus?.status === 'stopped' ? (
+            <span
+              className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-900/30 text-amber-400"
+              data-testid="bot-stopped-badge"
+            >
+              <XCircle className="w-3 h-3" /> Stopped
             </span>
           ) : (
             <span
               className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-900/30 text-red-400"
               data-testid="bot-not-deployed-badge"
             >
-              <XCircle className="w-3 h-3" /> {botStatus?.status === 'unknown' ? 'Unknown' : 'Not Running'}
+              <XCircle className="w-3 h-3" /> {botStatus?.status === 'unknown' ? 'Unknown' : 'Not Deployed'}
             </span>
           )}
         </div>
-        {!botStatus?.deployed && (
+        {botStatus?.status === 'stopped' && (
+          <p className="text-sm text-amber-400 mt-2" data-testid="bot-stopped-message">
+            {botStatus?.message || 'The Discord bot is not currently running. This binding will take effect once it starts.'}
+          </p>
+        )}
+        {botStatus?.status !== 'ready' && botStatus?.status !== 'stopped' && (
           <p className="text-sm text-red-400 mt-2" data-testid="bot-not-deployed-message">
             {botStatus?.message || 'The Discord bot is not currently running. Bindings created now will not take effect.'}
           </p>
