@@ -87,56 +87,31 @@ class TestAgentAuth:
 class TestAgentScope:
     # Found during a "tests that cannot fail" sweep across hill90-app's test
     # suites, dispatched in this conversation (not tied to a filed issue).
-    # These three were each named for an authorization property — a 403,
-    # a scope gate —
-    # and none of them exercised any code that could produce one. All three
-    # only asserted that `claims.scopes`/`claims.sub` came back equal to the
-    # literal value `_make_token` was called with two lines above: a value
-    # the test itself supplied, echoed back by a JWT decode, proving nothing
-    # about whether anything in the app actually enforces it.
+    # This class originally held three tests, each named for an authorization
+    # property, none of which exercised any code that could produce one — all
+    # three only asserted that `claims.scopes`/`claims.sub` came back equal to
+    # the literal value `_make_token` was called with two lines above.
     #
-    # AKM:SHARED-WRITE IS NOT ENFORCED ANYWHERE. Grepped exhaustively across
-    # services/knowledge, services/api, and services/agentbox: the string
-    # "akm:shared-write" appears in exactly two places outside this file —
-    # conftest.py's `shared_write_token` fixture, and nowhere else. No route,
-    # no dependency, no middleware checks `claims.scopes` for it or for any
-    # scope at all — `middleware/agent_auth.py` parses and returns scopes,
-    # and nothing downstream reads them. There is also no agent-facing write
-    # endpoint to shared knowledge in the first place: `routes/shared.py`
-    # ("Agent-facing shared knowledge endpoints") exposes only GET /search
-    # and GET /collections. Writing to a shared collection exists only
-    # through `routes/internal_admin_shared.py`, which is admin/service-
-    # token-authenticated, not gated by any per-agent scope.
-    #
-    # This is not "the enforcement has a hole" — there is no enforcement to
-    # have a hole in, because there is nothing for an agent to write to yet.
-    # Left as-is rather than fixed: per instruction, a hollow security test
-    # that turns out to guard a control that does not exist is a finding to
-    # report, not a test to quietly patch into looking covered. Filed as
-    # app#504 for a deliberate decision (build real per-agent-scoped shared
-    # write access, or remove the vestigial scope and these two tests).
-    def test_shared_write_without_scope_403(self, ed25519_keypair: tuple[bytes, bytes]) -> None:
-        """Decoding a token without akm:shared-write does not add the scope.
-
-        Does NOT prove a write attempt is refused — see the class comment.
-        No route currently checks this scope, or any scope, for anything.
-        """
-        private_pem, public_pem = ed25519_keypair
-        token = _make_token(private_pem, scopes=["akm:read", "akm:write"])
-        claims = verify_agent_token(token, public_pem)
-        assert "akm:shared-write" not in claims.scopes
-
-    def test_shared_write_with_scope_ok(self, ed25519_keypair: tuple[bytes, bytes]) -> None:
-        """Decoding a token with akm:shared-write preserves the scope.
-
-        Does NOT prove a write attempt is allowed — see the class comment.
-        No route currently checks this scope, or any scope, for anything.
-        """
-        private_pem, public_pem = ed25519_keypair
-        token = _make_token(private_pem, scopes=["akm:read", "akm:write", "akm:shared-write"])
-        claims = verify_agent_token(token, public_pem)
-        assert "akm:shared-write" in claims.scopes
-
+    # TWO OF THE THREE — test_shared_write_without_scope_403 and
+    # test_shared_write_with_scope_ok — were removed outright rather than
+    # rewritten, filed as app#504. `akm:shared-write` was not enforced
+    # anywhere: grepped exhaustively across services/knowledge, services/api,
+    # and services/agentbox, the string appeared in exactly two places
+    # outside this file — conftest.py's now-also-removed `shared_write_token`
+    # fixture, and these two tests. No route, dependency, or middleware ever
+    # checked `claims.scopes` for it; there was also no agent-facing write
+    # endpoint to shared knowledge for it to gate in the first place
+    # (routes/shared.py exposes only GET /search and GET /collections; the
+    # only write path, routes/internal_admin_shared.py, is admin/service-
+    # token-authenticated, not per-agent-scoped). And nothing MINTS it either
+    # — services/api's real token issuer (services/api/src/routes/agents.ts)
+    # hardcodes `scopes: ['akm:read', 'akm:write']` for every agent token it
+    # creates; the scope was dead on both ends, not a control quietly
+    # granted to agents and then never checked. Removed rather than built
+    # out, per explicit instruction: inventing the write endpoint the scope
+    # implied would be a much larger change than this issue warranted, and a
+    # scope nobody holds and nothing checks is a false assurance to the next
+    # reader either way — better absent than present-and-meaningless.
     def test_different_tokens_decode_to_different_sub_claims(
         self, ed25519_keypair: tuple[bytes, bytes]
     ) -> None:
