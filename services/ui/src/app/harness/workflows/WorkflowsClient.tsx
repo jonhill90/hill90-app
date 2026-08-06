@@ -145,44 +145,56 @@ export default function WorkflowsClient() {
     const body = { ...form, output_config: JSON.parse(form.output_config || '{}'), schedule_cron: form.trigger_type === 'webhook' ? null : form.schedule_cron }
     const url = editingId ? `/api/workflows/${editingId}` : '/api/workflows'
     const method = editingId ? 'PUT' : 'POST'
-    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    if (res.ok) {
-      const data = await res.json()
-      // Only a create response can ever carry this — PUT never sets or
-      // returns a webhook token, and a later GET can no longer see it either.
-      if (!editingId && data.webhook_url) setNewWebhookUrl(data.webhook_url)
-      setShowForm(false)
-      setEditingId(null)
-      setForm({ name: '', description: '', agent_id: '', schedule_cron: '*/30 * * * *', prompt: '', output_type: 'none', output_config: '{}', trigger_type: 'cron' })
-      fetchWorkflows()
-    } else {
-      const data = await res.json()
-      alert(data.error || (editingId ? 'Failed to update workflow' : 'Failed to create workflow'))
+    try {
+      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      if (res.ok) {
+        const data = await res.json()
+        // Only a create response can ever carry this — PUT never sets or
+        // returns a webhook token, and a later GET can no longer see it either.
+        if (!editingId && data.webhook_url) setNewWebhookUrl(data.webhook_url)
+        setShowForm(false)
+        setEditingId(null)
+        setForm({ name: '', description: '', agent_id: '', schedule_cron: '*/30 * * * *', prompt: '', output_type: 'none', output_config: '{}', trigger_type: 'cron' })
+        fetchWorkflows()
+      } else {
+        const data = await res.json()
+        alert(data.error || (editingId ? 'Failed to update workflow' : 'Failed to create workflow'))
+      }
+    } catch {
+      alert(editingId ? 'Failed to update workflow' : 'Failed to create workflow')
     }
   }
 
   const handleToggle = async (wf: Workflow) => {
-    const res = await fetch(`/api/workflows/${wf.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !wf.enabled }),
-    })
-    if (!res.ok) {
-      const data = await res.json()
-      alert(data.error || 'Failed to update workflow')
+    try {
+      const res = await fetch(`/api/workflows/${wf.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !wf.enabled }),
+      })
+      if (!res.ok) {
+        const data = await res.json()
+        alert(data.error || 'Failed to update workflow')
+      }
+      fetchWorkflows()
+    } catch {
+      alert('Failed to update workflow')
     }
-    fetchWorkflows()
   }
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this workflow?')) return
-    const res = await fetch(`/api/workflows/${id}`, { method: 'DELETE' })
-    if (res.ok) {
-      if (selectedId === id) { setSelectedId(null); setRuns([]) }
-      fetchWorkflows()
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to delete workflow')
+    try {
+      const res = await fetch(`/api/workflows/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        if (selectedId === id) { setSelectedId(null); setRuns([]) }
+        fetchWorkflows()
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to delete workflow')
+      }
+    } catch {
+      alert('Failed to delete workflow')
     }
   }
 
@@ -203,27 +215,35 @@ export default function WorkflowsClient() {
 
   const handleAddStep = async () => {
     if (!selectedId || !stepForm.agent_id || !stepForm.prompt) return
-    const res = await fetch(`/api/workflows/${selectedId}/steps`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(stepForm),
-    })
-    if (res.ok) {
-      setStepForm({ agent_id: '', prompt: '' })
-      fetchSteps(selectedId)
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to add step')
+    try {
+      const res = await fetch(`/api/workflows/${selectedId}/steps`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(stepForm),
+      })
+      if (res.ok) {
+        setStepForm({ agent_id: '', prompt: '' })
+        fetchSteps(selectedId)
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to add step')
+      }
+    } catch {
+      alert('Failed to add step')
     }
   }
 
   const handleDeleteStep = async (stepId: string) => {
     if (!selectedId) return
-    const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, { method: 'DELETE' })
-    if (res.ok) {
-      fetchSteps(selectedId)
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to delete step')
+    try {
+      const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, { method: 'DELETE' })
+      if (res.ok) {
+        fetchSteps(selectedId)
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to delete step')
+      }
+    } catch {
+      alert('Failed to delete step')
     }
   }
 

@@ -226,6 +226,41 @@ describe('WorkflowsClient', () => {
     expect(screen.getByText('Daily Health Check')).toBeInTheDocument()
   })
 
+  // Twin of the test above, but the fetch itself REJECTS (a network
+  // failure) rather than resolving with ok: false — handleDelete had no
+  // try/catch at all, so this used to be an unhandled promise rejection
+  // with nothing shown to the user. Representative of the same fix applied
+  // to all five handlers in this file (handleSubmit, handleToggle,
+  // handleDelete, handleAddStep, handleDeleteStep) — each already had this
+  // exact if(ok)/else(alert) shape for a non-2xx response (handleRun, the
+  // one handler in this file already guarded, is the reference this fix
+  // matches).
+  it('does not silently swallow a network failure when deleting a workflow', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
+      if (url === '/api/workflows') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_WORKFLOWS) })
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      if (url === '/api/workflows/wf-1' && opts?.method === 'DELETE') {
+        return Promise.reject(new Error('network error'))
+      }
+      if (url.includes('/runs')) return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+
+    render(<WorkflowsClient />)
+    await waitFor(() => expect(screen.getByText('Daily Health Check')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('Daily Health Check'))
+    const deleteButtons = screen.getAllByTitle('Delete')
+    fireEvent.click(deleteButtons[0])
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('Failed to delete workflow')
+    })
+    expect(screen.getByText('Daily Health Check')).toBeInTheDocument()
+  })
+
   it('shows an error, not a silent no-op, when creating a workflow fails', async () => {
     vi.stubGlobal('alert', vi.fn())
     vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {

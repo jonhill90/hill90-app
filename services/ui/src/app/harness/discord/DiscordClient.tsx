@@ -74,57 +74,73 @@ export default function DiscordClient() {
 
   const handleCreateBinding = async () => {
     if (!bindingForm.channel_id || !bindingForm.guild_id || !bindingForm.agent_id) return
-    const res = await fetch('/api/discord/bindings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(bindingForm),
-    })
-    if (res.ok) {
-      setShowBindingForm(false)
-      setBindingForm({ channel_id: '', guild_id: '', agent_id: '' })
-      fetchData()
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to bind channel')
+    try {
+      const res = await fetch('/api/discord/bindings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bindingForm),
+      })
+      if (res.ok) {
+        setShowBindingForm(false)
+        setBindingForm({ channel_id: '', guild_id: '', agent_id: '' })
+        fetchData()
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to bind channel')
+      }
+    } catch {
+      alert('Failed to bind channel')
     }
   }
 
   const handleDeleteBinding = async (id: string) => {
     if (!confirm('Remove this channel binding?')) return
-    const res = await fetch(`/api/discord/bindings/${id}`, { method: 'DELETE' })
-    if (res.ok) {
-      fetchData()
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to remove channel binding')
+    try {
+      const res = await fetch(`/api/discord/bindings/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        fetchData()
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to remove channel binding')
+      }
+    } catch {
+      alert('Failed to remove channel binding')
     }
   }
 
   const handleLinkUser = async () => {
     if (!linkForm.discord_user_id) return
-    const res = await fetch('/api/discord/user-links', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(linkForm),
-    })
-    if (res.ok) {
-      setShowLinkForm(false)
-      setLinkForm({ discord_user_id: '' })
-      fetchData()
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to link user')
+    try {
+      const res = await fetch('/api/discord/user-links', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(linkForm),
+      })
+      if (res.ok) {
+        setShowLinkForm(false)
+        setLinkForm({ discord_user_id: '' })
+        fetchData()
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to link user')
+      }
+    } catch {
+      alert('Failed to link user')
     }
   }
 
   const handleDeleteLink = async (id: string) => {
     if (!confirm('Remove this user link?')) return
-    const res = await fetch(`/api/discord/user-links/${id}`, { method: 'DELETE' })
-    if (res.ok) {
-      fetchData()
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to remove user link')
+    try {
+      const res = await fetch(`/api/discord/user-links/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        fetchData()
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to remove user link')
+      }
+    } catch {
+      alert('Failed to remove user link')
     }
   }
 
