@@ -40,6 +40,8 @@ class FakeAgentbox extends EventEmitter {
   bufferedAmount = 0;
   _socket = { pause: () => {}, resume: () => {} };
   static latest: FakeAgentbox | null = null;
+  /** Opt-in only, reset every test — see the cleanup-throw test below. */
+  static throwOnClose = false;
 
   constructor(_url: string) {
     super();
@@ -49,6 +51,7 @@ class FakeAgentbox extends EventEmitter {
   send(): void {}
   ping(): void {}
   close(): void {
+    if (FakeAgentbox.throwOnClose) throw new Error('agentbox close failed');
     this.readyState = FakeAgentbox.CLOSED;
     this.emit('close');
   }
@@ -88,6 +91,7 @@ beforeEach(async () => {
   participant = true;
   openClients.length = 0;
   FakeAgentbox.latest = null;
+  FakeAgentbox.throwOnClose = false;
 
   mockQuery.mockImplementation((sql: string) => {
     if (/FROM chat_participants/.test(String(sql))) {
@@ -213,5 +217,87 @@ describe('the terminal closes when participation is revoked', () => {
     expect((await raced(closed, { code: -1, reason: 'STILL OPEN' })).code).toBe(
       CLOSE_ACCESS_REVOKED,
     );
+  }, 20000);
+});
+
+describe('a cleanup failure during the ping-interval participation recheck', () => {
+  /**
+   * THIS TICK RUNS INSIDE `void (async () => { ... })()` — no caller holds
+   * the promise, so a throw reaching it has nowhere to go except this
+   * service's process-wide unhandledRejection backstop
+   * (installUnhandledRejectionBackstop in boot/fatal.ts), which logs once and
+   * then calls process.exit(1). Unlike a route handler, boot/async-errors.ts's
+   * Express patch does not reach this: the tick is not dispatched by Express
+   * at all.
+   *
+   * WHERE THE THROW ACTUALLY LANDS IS NOT WHERE IT LOOKS. Making
+   * `agentWs.close()` throw surfaces via `clientWs.on('close', cleanupAll)` —
+   * a plain, synchronous EventEmitter callback fired once `clientWs.close()`
+   * above completes its own teardown — not via the ping tick's own explicit
+   * `cleanupAll()` call. That path has no promise at all, so a throw there is
+   * Node's 'uncaughtException', not 'unhandledRejection' — a second, different
+   * failure mode the same backstop does not listen for either. cleanupAll()
+   * is called from six places (this tick, the expiry timer, the relay-overflow
+   * handler, both `.on('close', ...)` listeners, both `.on('error', ...)`
+   * handlers), so the fix guards cleanupAll() itself rather than only the one
+   * call site this test set out to exercise — the same reasoning
+   * boot/async-errors.ts already applies at the Express boundary: one safe
+   * implementation at the shared choke point beats the same try/catch typed
+   * out at every caller.
+   *
+   * THE ASSERTION THAT MATTERS is not "nothing crashed" — a version that
+   * silently swallows the throw into nothing would also produce zero crashes
+   * and zero rejections, and would pass a test written that way. That is
+   * exactly the trap app#513 and app#518 hit: an absence of failure was
+   * mistaken for a presence of correctness. So a local unhandledRejection
+   * listener is installed for the DURATION OF THIS TEST ONLY, to catch what
+   * would otherwise crash the Jest worker rather than let it happen — and the
+   * real assertion is that the failure was surfaced through an explicit,
+   * findable log line, not merely that it went nowhere.
+   */
+  let rejections: unknown[];
+  let onUnhandledRejection: (reason: unknown) => void;
+
+  beforeEach(() => {
+    rejections = [];
+    onUnhandledRejection = (reason) => rejections.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+  });
+
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandledRejection);
+  });
+
+  it('is caught and logged, not left to crash the process nor swallowed silently', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { closed } = await connect();
+      await settle();
+
+      participant = false;
+      FakeAgentbox.throwOnClose = true;
+
+      await jest.advanceTimersByTimeAsync(DOCUMENTED_RECHECK_MS);
+      await settle();
+
+      // The client's own close still lands — cleanupAll() closes clientWs
+      // BEFORE it reaches the throwing agentWs.close(), so this part holds
+      // regardless of the fix. Kept as context, not as the load-bearing
+      // assertion below.
+      expect((await raced(closed, { code: -1, reason: 'STILL OPEN' })).code).toBe(
+        CLOSE_ACCESS_REVOKED,
+      );
+
+      // Nothing escaped to the process-wide handler...
+      expect(rejections).toEqual([]);
+      // ...because it was caught and logged here, not because it never threw.
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/closing agentws during cleanup failed/i),
+        expect.any(Error),
+      );
+    } finally {
+      FakeAgentbox.throwOnClose = false;
+      errorSpy.mockRestore();
+    }
   }, 20000);
 });

@@ -405,10 +405,23 @@ export function attachTerminalProxy(
             );
             if (allowed) return;
             console.log(`[terminal-proxy] Closing thread=${threadId}: participation revoked`);
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.close(CLOSE_ACCESS_REVOKED, 'access revoked');
+            // `void` above attaches no rejection handler, and this tick is
+            // not dispatched by Express, so boot/async-errors.ts's patch
+            // does not reach it — a throw here has nowhere to go but this
+            // service's process-wide unhandledRejection backstop
+            // (boot/fatal.ts), which exits the process. This interval runs
+            // every 30s for the life of every open terminal session, so a
+            // teardown failure on ONE session would otherwise cost the api
+            // for everyone with a terminal open. Caught here so it costs
+            // only this session.
+            try {
+              if (clientWs.readyState === WebSocket.OPEN) {
+                clientWs.close(CLOSE_ACCESS_REVOKED, 'access revoked');
+              }
+              cleanupAll();
+            } catch (err) {
+              console.error(`[terminal-proxy] Cleanup after participation recheck failed for thread=${threadId}:`, err);
             }
-            cleanupAll();
           })();
         }, PING_INTERVAL_MS);
 
@@ -428,13 +441,32 @@ export function attachTerminalProxy(
         let stopAgentToClient: (() => void) | null = null;
         let stopClientToAgent: (() => void) | null = null;
 
+        // Called from six places, most of them with no error handling of
+        // their own: the two `.on('close', ...)` listeners just below and
+        // the two `.on('error', ...)` handlers further down are plain
+        // synchronous EventEmitter callbacks, where an uncaught throw is
+        // Node's 'uncaughtException' — a DIFFERENT, and not covered, failure
+        // mode from the 'unhandledRejection' the participation-recheck tick
+        // above risks; this service's backstop (boot/fatal.ts) only
+        // listens for the latter. One safe implementation here protects
+        // every caller at once, rather than needing the same try/catch
+        // typed out at each of the six call sites — the same reasoning
+        // boot/async-errors.ts already applies at the Express boundary.
         function cleanupAll() {
           stopAgentToClient?.();
           stopClientToAgent?.();
           clearTimeout(expiryTimer);
           clearInterval(pingInterval);
-          if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
-          if (agentWs.readyState === WebSocket.OPEN) agentWs.close();
+          try {
+            if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+          } catch (err) {
+            console.error(`[terminal-proxy] Closing clientWs during cleanup failed for thread=${threadId}:`, err);
+          }
+          try {
+            if (agentWs.readyState === WebSocket.OPEN) agentWs.close();
+          } catch (err) {
+            console.error(`[terminal-proxy] Closing agentWs during cleanup failed for thread=${threadId}:`, err);
+          }
         }
 
         // Relay, both ways, with backpressure. `ws.send()` does not block: a peer
