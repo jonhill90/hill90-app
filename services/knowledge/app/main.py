@@ -212,7 +212,13 @@ async def _revocation_refresh_loop(app: FastAPI) -> None:
             app.state.revocation_last_success = time.time()
             app.state.revocation_last_error = None
         except Exception as exc:
-            app.state.revocation_last_error = str(exc)
+            # app#600: same bound and reasoning as ai/app/revocation.py's
+            # identical cleanup loop — some exception types (a bare `raise
+            # SomeError()`) stringify to "", which would otherwise record a
+            # blank, unreadable failure indistinguishable from the field
+            # never having been set. [:200] because this value is served on
+            # /health with no size limit of its own.
+            app.state.revocation_last_error = f"{exc.__class__.__name__}: {exc}"[:200]
             logger.exception("revocation_refresh_failed")
 
 
@@ -224,7 +230,13 @@ async def _reconciler_loop(app: FastAPI, settings: Settings) -> None:
         app.state.reconciler_last_success = time.time()
         app.state.reconciler_last_error = None
     except Exception as exc:
-        app.state.reconciler_last_error = str(exc)
+        # app#600: same bound and reasoning as ai/app/revocation.py's
+        # identical cleanup loop — some exception types (a bare `raise
+        # SomeError()`) stringify to "", which would otherwise record a
+        # blank, unreadable failure indistinguishable from the field never
+        # having been set. [:200] because this value is served on /health
+        # with no size limit of its own.
+        app.state.reconciler_last_error = f"{exc.__class__.__name__}: {exc}"[:200]
         logger.exception("reconciler_startup_failed")
 
     # Then periodically
@@ -235,5 +247,5 @@ async def _reconciler_loop(app: FastAPI, settings: Settings) -> None:
             app.state.reconciler_last_success = time.time()
             app.state.reconciler_last_error = None
         except Exception as exc:
-            app.state.reconciler_last_error = str(exc)
+            app.state.reconciler_last_error = f"{exc.__class__.__name__}: {exc}"[:200]
             logger.exception("reconciler_cycle_failed")
