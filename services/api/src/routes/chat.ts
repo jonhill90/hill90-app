@@ -748,7 +748,15 @@ router.post('/threads', requireRole('user'), async (req: Request, res: Response)
       leadAgentId: lead_agent_id || null,
     });
 
-    // Direct thread backward compat response
+    // Direct thread response. `message_id` is kept for backward compatibility
+    // with callers written against the old direct-only response — it does
+    // NOT say whether dispatch succeeded, since it is populated from either
+    // `dispatched` or `failed` with no way for the caller to tell which
+    // (app#512). The dispatched/skipped/failed arrays below are the same
+    // ones the group-thread response three lines down already returns; a
+    // direct-thread dispatch failure is otherwise indistinguishable from a
+    // success at this response, even though dispatchToAgents already marked
+    // the placeholder chat_messages row status='error' in the database.
     if (threadType === 'direct') {
       res.status(201).json({
         thread: {
@@ -756,6 +764,10 @@ router.post('/threads', requireRole('user'), async (req: Request, res: Response)
           agent: { id: agents[0]!.id, agent_id: agents[0]!.agent_id },
         },
         message_id: dispatched[0]?.message_id || failed[0]?.message_id || null,
+        user_message: { id: userMsg.id, seq: userMsg.seq },
+        dispatched,
+        skipped,
+        failed,
       });
       return;
     }
@@ -1339,9 +1351,23 @@ router.post('/threads/:id/messages', requireRole('user'), async (req: Request, r
       leadAgentId,
     });
 
-    // Direct thread backward compat response
+    // Direct thread response. `message_id` is kept for backward compatibility
+    // with callers written against the old direct-only response — it does
+    // NOT say whether dispatch succeeded, since it is populated from either
+    // `dispatched` or `failedArr` with no way for the caller to tell which
+    // (app#512). The dispatched/skipped/failed arrays below are the same
+    // ones the group-thread response three lines down already returns; a
+    // direct-thread dispatch failure was otherwise indistinguishable from a
+    // success at this response, even though dispatchToAgents already marked
+    // the placeholder chat_messages row status='error' in the database.
     if (threadType === 'direct') {
-      res.status(201).json({ message_id: dispatched[0]?.message_id || failedArr[0]?.message_id || null });
+      res.status(201).json({
+        message_id: dispatched[0]?.message_id || failedArr[0]?.message_id || null,
+        user_message: { id: userMsg.id, seq: userMsg.seq },
+        dispatched,
+        skipped,
+        failed: failedArr,
+      });
       return;
     }
 
