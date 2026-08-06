@@ -21,10 +21,12 @@ _public_pem = _public_key.public_bytes(
 ).decode()
 
 TEST_ISSUER = "https://auth.hill90.com/realms/platform"
+TEST_AUDIENCE = "hill90-api"
 
 _test_verify_token = make_verify_token(
     issuer=TEST_ISSUER,
     get_signing_key=lambda _header: _public_pem,
+    audience=TEST_AUDIENCE,
 )
 
 
@@ -55,9 +57,19 @@ def test_me_returns_401_without_auth():
 
 
 def test_me_returns_claims_with_valid_token():
-    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER, "exp": 9999999999, "realm_roles": ["admin"]})
+    token = _sign_token(
+        {"sub": "user1", "iss": TEST_ISSUER, "aud": TEST_AUDIENCE, "exp": 9999999999, "realm_roles": ["admin"]}
+    )
     response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     data = response.json()
     assert data["sub"] == "user1"
     assert data["realm_roles"] == ["admin"]
+
+
+# app#485 — the endpoint-level version of the audience gap: a real, otherwise
+# valid token for a different client in the same realm must not reach /me.
+def test_me_returns_401_with_wrong_audience():
+    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER, "aud": "grafana", "exp": 9999999999})
+    response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
