@@ -23,6 +23,7 @@ interface UserLink {
 
 interface BotStatus {
   configured: boolean
+  deployed: boolean
   status: string
   message: string
 }
@@ -81,9 +82,15 @@ export default function DiscordClient() {
         body: JSON.stringify(bindingForm),
       })
       if (res.ok) {
+        const data = await res.json()
         setShowBindingForm(false)
         setBindingForm({ channel_id: '', guild_id: '', agent_id: '' })
         fetchData()
+        // app#508: the row really was created — this isn't an error path.
+        // It repeats, at the moment of creation, the same fact the Bot
+        // Status card already stated before the form was even opened, in
+        // case that was missed.
+        if (data.warning) alert(data.warning)
       } else {
         const data = await res.json()
         alert(data.error || 'Failed to bind channel')
@@ -157,24 +164,37 @@ export default function DiscordClient() {
         </div>
       </div>
 
-      {/* Bot Status */}
-      <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 mb-6">
+      {/* Bot Status — app#508: driven by whether a container is actually
+          running, not whether a token is configured. A token can exist in
+          vault with no bot container ever having existed to use it, which
+          was production's real state; this banner is unconditional, not
+          gated on whether any bindings exist yet, so it is visible before
+          a binding is ever created, not only after. */}
+      <div className="rounded-lg border border-navy-700 bg-navy-800 p-5 mb-6" data-testid="bot-status-card">
         <div className="flex items-center gap-3">
           <MessageSquare className="h-5 w-5 text-[#5865F2]" />
           <h2 className="text-lg font-semibold text-white">Bot Status</h2>
-          {botStatus?.configured ? (
+          {botStatus?.deployed ? (
             <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-brand-900/30 text-brand-400">
-              <CheckCircle className="w-3 h-3" /> Configured
+              <CheckCircle className="w-3 h-3" /> Running
             </span>
           ) : (
-            <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-900/30 text-red-400">
-              <XCircle className="w-3 h-3" /> Not Configured
+            <span
+              className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-900/30 text-red-400"
+              data-testid="bot-not-deployed-badge"
+            >
+              <XCircle className="w-3 h-3" /> {botStatus?.status === 'unknown' ? 'Unknown' : 'Not Running'}
             </span>
           )}
         </div>
+        {!botStatus?.deployed && (
+          <p className="text-sm text-red-400 mt-2" data-testid="bot-not-deployed-message">
+            {botStatus?.message || 'The Discord bot is not currently running. Bindings created now will not take effect.'}
+          </p>
+        )}
         {!botStatus?.configured && (
-          <p className="text-sm text-mountain-400 mt-2">
-            Add DISCORD_BOT_TOKEN and DISCORD_BOT_SERVICE_TOKEN to vault to enable the Discord bot.
+          <p className="text-xs text-mountain-500 mt-1">
+            DISCORD_BOT_TOKEN and DISCORD_BOT_SERVICE_TOKEN are also not configured in vault.
           </p>
         )}
       </div>
