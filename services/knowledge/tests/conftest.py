@@ -52,23 +52,6 @@ def agent_token(ed25519_keypair: tuple[bytes, bytes]) -> str:
 
 
 @pytest.fixture()
-def shared_write_token(ed25519_keypair: tuple[bytes, bytes]) -> str:
-    """Generate a valid agent JWT with shared-write scope."""
-    private_pem, _ = ed25519_keypair
-    now = int(time.time())
-    payload = {
-        "sub": "test-agent",
-        "iss": "hill90-api",
-        "aud": "hill90-akm",
-        "exp": now + 3600,
-        "iat": now,
-        "jti": str(uuid.uuid4()),
-        "scopes": ["akm:read", "akm:write", "akm:shared-write"],
-    }
-    return jwt.encode(payload, private_pem, algorithm="EdDSA")
-
-
-@pytest.fixture()
 def other_agent_token(ed25519_keypair: tuple[bytes, bytes]) -> str:
     """Generate a valid agent JWT for other-agent (different sub and owner)."""
     private_pem, _ = ed25519_keypair
