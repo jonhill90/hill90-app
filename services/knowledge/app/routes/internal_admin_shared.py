@@ -13,11 +13,23 @@ from typing import Any
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.services import shared_store
 from app.services.ingest import IngestError, ingest_source
 from app.services.quality import compute_quality_summary, enrich_results_with_quality
+from app.services.text_chunker import MAX_SOURCE_SIZE
+
+# The Content-Length pre-check below bounds the whole JSON request body
+# (collection_id, title, source_url, created_by, JSON syntax, and
+# raw_content all together), not raw_content alone — and JSON string
+# escaping can expand content somewhat (a literal newline becomes `\n`,
+# a quote becomes `\"`). This is deliberately generous rather than tight:
+# ingest.py's own MAX_SOURCE_SIZE check, run on the actual decoded
+# raw_content string after parsing, is what enforces the real 100KB limit
+# precisely. This constant's only job is to refuse something WILDLY
+# oversized before it is ever read into memory.
+MAX_REQUEST_BODY_BYTES = MAX_SOURCE_SIZE * 2
 
 
 def _validate_uuid(value: str, label: str = "id") -> None:
@@ -26,6 +38,35 @@ def _validate_uuid(value: str, label: str = "id") -> None:
         __import__("uuid").UUID(value)
     except (ValueError, AttributeError):
         raise HTTPException(status_code=422, detail=f"invalid {label}: {value}")
+
+
+def _reject_if_content_length_exceeds(request: Request, max_bytes: int) -> None:
+    """Refuse a request based on its DECLARED Content-Length, before the
+    body is read at all.
+
+    NOT the enforcement of MAX_SOURCE_SIZE itself — that still happens in
+    ingest.py, on the real decoded raw_content string, after parsing. This
+    is the cheap first line: a caller sending a wildly oversized payload
+    should not cost this process an allocation proportional to what they
+    sent just to be told no. A caller that lies about or omits
+    Content-Length is not caught here — that is exactly what the existing
+    post-parse check in ingest.py remains the backstop for.
+    """
+    declared = request.headers.get("content-length")
+    if declared is None:
+        return
+    try:
+        declared_bytes = int(declared)
+    except ValueError:
+        return
+    if declared_bytes > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"request body declares {declared_bytes} bytes, exceeding the "
+                f"{max_bytes // 1024}KB limit"
+            ),
+        )
 
 router = APIRouter(prefix="/internal/admin/shared", tags=["internal-admin-shared"])
 
@@ -167,8 +208,29 @@ class SourceCreate(BaseModel):
 
 
 @router.post("/sources")
-async def create_source(body: SourceCreate, request: Request) -> dict[str, Any]:
+async def create_source(request: Request) -> dict[str, Any]:
+    """Ingest a source.
+
+    Takes a raw Request rather than declaring `body: SourceCreate` as a
+    parameter — that shape works everywhere else in this file, but here it
+    would defeat the whole point of `_reject_if_content_length_exceeds`:
+    FastAPI resolves a Pydantic-model parameter by reading and parsing the
+    ENTIRE request body before this function's own code runs at all. The
+    Content-Length check needs to happen first, so the body is parsed by
+    hand, one line down, after that check has already passed.
+    """
     _verify_service_token(request)
+    _reject_if_content_length_exceeds(request, MAX_REQUEST_BODY_BYTES)
+
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="request body is not valid JSON")
+    try:
+        body = SourceCreate.model_validate(raw_body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
     _validate_uuid(body.collection_id, "collection_id")
     pool = request.app.state.pool
 
