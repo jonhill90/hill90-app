@@ -1196,21 +1196,35 @@ class ValidateProviderRequest(BaseModel):
 async def internal_embeddings(request: Request, authorization: str = Header(...)):
     """Generate embeddings for internal services (knowledge). Service-token auth.
 
-    NOT RATE-LIMITED OR BUDGETED — this call carries a service token, not an
-    agent JWT, so there is no policy to run `_enforce_policy` against. That
-    is a separate, real design question (see app#548: whose budget
-    should this count against, and what should happen to ingestion when it
-    is exhausted) and is deliberately not decided here.
+    app#548. This call carries a service token, not an agent JWT, so there
+    is no per-caller policy to run `_enforce_policy` against — copying it
+    verbatim would require an AgentClaims this endpoint fundamentally does
+    not have. WHOSE BUDGET this should bill to remains a real, undecided
+    design question (Jon's call, not this fix's) between per-user
+    attribution and a flat platform allowance; see the issue.
 
-    What IS fixed here: the spend was previously completely invisible —
-    identical to /v1/embeddings' downstream call, minus every recording
-    step. `owner`, when the caller has a real user identity to attribute
-    this to (e.g. knowledge's ingest path knows who triggered it), is
-    accepted and stored on the existing nullable `model_usage.owner` column
-    — the same column BYOK spend already uses — so this survives whichever
-    way the enforcement question above is eventually decided, with no
-    migration needed either way. `agent_id` is fixed to a named sentinel:
-    there is no agent here to attribute it to, and the column is NOT NULL.
+    What IS enforced here, deliberately independent of that decision: a
+    coarse, service-wide rate limit and daily token ceiling on this
+    endpoint as a whole, keyed to the same sentinel identity usage is
+    already logged under. This is not a budget decision — it is the
+    minimum floor "no spend without a check" requires regardless of how
+    attribution is eventually resolved, the same way /v1/embeddings never
+    spends without checking something first. `check_rate_limit` and
+    `check_token_budget` need only an agent_id string to key against
+    model_usage; they do not require a resolved per-agent policy, which is
+    what makes this safe to apply here without a real AgentClaims.
+
+    `owner`, when the caller has a real user identity to attribute this to
+    (e.g. knowledge's ingest path knows who triggered it), is accepted and
+    stored on the existing nullable `model_usage.owner` column — the same
+    column BYOK spend already uses — so this survives whichever way the
+    attribution question above is eventually decided, with no migration
+    needed either way. It is NOT used for enforcement: it is caller-
+    supplied and unverified (no signature backs it, unlike an agent JWT's
+    claims), so trusting it for a budget check would let any caller holding
+    the shared service token bill its spend to an arbitrary agent's limit.
+    `agent_id` on the usage row itself is fixed to a named sentinel: there
+    is no agent here to attribute it to, and the column is NOT NULL.
     """
     settings = get_settings()
     if not authorization.startswith("Bearer "):
@@ -1226,6 +1240,51 @@ async def internal_embeddings(request: Request, authorization: str = Header(...)
     model_name = body.get("model", "")
     if _http_client is None:
         raise HTTPException(status_code=503, detail="HTTP client not initialized")
+
+    async with get_db_conn() as conn:
+        rl = await check_rate_limit(
+            conn, agent_id=INTERNAL_EMBEDDINGS_AGENT_ID, max_rpm=settings.internal_embeddings_max_rpm
+        )
+    if not rl.allowed:
+        try:
+            async with get_db_conn() as conn:
+                await log_usage(
+                    conn=conn, agent_id=INTERNAL_EMBEDDINGS_AGENT_ID, model_name=model_name,
+                    request_type="embedding", status="rate_limited", latency_ms=0, owner=owner,
+                )
+        except Exception as e:
+            logger.warning("usage_log_failed", error=str(e))
+        return JSONResponse(
+            status_code=429,
+            content={"error": {
+                "type": "rate_limited",
+                "message": "Rate limit exceeded for internal embeddings",
+                "limit": rl.limit, "window": "60s", "retry_after": rl.retry_after,
+            }},
+            headers={"Retry-After": str(rl.retry_after)},
+        )
+
+    async with get_db_conn() as conn:
+        budget = await check_token_budget(
+            conn, agent_id=INTERNAL_EMBEDDINGS_AGENT_ID, max_tokens=settings.internal_embeddings_max_tokens_per_day
+        )
+    if not budget.allowed:
+        try:
+            async with get_db_conn() as conn:
+                await log_usage(
+                    conn=conn, agent_id=INTERNAL_EMBEDDINGS_AGENT_ID, model_name=model_name,
+                    request_type="embedding", status="budget_exceeded", latency_ms=0, owner=owner,
+                )
+        except Exception as e:
+            logger.warning("usage_log_failed", error=str(e))
+        return JSONResponse(
+            status_code=429,
+            content={"error": {
+                "type": "budget_exceeded",
+                "message": "Daily token budget exhausted for internal embeddings",
+                "limit": budget.limit, "used": budget.tokens_used, "resets_at": budget.resets_at,
+            }},
+        )
 
     start = time.monotonic()
     try:
