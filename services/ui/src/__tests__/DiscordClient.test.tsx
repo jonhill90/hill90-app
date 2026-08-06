@@ -99,6 +99,44 @@ describe('DiscordClient', () => {
     expect(screen.queryByTestId('bot-not-deployed-message')).not.toBeInTheDocument()
   })
 
+  // app#508's second half: a bot that EXISTS but is not currently running
+  // is a legitimate binding target, not the same fact as "never deployed" —
+  // and must not read as either the green "Running" badge (it isn't) or
+  // the red "Not Deployed" one (it exists, this isn't permanent).
+  it('a merely STOPPED bot gets its own amber badge — neither Running nor Not Deployed', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url === '/api/discord/bindings') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_BINDINGS) })
+      }
+      if (url === '/api/discord/status') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            configured: true,
+            deployed: true,
+            status: 'stopped',
+            message: 'The Discord bot container exists but is not currently running. This binding will take effect once it starts.',
+          }),
+        })
+      }
+      if (url === '/api/agents') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    }))
+
+    render(<DiscordClient />)
+    await waitFor(() => { expect(screen.getByText('Monitor Bot')).toBeInTheDocument() })
+
+    expect(screen.getByTestId('bot-stopped-badge')).toBeInTheDocument()
+    expect(screen.queryByTestId('bot-not-deployed-badge')).not.toBeInTheDocument()
+    expect(screen.getByTestId('bot-stopped-message')).toHaveTextContent(/not currently running/i)
+    // Not phrased as a permanent failure — this is the distinction from
+    // 'not_deployed' that makes the state worth having at all.
+    expect(screen.getByTestId('bot-stopped-message')).not.toHaveTextContent(/never/i);
+    expect(screen.queryByTestId('bot-not-deployed-message')).not.toBeInTheDocument()
+  })
+
   it('repeats the warning at the moment a binding is created, not only on the page-level banner', async () => {
     vi.stubGlobal('alert', vi.fn())
     vi.stubGlobal('fetch', vi.fn((url: string, opts?: any) => {

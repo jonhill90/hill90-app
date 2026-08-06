@@ -255,7 +255,7 @@ describe('createAndStartContainer edge-network attach failure is signalled, not 
   });
 });
 
-describe('isContainerRunning (app#508)', () => {
+describe('inspectContainerPresence (app#508)', () => {
   const mockInspect = jest.fn();
   const mockGetContainer = jest.fn().mockReturnValue({ inspect: mockInspect });
 
@@ -275,35 +275,39 @@ describe('isContainerRunning (app#508)', () => {
     jest.restoreAllMocks();
   });
 
-  it('POSITIVE CONTROL: a container in State.Status "running" resolves true', async () => {
-    const { isContainerRunning } = require('../services/docker');
+  it('POSITIVE CONTROL: a container in State.Status "running" resolves {exists: true, running: true}', async () => {
+    const { inspectContainerPresence } = require('../services/docker');
     mockInspect.mockResolvedValueOnce({ State: { Status: 'running' } });
 
-    await expect(isContainerRunning('app-discord-bot')).resolves.toBe(true);
+    await expect(inspectContainerPresence('app-discord-bot')).resolves.toEqual({ exists: true, running: true });
     expect(mockGetContainer).toHaveBeenCalledWith('app-discord-bot');
   });
 
-  it('a container that exists but is stopped resolves false, not true', async () => {
-    const { isContainerRunning } = require('../services/docker');
+  it('THE ASSERTION THAT MATTERS: a container that EXISTS but is stopped is {exists: true, running: false} — not collapsed into absence', async () => {
+    // app#508's second half: a container object present but not running is
+    // its own state, distinguishable from 404 — this is exactly what a bot
+    // merely down for maintenance looks like, and it must read as a
+    // legitimate deployment target, not as "never deployed".
+    const { inspectContainerPresence } = require('../services/docker');
     mockInspect.mockResolvedValueOnce({ State: { Status: 'exited' } });
 
-    await expect(isContainerRunning('app-discord-bot')).resolves.toBe(false);
+    await expect(inspectContainerPresence('app-discord-bot')).resolves.toEqual({ exists: true, running: false });
   });
 
-  it('THE ASSERTION THAT MATTERS: a container that does not exist at all (404) resolves false, not throw', async () => {
-    const { isContainerRunning } = require('../services/docker');
+  it('a container that does not exist at all (404) resolves {exists: false, running: false}, not throw', async () => {
+    const { inspectContainerPresence } = require('../services/docker');
     const err: any = new Error('no such container');
     err.statusCode = 404;
     mockInspect.mockRejectedValueOnce(err);
 
-    await expect(isContainerRunning('app-discord-bot')).resolves.toBe(false);
+    await expect(inspectContainerPresence('app-discord-bot')).resolves.toEqual({ exists: false, running: false });
   });
 
-  it('an unrelated daemon/proxy error is NOT collapsed into false — it propagates, so the caller can tell "absent" from "could not check"', async () => {
-    const { isContainerRunning } = require('../services/docker');
+  it('an unrelated daemon/proxy error is NOT collapsed into absence — it propagates, so the caller can tell "confirmed absent" from "could not check"', async () => {
+    const { inspectContainerPresence } = require('../services/docker');
     mockInspect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
-    await expect(isContainerRunning('app-discord-bot')).rejects.toThrow('ECONNREFUSED');
+    await expect(inspectContainerPresence('app-discord-bot')).rejects.toThrow('ECONNREFUSED');
   });
 });
 
