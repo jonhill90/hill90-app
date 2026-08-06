@@ -109,6 +109,18 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
     );
     const threadId = threadRows[0].id;
 
+    // app#542: set thread_id on the run as soon as it is known — see the
+    // identical comment in routes/workflows.ts's POST /:id/run, this
+    // route's authenticated twin. It used to be set last, after the
+    // fire-and-forget dispatch and a trailing last_run_at update; if
+    // either later statement threw, the run was correctly labelled
+    // 'error' while thread_id stayed NULL forever, orphaning a real
+    // thread and dispatch from the run record meant to find them.
+    await pool.query(
+      `UPDATE workflow_runs SET thread_id = $1 WHERE id = $2`,
+      [threadId, runRows[0].id]
+    );
+
     await pool.query(
       `INSERT INTO chat_participants (thread_id, participant_id, participant_type) VALUES ($1, $2, 'agent')`,
       [threadId, wf.agent_id]
@@ -156,7 +168,6 @@ router.post('/webhook/:token', async (req: Request, res: Response) => {
       });
     });
 
-    await pool.query(`UPDATE workflow_runs SET thread_id = $1 WHERE id = $2`, [threadId, runRows[0].id]);
     await pool.query(`UPDATE workflows SET last_run_at = NOW(), updated_at = NOW() WHERE id = $1`, [wf.id]);
 
     res.json({ triggered: true, workflow: wf.name, run_id: runRows[0].id, thread_id: threadId });
