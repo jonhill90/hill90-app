@@ -545,3 +545,62 @@ except Exception:
 
     assert_client_auth "$client" "$code" || return 1
 }
+
+# app#579: hill90/agentbox and hill90/agentbox-monitor copy the akm CLI out of
+# hill90/knowledge at BUILD time (services/agentbox/Dockerfile) — a fact that
+# lives only in that Dockerfile, nowhere in the deploy or merge path. So a
+# knowledge deploy ships services/knowledge/ changes to hill90/knowledge and
+# nowhere else; the agentbox images only pick them up when
+# build-agentbox-images.yml is separately, manually re-run. That workflow is
+# workflow_dispatch-only ON PURPOSE (it builds on the production host, so it
+# follows deploy.yml's manual-only rule — CLAUDE.md invariant 7, a merge must
+# not deploy), so a push trigger from services/knowledge/** is not a small
+# addition here; it would need to reproduce that whole guarded, host-mutating
+# path rather than just add a `paths:` filter. This check is the cheaper half
+# of the fix: it does not close the gap, it refuses to let a deploy complete
+# without saying the gap is now open.
+#
+# Reuses check_deploy_drift.sh's own definition of "stale" for these two
+# images (its dep_re case for hill90/agentbox|hill90/agentbox-monitor) rather
+# than inventing a second one that could quietly disagree with it — see that
+# script's own header for why a second definition is worse than none.
+#
+# $1: the revision the deploy just stamped (deploy.sh's $DEPLOY_REVISION).
+require_agentbox_images_not_stale() {
+    local deploy_revision="${1:?deploy revision required}"
+    local img label n_dep sha
+
+    for img in hill90/agentbox hill90/agentbox-monitor; do
+        label="$(docker inspect -f '{{index .Config.Labels "com.hill90.revision"}}' "${img}:latest" 2>/dev/null || true)"
+
+        if [ -z "$label" ] || [ "$label" = "<no value>" ]; then
+            echo "${img}:latest does not exist, or carries no com.hill90.revision label."
+            echo "Nothing here can say whether it holds the akm CLI this knowledge deploy just shipped."
+            return 1
+        fi
+
+        if ! git -C "$PROJECT_ROOT" rev-parse --verify --quiet "${label}^{commit}" >/dev/null; then
+            echo "${img}:latest is stamped '${label}', which is not a commit in this repository."
+            echo "Cannot tell whether it is current."
+            return 1
+        fi
+
+        n_dep=0
+        for sha in $(git -C "$PROJECT_ROOT" rev-list "${label}..${deploy_revision}" 2>/dev/null); do
+            # Same dep_re as check_deploy_drift.sh's hill90/agentbox|agentbox-monitor
+            # case — both prefixes, not just services/knowledge/, so this cannot
+            # quietly disagree with the alarm about what makes these two images stale.
+            if git -C "$PROJECT_ROOT" show --name-only --format="" "$sha" | grep -qE '^(services/agentbox/|services/knowledge/)'; then
+                n_dep=$((n_dep + 1))
+            fi
+        done
+
+        if [ "$n_dep" -gt 0 ]; then
+            echo "${img}:latest is stamped ${label:0:12}, ${n_dep} services/agentbox/ or services/knowledge/ commit(s) behind the knowledge image just deployed (${deploy_revision:0:12})."
+            echo "This is the app#579 gap: knowledge ships, agentbox does not, and nothing else says so."
+            return 1
+        fi
+    done
+
+    return 0
+}
