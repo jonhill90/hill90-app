@@ -101,7 +101,7 @@ class TestIngestReportsEmbeddingState:
         """
         cid = await _collection(app_client, "partial")
 
-        async def half(texts):
+        async def half(texts, **_kwargs):
             # Answer for the first two chunks only.
             return [[0.01] * 1536 for _ in texts[:2]]
 
@@ -120,7 +120,7 @@ class TestIngestReportsEmbeddingState:
     async def test_full_embeddings_report_embedded(self, app_client: AsyncClient) -> None:
         cid = await _collection(app_client, "healthy")
 
-        async def all_of_them(texts):
+        async def all_of_them(texts, **_kwargs):
             return [[0.02] * 1536 for _ in texts]
 
         with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
@@ -175,7 +175,7 @@ class TestSearchReportsCorpusCoverage:
             assert (await _ingest(app_client, cid, "Unembedded")).status_code == 200
 
         # The QUERY embeds fine — this is exactly the misleading case.
-        async def one_vector(_q):
+        async def one_vector(_q, **_kwargs):
             return [0.03] * 1536
 
         with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):
@@ -212,13 +212,13 @@ class TestSearchReportsCorpusCoverage:
         """
         cid = await _collection(app_client, "complete")
 
-        async def all_of_them(texts):
+        async def all_of_them(texts, **_kwargs):
             return [[0.04] * 1536 for _ in texts]
 
         with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
             assert (await _ingest(app_client, cid, "Embedded")).status_code == 200
 
-        async def one_vector(_q):
+        async def one_vector(_q, **_kwargs):
             return [0.04] * 1536
 
         with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):
@@ -251,7 +251,7 @@ class TestSearchReportsCorpusCoverage:
         )
         assert other.status_code == 200
 
-        async def all_of_them(texts):
+        async def all_of_them(texts, **_kwargs):
             return [[0.05] * 1536 for _ in texts]
 
         with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
@@ -260,7 +260,7 @@ class TestSearchReportsCorpusCoverage:
                 await _ingest(app_client, other.json()["id"], "Theirs")
             ).status_code == 200
 
-        async def one_vector(_q):
+        async def one_vector(_q, **_kwargs):
             return [0.05] * 1536
 
         with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):
@@ -298,7 +298,7 @@ class TestBackfillConverges:
             resp = await _ingest(app_client, cid, "Degraded")
         assert resp.json()["document"]["embedding_status"] == "pending"
 
-        async def all_of_them(texts):
+        async def all_of_them(texts, **_kwargs):
             return [[0.06] * 1536 for _ in texts]
 
         with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
@@ -349,7 +349,7 @@ class TestBackfillConverges:
         total_chunks = ing.json()["document"]["chunk_count"]
         assert total_chunks > 2
 
-        async def only_two(texts):
+        async def only_two(texts, **_kwargs):
             return [[0.07] * 1536 for _ in texts[:2]]
 
         with patch("app.services.embeddings.generate_embeddings", side_effect=only_two):
@@ -373,7 +373,7 @@ class TestBackfillConverges:
     ) -> None:
         cid = await _collection(app_client, "healthy-stats")
 
-        async def all_of_them(texts):
+        async def all_of_them(texts, **_kwargs):
             return [[0.08] * 1536 for _ in texts]
 
         with patch("app.services.embeddings.generate_embeddings", side_effect=all_of_them):
