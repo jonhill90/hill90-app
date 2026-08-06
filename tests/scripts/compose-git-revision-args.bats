@@ -50,20 +50,25 @@ setup() {
   [[ "$output" == *"knowledge"* ]]
 }
 
-@test "a service whose Dockerfile has no ARG GIT_REVISION is not flagged" {
-  # api/ai/ui/mcp never defined ARG GIT_REVISION in the first place — passing
-  # args: there would be inert, and the check must not invent a requirement
-  # for a Dockerfile that was never built to carry the label. Asserted
-  # directly against the Dockerfiles rather than assumed.
-  for svc in api ai ui mcp; do
+@test "every deployed service's Dockerfile now defines ARG GIT_REVISION — app#561 closed the gap" {
+  # Superseded, kept for the record of what used to be true: api/ai/ui/mcp
+  # never defined ARG GIT_REVISION at all, so this file's own comment said
+  # passing args: to them would be inert, and a prior version of this test
+  # asserted exactly that absence. app#561 gave all four the same three
+  # lines knowledge already had (Dockerfile ARG + LABEL, compose args:), so
+  # the absence this test used to assert is no longer true and asserting it
+  # today would be silently wrong the moment a reader trusted it.
+  for svc in api ai ui mcp knowledge; do
     run grep -q '^ARG GIT_REVISION' "${REPO_ROOT}/services/${svc}/Dockerfile"
-    [ "$status" -ne 0 ]
+    [ "$status" -eq 0 ]
   done
 
-  # And the check itself still passes with those four unstamped-by-design —
-  # it isn't merely lucky that none of them appear in the failure count above.
+  # Every deployed stack now has an ARG to check — the "no Dockerfile to
+  # inspect" escape hatch above should never fire for any of the five.
   run "$CHECK"
   [ "$status" -eq 0 ]
+  [[ "$output" =~ ([0-9]+)\ deployed\ stacks,\ ([0-9]+)\ with\ ARG\ GIT_REVISION ]]
+  [ "${BASH_REMATCH[1]}" -eq "${BASH_REMATCH[2]}" ]
 }
 
 @test "the check FAILS rather than passing when deploy.sh lists a missing file" {
