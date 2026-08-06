@@ -36,11 +36,19 @@ name: Platform Baseline Freshness
 # branch pointer that could resolve differently between two steps of the
 # same run.
 #
-# NO SECRETS, NO environment: BLOCK. This talks to GitHub's public API and
+# NO MANUALLY-CONFIGURED SECRET. This talks to GitHub's public API and
 # downloads a public tarball — nothing here touches the VPS, Tailscale, or
-# any credential. That absence is itself informative: a workflow this simple
-# needed none of the machinery every deploy-adjacent workflow in this repo
-# carries, because it never leaves GitHub's own public surface.
+# any credential this repo manages or rotates. It DOES send the workflow's
+# own ambient GITHUB_TOKEN on the commit-lookup call below (added
+# 2026-08-06 — the unauthenticated call was hitting GitHub's 60-requests-
+# per-hour-PER-IP limit, shared across every other tenant of the same
+# GitHub-hosted Actions runner IP, not a limit this workflow's own traffic
+# could exhaust alone). GITHUB_TOKEN is minted automatically for every
+# workflow run; nothing was added to this repo's secrets store to make
+# that authentication happen, and the token is never used for anything
+# this repo doesn't already have read access to — see the step's own
+# comment for why an unrelated repo's permission scope doesn't matter for
+# a public-data read.
 
 on:
   schedule:
@@ -69,18 +77,70 @@ jobs:
         uses: actions/checkout@v4
 
       # Resolved ONCE. Every later step reads this output, not `main` again.
+      #
+      # Authenticated with the workflow's own GITHUB_TOKEN even though it
+      # only ever reads jonhill90/Hill90 — a repo this token has no
+      # permission grant for (this workflow's `permissions:` block above is
+      # scoped to THIS repo, hill90-app). That is fine for this call
+      # specifically: reading a PUBLIC repo's data over the REST API does
+      # not require any repo-specific permission at all, and GitHub grants
+      # the higher authenticated rate-limit tier to any authenticated
+      # request regardless of which repo the token's permissions belong to.
+      # Verified directly (not assumed from docs alone): an authenticated
+      # GET to this exact endpoint for a repo other than the token's own
+      # returned `x-ratelimit-limit: 5000`; the identical unauthenticated
+      # call returned `x-ratelimit-limit: 60`. The 403 this workflow hit on
+      # 2026-08-05 was that 60-per-hour budget — shared across every other
+      # tenant of the same GitHub-hosted Actions runner IP — exhausted by
+      # traffic that had nothing to do with this workflow.
+      #
+      # Also replaces `curl -f | python3 -c 'json.load(...)'`, which had a
+      # second, separate defect: on a non-200 response, curl's `-f` prints
+      # nothing to stdout and exits nonzero, but that happens INSIDE a pipe
+      # feeding python3 — so python3 ran against empty input and crashed
+      # with an uncaught JSONDecodeError instead of the clean
+      # `::error::could not resolve...` message six lines below it, which
+      # this exact failure mode meant that message could never actually
+      # reach. The step still failed (bash's default `-e` for `run:` steps
+      # meant the crash aborted the job), just not with a message anyone
+      # could read. Reproduced locally against a guaranteed-404 URL before
+      # this fix: identical shape — a curl error line, then a raw Python
+      # traceback, then exit 1, and the intended ::error:: line never
+      # printed. The status code is now read explicitly and checked before
+      # any JSON parsing is attempted, so a non-200 fails on its own
+      # ::error:: line, and a 200 with an unexpected body fails on a
+      # different one.
       - name: Resolve Hill90 main to one commit
         id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sha=$(curl -fsSL https://api.github.com/repos/jonhill90/Hill90/commits/main \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')
+          resp_file=$(mktemp)
+          http_code=$(curl -sS -w '%{http_code}' -o "$resp_file" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/jonhill90/Hill90/commits/main)
+          if [ "$http_code" != "200" ]; then
+            echo "::error::GET /repos/jonhill90/Hill90/commits/main returned HTTP $http_code, not 200 — nothing was compared. Body: $(cat "$resp_file")"
+            exit 1
+          fi
+          sha=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha",""))' < "$resp_file")
           if [ -z "$sha" ]; then
-            echo "::error::could not resolve Hill90's main to a commit SHA — nothing was compared"
+            echo "::error::got HTTP 200 but the response had no sha field — nothing was compared"
             exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Resolved Hill90 main -> $sha"
 
+      # Deliberately NOT given the same auth-header treatment as the step
+      # above. Checked, not assumed: the same tarball URL returned HTTP 200
+      # both with and without an Authorization header, so this download
+      # goes through codeload.github.com rather than api.github.com and
+      # isn't drawing from the 60-per-hour budget that broke the step
+      # above. Its existing `curl -fsSL ... -o <file>` also isn't piped
+      # into a downstream parser, so a failure here already exits with
+      # curl's own clear message under this job's default `bash -e` —
+      # it doesn't have the swallowed-error shape the step above had.
       - name: Download Hill90's compose files at that commit
         env:
           HILL90_SHA: ${{ steps.resolve.outputs.sha }}
