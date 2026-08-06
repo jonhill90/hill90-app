@@ -92,7 +92,20 @@ export default function ChatView({ threadId, session, thread, onBack, onThreadUp
     eventSourceRef.current = es
 
     es.addEventListener('message', (e) => {
-      const msg: Message = JSON.parse(e.data)
+      // Nineteen lines below, the 'backfill' listener wraps its own
+      // JSON.parse the same way: "A malformed notice must not break the
+      // stream; the messages that follow are still good." This listener is
+      // the more consequential twin of that reasoning — an unguarded throw
+      // here doesn't crash the component (a DOM event-listener exception
+      // doesn't propagate to React), but it silently drops that one message
+      // update with no visible trace, and the same guarantee applies: one
+      // malformed frame must not take the rest of the stream with it.
+      let msg: Message
+      try {
+        msg = JSON.parse(e.data)
+      } catch {
+        return
+      }
       setMessages(prev => {
         const idx = prev.findIndex(m => m.id === msg.id)
         if (idx >= 0) {
