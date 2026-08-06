@@ -470,7 +470,9 @@ class TestSharedStats:
         await _admin_search(app_client, "Elixir", "req-stats-a", collection_id=cid_a)
 
         cid_b = await _create_collection(app_client, "Stats Scope Owner B", "stats-owner-b", visibility="private")
-        ingest_b = await _ingest_source(
+        # Owner B's data only needs to EXIST for this test to prove exclusion
+        # — nothing here reads the ingest response, unlike owner A's below.
+        await _ingest_source(
             app_client, cid_b, "Stats Scope B Doc",
             "Haskell type classes and monadic composition for pure functions.",
             "stats-owner-b",
