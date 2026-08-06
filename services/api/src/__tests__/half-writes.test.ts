@@ -96,6 +96,11 @@ jest.mock('../services/docker', () => ({
   execInContainer: jest.fn(),
 }));
 
+const mockDispatchChatWork = jest.fn();
+jest.mock('../services/chat-dispatch', () => ({
+  dispatchChatWork: (...args: unknown[]) => mockDispatchChatWork(...args),
+}));
+
 const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
 
 const userToken = jwt.sign(
@@ -114,6 +119,8 @@ beforeEach(() => {
   mockQuery.mockReset();
   clientCalls.length = 0;
   process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+  mockDispatchChatWork.mockReset();
+  mockDispatchChatWork.mockResolvedValue({ accepted: true, work_id: 'work-123' });
 });
 afterEach(() => {
   delete process.env.DATABASE_URL;
@@ -471,5 +478,77 @@ describe('POST /skills and PUT /skills/:id — the row write and skill_tools res
     expect(clientCalls).toContain('BEGIN');
     expect(clientCalls).toContain('ROLLBACK');
     expect(clientCalls).not.toContain('COMMIT');
+  });
+});
+
+describe('POST /chat/threads/:id/messages — the user message and the thread bump are one transaction', () => {
+  /**
+   * A direct thread, one running agent, nothing pending — the shortest path
+   * to the two writes under test. Every read before them (isParticipant,
+   * getThreadType, getThreadAgents, getAgentForDispatch, the elevated-scope
+   * pre-flight, the per-agent concurrency guard) is answered so the route
+   * reaches the INSERT.
+   */
+  function mockReadsThenFailOn(failingPattern: RegExp) {
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(s)) return Promise.resolve({ rows: [] });
+      if (failingPattern.test(s)) return Promise.reject(new Error('connection reset'));
+      if (/participant_type = 'human'/.test(s)) return Promise.resolve({ rows: [{ '?column?': 1 }] }); // isParticipant
+      if (/SELECT type, lead_agent_id FROM chat_threads/.test(s)) {
+        return Promise.resolve({ rows: [{ type: 'direct', lead_agent_id: null }] }); // getThreadType
+      }
+      if (/chat_participants/.test(s) && /participant_type = 'agent'/.test(s)) {
+        return Promise.resolve({ rows: [{ participant_id: 'agent-uuid' }] }); // getThreadAgents
+      }
+      if (/FROM agents a/.test(s)) {
+        return Promise.resolve({
+          rows: [{ id: 'agent-uuid', agent_id: 'test-agent', name: 'Test', status: 'running', work_token: 'wt', models: ['gpt-4o-mini'] }],
+        }); // getAgentForDispatch
+      }
+      if (/FROM agent_skills asks/.test(s)) return Promise.resolve({ rows: [] }); // getAgentElevatedScope
+      if (/author_type = 'agent' AND status = 'pending'/.test(s)) return Promise.resolve({ rows: [] }); // concurrency guard
+      if (/INSERT INTO chat_messages/.test(s)) return Promise.resolve({ rows: [{ id: 'user-msg-1', seq: 1 }] });
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it('rolls back and does not commit when the thread-timestamp UPDATE fails, so the user message INSERT does not survive as an orphan', async () => {
+    mockReadsThenFailOn(/UPDATE chat_threads SET updated_at/);
+
+    const res = await request(app)
+      .post('/chat/threads/thread-1/messages')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ message: 'hello' });
+
+    expect(res.status).toBe(500);
+
+    // THE ASSERTION THAT MATTERS: the database, not the response. Before this
+    // fix, the INSERT ran on the bare pool and committed independently — a
+    // 'complete' user message with no assistant reply ever dispatched for
+    // it, surviving a request the caller was told had failed. A retry
+    // without an idempotency_key would not find it (the concurrency guard
+    // only checks for a PENDING agent message) and would create a second,
+    // duplicate message instead, leaving the first orphaned forever. With
+    // both writes now one transaction, the INSERT must have been opened and
+    // abandoned, never committed.
+    expect(clientCalls).toContain('BEGIN');
+    expect(clientCalls).toContain('ROLLBACK');
+    expect(clientCalls).not.toContain('COMMIT');
+    expect(mockDispatchChatWork).not.toHaveBeenCalled();
+  });
+
+  it('commits once on the happy path', async () => {
+    mockReadsThenFailOn(/(?!)/); // a pattern that never matches — nothing fails
+
+    const res = await request(app)
+      .post('/chat/threads/thread-1/messages')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ message: 'hello' });
+
+    expect(res.status).toBe(201);
+    // A guard rail: a transaction that never commits is a different bug.
+    expect(clientCalls.filter((c) => c === 'COMMIT')).toHaveLength(1);
+    expect(clientCalls).not.toContain('ROLLBACK');
   });
 });
