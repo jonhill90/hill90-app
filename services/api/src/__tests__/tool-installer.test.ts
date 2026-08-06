@@ -58,7 +58,7 @@ describe('tool-installer service', () => {
 
     await ensureRequiredToolsInstalled('agent-db-id', 'agent-slug');
 
-    expect(mockExec).toHaveBeenCalledWith('agent-slug', ['bash', '-lc', 'command -v bash'], 30000);
+    expect(mockExec).toHaveBeenCalledWith('agent-slug', ['bash', '-lc', "command -v 'bash'"], 30000);
     expect(mockQuery).toHaveBeenCalled();
   });
 
@@ -418,6 +418,62 @@ describe('tool-installer service', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(mockExecStdin).toHaveBeenCalledTimes(1);
+  });
+
+  // T35: a tool name carrying shell metacharacters must survive as literal
+  // data in the builtin `command -v` check, not as shell syntax. Asserting
+  // "no exception was thrown" would pass against the injectable version too
+  // — the injected command runs silently and this function has no way to
+  // observe that from its own return value. What's asserted instead is the
+  // SHAPE of the string handed to `bash -lc`: the payload must appear
+  // wrapped in single quotes, exactly as shellQuote() would produce it,
+  // rather than spliced in raw where `;` would start a second command.
+  it('quotes a tool name containing shell metacharacters in the builtin check', async () => {
+    const maliciousName = "innocuous; touch /tmp/pwned";
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'tool-evil', name: maliciousName, install_method: 'builtin', install_ref: '' }],
+      })
+      .mockResolvedValue({ rowCount: 1 });
+    mockExec.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+
+    await ensureRequiredToolsInstalled('agent-db-id', 'agent-slug');
+
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    const cmd = mockExec.mock.calls[0][1];
+    expect(cmd).toEqual(['bash', '-lc', "command -v 'innocuous; touch /tmp/pwned'"]);
+  });
+
+  // T36: same shape, apt path — the tool name is interpolated TWICE in
+  // installApt's constructed string (the `command -v` idempotency check and,
+  // via the trailing installBuiltin() call, a second `command -v` check).
+  // Both occurrences must be quoted; install_ref/pkg was already correctly
+  // quoted via shellQuote() before this fix, so only the tool.name spots are
+  // exercised here.
+  it('quotes a tool name containing shell metacharacters in both apt-path command -v checks', async () => {
+    const maliciousName = "innocuous; touch /tmp/pwned";
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'tool-evil', name: maliciousName, install_method: 'apt', install_ref: '' }],
+      })
+      .mockResolvedValue({ rowCount: 1 });
+    mockExec.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+
+    await ensureRequiredToolsInstalled('agent-db-id', 'agent-slug');
+
+    expect(mockExec).toHaveBeenCalledTimes(2);
+
+    const aptCmd = mockExec.mock.calls[0][1];
+    expect(aptCmd).toEqual([
+      'bash',
+      '-lc',
+      "command -v 'innocuous; touch /tmp/pwned' >/dev/null 2>&1 || " +
+        "(apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y " +
+        "--no-install-recommends 'innocuous; touch /tmp/pwned')",
+    ]);
+
+    const builtinCheckCmd = mockExec.mock.calls[1][1];
+    expect(builtinCheckCmd).toEqual(['bash', '-lc', "command -v 'innocuous; touch /tmp/pwned'"]);
   });
 
   // T34: Excessive redirects (> MAX_DOWNLOAD_REDIRECTS) fails deterministically
