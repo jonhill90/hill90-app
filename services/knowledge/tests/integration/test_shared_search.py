@@ -160,7 +160,7 @@ class TestAdminSearchScoreTypeMatchesSearchType:
             "user-score-type",
         )
 
-        async def one_vector(_q):
+        async def one_vector(_q, **_kwargs):
             return [0.05] * 1536
 
         with patch("app.services.embeddings.generate_embedding", side_effect=one_vector):

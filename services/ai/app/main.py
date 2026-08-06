@@ -61,6 +61,12 @@ from app.usage import log_usage
 
 logger = structlog.get_logger()
 
+# model_usage.agent_id is NOT NULL and there is no agent JWT on a
+# service-token call — this names the path rather than guessing which
+# internal service made the call, since MODEL_ROUTER_INTERNAL_SERVICE_TOKEN
+# is one shared secret with no per-caller identity of its own.
+INTERNAL_EMBEDDINGS_AGENT_ID = "internal:embeddings"
+
 # ---- State ----
 _db_pool: asyncpg.Pool | None = None
 _http_client: httpx.AsyncClient | None = None
@@ -1129,7 +1135,24 @@ class ValidateProviderRequest(BaseModel):
 
 @app.post("/internal/embeddings")
 async def internal_embeddings(request: Request, authorization: str = Header(...)):
-    """Generate embeddings for internal services (knowledge). Service-token auth."""
+    """Generate embeddings for internal services (knowledge). Service-token auth.
+
+    NOT RATE-LIMITED OR BUDGETED — this call carries a service token, not an
+    agent JWT, so there is no policy to run `_enforce_policy` against. That
+    is a separate, real design question (see app#548: whose budget
+    should this count against, and what should happen to ingestion when it
+    is exhausted) and is deliberately not decided here.
+
+    What IS fixed here: the spend was previously completely invisible —
+    identical to /v1/embeddings' downstream call, minus every recording
+    step. `owner`, when the caller has a real user identity to attribute
+    this to (e.g. knowledge's ingest path knows who triggered it), is
+    accepted and stored on the existing nullable `model_usage.owner` column
+    — the same column BYOK spend already uses — so this survives whichever
+    way the enforcement question above is eventually decided, with no
+    migration needed either way. `agent_id` is fixed to a named sentinel:
+    there is no agent here to attribute it to, and the column is NOT NULL.
+    """
     settings = get_settings()
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=403, detail="Missing Bearer token")
@@ -1138,9 +1161,14 @@ async def internal_embeddings(request: Request, authorization: str = Header(...)
         raise HTTPException(status_code=403, detail="Invalid service token")
 
     body = await request.json()
+    # Not sent to LiteLLM — read here for usage attribution only, popped so
+    # it never reaches the upstream request body.
+    owner = body.pop("owner", None)
+    model_name = body.get("model", "")
     if _http_client is None:
         raise HTTPException(status_code=503, detail="HTTP client not initialized")
 
+    start = time.monotonic()
     try:
         result = await proxy_embeddings(
             client=_http_client,
@@ -1148,10 +1176,108 @@ async def internal_embeddings(request: Request, authorization: str = Header(...)
             litellm_master_key=settings.litellm_master_key,
             request_body=body,
         )
-        return JSONResponse(content=result)
     except Exception as e:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        # Same reasoning as chat_completions'/embeddings' identical error
+        # paths: this write only runs because the proxy call already
+        # failed, so a second, unguarded DB failure here must not replace
+        # the deliberate 502 below.
+        try:
+            async with get_db_conn() as conn:
+                await log_usage(
+                    conn=conn,
+                    agent_id=INTERNAL_EMBEDDINGS_AGENT_ID,
+                    model_name=model_name,
+                    request_type="embedding",
+                    status="error",
+                    latency_ms=elapsed_ms,
+                    owner=owner,
+                )
+        except Exception as usage_exc:
+            logger.warning("usage_log_failed", error=str(usage_exc))
         logger.error("internal_embeddings_error", error=str(e))
         raise HTTPException(status_code=502, detail=f"Embedding proxy error: {str(e)[:200]}")
+
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    status = "success" if result["status_code"] == 200 else "error"
+    try:
+        async with get_db_conn() as conn:
+            await log_usage(
+                conn=conn,
+                agent_id=INTERNAL_EMBEDDINGS_AGENT_ID,
+                model_name=model_name,
+                request_type="embedding",
+                status=status,
+                latency_ms=elapsed_ms,
+                input_tokens=result["input_tokens"],
+                output_tokens=0,
+                cost_usd=result["cost_usd"],
+                owner=owner,
+            )
+    except Exception as e:
+        logger.warning("usage_log_failed", error=str(e))
+
+    return JSONResponse(content=result)
+
+
+class LogUsageRequest(BaseModel):
+    """A usage record for spend this service never proxied itself."""
+    model_name: str
+    request_type: str = "embedding"
+    status: str = "success"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    owner: str | None = None
+
+
+@app.post("/internal/usage")
+async def log_usage_endpoint(body: LogUsageRequest, authorization: str = Header(...)):
+    """Record usage for a request this service did not proxy itself.
+
+    Exists for services/knowledge's direct-LiteLLM embeddings fallback: it
+    has no database connection to the one model_usage lives in (a separate
+    Postgres database from its own), so it cannot write that row directly
+    even though it made a real, billable call. Service-token authenticated,
+    identically to /internal/embeddings.
+
+    NOT AN ENFORCEMENT POINT — no check_rate_limit, no check_token_budget.
+    This only makes already-happened spend visible and attributable; see
+    app#548 for whether and how spend recorded this way should ever be
+    checked against a limit.
+
+    Best-effort in the other direction from every other usage-log call site
+    in this file: HERE, recording IS the endpoint's entire job, so a write
+    failure is reported to the caller (502) rather than swallowed — a
+    caller told 200 for a record that silently failed to land would have no
+    way to know its own logging is the only trace left.
+    """
+    settings = get_settings()
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Missing Bearer token")
+    token = authorization[7:]
+    if not hmac.compare_digest(token, settings.model_router_internal_service_token):
+        raise HTTPException(status_code=403, detail="Invalid service token")
+
+    try:
+        async with get_db_conn() as conn:
+            await log_usage(
+                conn=conn,
+                agent_id=INTERNAL_EMBEDDINGS_AGENT_ID,
+                model_name=body.model_name,
+                request_type=body.request_type,
+                status=body.status,
+                latency_ms=0,
+                input_tokens=body.input_tokens,
+                output_tokens=body.output_tokens,
+                cost_usd=body.cost_usd,
+                owner=body.owner,
+            )
+    except Exception as e:
+        logger.error("internal_usage_log_failed", error=str(e))
+        raise HTTPException(status_code=502, detail="Failed to record usage")
+
+    return {"status": "recorded"}
 
 
 @app.post("/internal/validate-provider")
