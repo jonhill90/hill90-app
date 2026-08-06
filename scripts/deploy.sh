@@ -600,6 +600,31 @@ To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"
 
     cmd_verify "$stack" "$env"
     success "${stack} deployed"
+
+    # app#579: hill90/agentbox and hill90/agentbox-monitor copy the akm CLI out
+    # of hill90/knowledge at build time, and nothing rebuilds them when
+    # knowledge deploys — that is a separate, manual
+    # `gh workflow run "Build Agentbox Images (Prod)"`. It bit twice in one
+    # day: an image-stamp defect (#558), then a security fix (SSRF
+    # DNS-rebinding, #573/#545) live in knowledge and absent from agentbox for
+    # a day, caught only by the four-hourly drift alarm (#578). This is the
+    # read-back the issue asked for: refuse to let a knowledge deploy report
+    # success while that gap is silently open.
+    case "$stack" in
+        knowledge)
+            if [ "${ALLOW_STALE_AGENTBOX_IMAGES:-0}" = "1" ]; then
+                warn "ALLOW_STALE_AGENTBOX_IMAGES=1 — not checking whether hill90/agentbox and hill90/agentbox-monitor hold this knowledge deploy's code. Agents may run the old akm CLI until they are rebuilt."
+            else
+                local drift_report
+                drift_report="$(require_agentbox_images_not_stale "$DEPLOY_REVISION")" \
+                    || die "knowledge deployed, but the agentbox images are now behind it (app#579):
+${drift_report}
+Rebuild them: gh workflow run \"Build Agentbox Images (Prod)\"
+To deploy anyway, knowing agents may run stale code until that runs: ALLOW_STALE_AGENTBOX_IMAGES=1"
+                success "hill90/agentbox and hill90/agentbox-monitor carry services/knowledge/ code no older than this deploy"
+            fi
+            ;;
+    esac
 }
 
 # `all` implements runbook §3 steps 12-13, including the stop between them.
