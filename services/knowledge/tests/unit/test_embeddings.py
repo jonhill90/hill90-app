@@ -70,6 +70,61 @@ class TestViaModelRouterOwnerAttribution:
         assert "owner" not in kwargs["json"]
 
 
+class TestViaModelRouterStatusPropagation:
+    """app#454. /internal/embeddings used to always answer 200, so this
+    caller's own status check (`if resp.status_code != 200: log the real
+    upstream status`) was unreachable — execution fell through to
+    `body["data"]`, KeyError'd on an error-shaped payload, and the broad
+    `except` caught that and returned the same `None` the status check
+    would have. Both branches return `None` either way, so a test that
+    only asserts the return value would pass identically before and after
+    the fix. THE ASSERTION THAT MATTERS is which branch actually ran —
+    read from which log message fired, not from the return value."""
+
+    @pytest.mark.asyncio
+    async def test_post_fix_shape_a_real_non_200_status_is_logged_specifically(self, monkeypatch, caplog):
+        """/internal/embeddings, fixed, now propagates the real upstream
+        status — a 429 arrives as a 429, not a defaulted 200."""
+        monkeypatch.setattr(embeddings_mod, "MODEL_ROUTER_INTERNAL_SERVICE_TOKEN", "svc-token")
+        client = _mock_client_returning(429, {"error": "rate limited"})
+
+        with patch("httpx.AsyncClient", return_value=client):
+            import logging
+            with caplog.at_level(logging.WARNING):
+                result = await embeddings_mod._via_model_router(["hello"])
+
+        assert result is None
+        # THE ASSERTION THAT MATTERS: the specific, informative branch ran —
+        # naming the real status — not the generic exception branch both
+        # branches would otherwise produce identically.
+        messages = [r.message for r in caplog.records]
+        assert any("AI service embedding failed" in m and "429" in m for m in messages)
+        assert not any("AI service embedding error" in m for m in messages)
+
+    @pytest.mark.asyncio
+    async def test_control_pre_fix_shape_the_same_failure_reaches_the_wrong_branch(self, monkeypatch, caplog):
+        """CONTROL, reproducing the pre-fix defect directly rather than
+        describing it: a defaulted-200 response carrying an error-shaped
+        body (no "data" key under "body") — exactly what /internal/embeddings
+        used to send regardless of what LiteLLM actually returned. Proves
+        the status-check branch was genuinely unreachable in that shape,
+        not merely assumed to be."""
+        monkeypatch.setattr(embeddings_mod, "MODEL_ROUTER_INTERNAL_SERVICE_TOKEN", "svc-token")
+        client = _mock_client_returning(200, {"body": {"error": "rate limited"}})
+
+        with patch("httpx.AsyncClient", return_value=client):
+            import logging
+            with caplog.at_level(logging.WARNING):
+                result = await embeddings_mod._via_model_router(["hello"])
+
+        assert result is None
+        # Same return value as the fixed-shape test above — the return
+        # value alone cannot distinguish these. The branch can.
+        messages = [r.message for r in caplog.records]
+        assert any("AI service embedding error" in m for m in messages)
+        assert not any("AI service embedding failed" in m for m in messages)
+
+
 class TestViaLiteLLMFallbackReportsUsage:
     @pytest.mark.asyncio
     async def test_reports_real_token_count_and_owner_to_internal_usage(self, monkeypatch):
