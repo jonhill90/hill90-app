@@ -72,6 +72,7 @@ export default function XTerminal({ threadId }: Props) {
   const { data: session } = useSession()
   const [controlling, setControlling] = useState(false)
   const [connected, setConnected] = useState(false)
+  const [connectError, setConnectError] = useState<string | null>(null)
 
   const connect = useCallback(async () => {
     if (!containerRef.current || !session) return
@@ -255,12 +256,27 @@ export default function XTerminal({ threadId }: Props) {
 
   useEffect(() => {
     let cleanup: (() => void) | undefined
+    let cancelled = false
 
     connect().then((fn) => {
-      cleanup = fn
+      if (!cancelled) cleanup = fn
+    }).catch((err) => {
+      // connect() starts with three dynamic imports (xterm and its two
+      // addons) before it ever creates a WebSocket — a chunk-load failure
+      // there is an ordinary event (a redeploy invalidates a cached chunk
+      // hash, or a flaky connection), not a hostile input. Unhandled, this
+      // left the pane permanently non-functional with zero indication why:
+      // `connected` never flips true (it's only set inside the WebSocket's
+      // onopen, which a rejected connect() never reaches), and the
+      // container just stayed empty forever.
+      if (!cancelled) {
+        console.error('[XTerminal] failed to start:', err)
+        setConnectError('Failed to load the terminal. Try reloading the page.')
+      }
     })
 
     return () => {
+      cancelled = true
       cleanup?.()
     }
   }, [connect])
@@ -301,6 +317,11 @@ export default function XTerminal({ threadId }: Props) {
           </div>
         </div>
       </div>
+      {connectError && (
+        <div className="px-3 py-2 bg-[#f7768e]/10 border-b border-[#f7768e]/30 text-xs text-[#f7768e]">
+          {connectError}
+        </div>
+      )}
       <div
         ref={containerRef}
         className="flex-1 min-h-0 bg-[#1a1b26] overflow-hidden"
