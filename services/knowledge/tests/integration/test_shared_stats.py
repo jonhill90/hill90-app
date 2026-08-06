@@ -437,3 +437,89 @@ class TestSharedStats:
         all_keys = _collect_keys(data)
         assert "requester_id" not in all_keys
         assert "requester_name" not in all_keys
+
+    async def test_stats_owner_scoping_covers_search_ingest_sources_corpus_and_embedding_coverage(
+        self, app_client
+    ):
+        """app#<ISSUE>: the app#445 fix scoped only usage.top_collections/
+        top_sources by owner — get_shared_stats' own docstring says so. The
+        other five blocks (search, ingest, sources, corpus,
+        embedding_coverage) ran unscoped regardless of what owner the
+        function was called with, so a non-admin caller's /stats response
+        carried two correctly-scoped fields sitting next to five blocks of
+        PLATFORM-WIDE totals — how many collections, sources, chunks and
+        tokens exist across every other user, and how much they searched and
+        ingested. No row content crosses the boundary, but the scale of
+        other users' private activity does, which is a real disclosure the
+        function's own docstring ("Return aggregate quality/ops metrics")
+        does not admit to.
+
+        THE ASSERTION THAT MATTERS is the actual NUMBERS a scoped caller
+        gets back, not that the request succeeds — a 200 with owner-b's
+        data mixed into owner-a's counts would also pass a response-only
+        test. Two owners, each with their own collection/source/ingest/
+        search, and owner-a's scoped stats must equal EXACTLY owner-a's own
+        counts — not owner-a's plus owner-b's.
+        """
+        cid_a = await _create_collection(app_client, "Stats Scope Owner A", "stats-owner-a", visibility="private")
+        ingest_a = await _ingest_source(
+            app_client, cid_a, "Stats Scope A Doc",
+            "Elixir supervision trees and the actor model for fault tolerance.",
+            "stats-owner-a",
+        )
+        await _admin_search(app_client, "Elixir", "req-stats-a", collection_id=cid_a)
+
+        cid_b = await _create_collection(app_client, "Stats Scope Owner B", "stats-owner-b", visibility="private")
+        ingest_b = await _ingest_source(
+            app_client, cid_b, "Stats Scope B Doc",
+            "Haskell type classes and monadic composition for pure functions.",
+            "stats-owner-b",
+        )
+        await _admin_search(app_client, "Haskell", "req-stats-b", collection_id=cid_b)
+        # A second search against owner-b's own collection, so owner-a's
+        # scoped search.total would be wrong in TWO different ways (mixing
+        # in owner-b's data, or just counting owner-b's search volume) if
+        # the predicate were dropped.
+        await _admin_search(app_client, "nonexistentquery12345", "req-stats-b2", collection_id=cid_b)
+
+        chunk_count_a = ingest_a["document"]["chunk_count"]
+
+        resp = await app_client.get(
+            "/internal/admin/shared/stats",
+            headers=INTERNAL_HEADERS,
+            params={"owner": "stats-owner-a"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+        # search — exactly owner-a's one search, not owner-a's one plus
+        # owner-b's two.
+        assert data["search"]["total"] == 1
+        assert data["search"]["zero_result_count"] == 0
+
+        # ingest — exactly owner-a's one job.
+        assert data["ingest"]["total_jobs"] == 1
+        assert data["ingest"]["completed"] == 1
+        assert data["ingest"]["failed"] == 0
+
+        # sources — exactly owner-a's one active text source.
+        assert data["sources"]["by_status"] == {"active": 1}
+        assert data["sources"]["by_type"] == {"text": 1}
+
+        # corpus — exactly owner-a's one collection, one source, and the
+        # real chunk count THIS ingest produced (not a guessed constant).
+        assert data["corpus"]["total_collections"] == 1
+        assert data["corpus"]["total_sources"] == 1
+        assert data["corpus"]["total_chunks"] == chunk_count_a
+
+        # embedding_coverage — same corpus, scoped the same way.
+        assert data["embedding_coverage"]["chunks"] == chunk_count_a
+
+        # Sanity: an ADMIN (unscoped) call sees at least both owners' work —
+        # proves the scoping above is real filtering, not a coincidence of
+        # an otherwise-empty table.
+        admin_resp = await app_client.get("/internal/admin/shared/stats", headers=INTERNAL_HEADERS)
+        admin_data = admin_resp.json()
+        assert admin_data["search"]["total"] >= 3
+        assert admin_data["ingest"]["total_jobs"] >= 2
+        assert admin_data["corpus"]["total_collections"] >= 2

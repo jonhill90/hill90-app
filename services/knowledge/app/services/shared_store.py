@@ -845,37 +845,92 @@ async def get_shared_stats(
 ) -> dict[str, Any]:
     """Return aggregate quality/ops metrics. No PII, no raw queries.
 
-    top_collections/top_sources are the one place this "aggregate-only" file
-    header was not actually true: both return real collection/source names,
-    unconditionally, to any caller (cross-service sibling-drift sweep,
-    app#445 family — this route's own twin routes/shared.py scopes every
-    query it runs). owner=None (admin) is unchanged; a scoped caller now
-    only sees collections/sources they own or that are explicitly shared,
-    matching knowledge_graph's identical fix in this same file.
-    """
+    OWNER SCOPING, applied to the WHOLE function, closing the gap app#445
+    left. app#445 scoped only usage.top_collections/top_sources — this
+    docstring said so itself: "top_collections/top_sources are the ONE
+    place this 'aggregate-only' file header was not actually true," which
+    was wrong by omission, not by design. The other five blocks below
+    (search, ingest, sources, corpus, embedding_coverage) ran unscoped
+    regardless of what owner this function was called with, so a
+    non-admin's /stats response carried two correctly-scoped fields next to
+    five blocks of PLATFORM-WIDE totals: how many collections, sources,
+    chunks and tokens exist across every OTHER user, and how much they
+    searched and ingested. No row content crosses the boundary — this
+    function's contract has never returned names or bodies outside
+    top_collections/top_sources — but the SCALE of other users' private
+    activity did, which is a real disclosure an aggregate count is not
+    exempt from. owner=None (admin) is unchanged; every block below now
+    uses the identical `(created_by = $N OR visibility = 'shared')`
+    predicate already established for top_collections/top_sources,
+    knowledge_graph and list_collections/search_chunks — applying it to the
+    remaining queries, not inventing a new rule.
 
-    # Search aggregates
+    shared_retrievals.collection_id is nullable (only populated since
+    migration 010, and left NULL for a search whose results matched zero
+    collections). A retrieval a scoped caller cannot attribute to any
+    visible collection is EXCLUDED from their scoped search totals rather
+    than counted anyway — "I cannot tell which collection this touched" is
+    not the same claim as "you may see it," the same fail-closed reasoning
+    already applied throughout this service's other owner-scoped queries.
+    The unscoped (admin) count is unaffected and still counts every row.
+    """
+    collections_pred = "created_by = $1 OR visibility = 'shared'"
+    # Sources belong to a collection; scoping them means scoping through it.
+    sources_owner_where = (
+        "" if owner is None
+        else f"WHERE collection_id IN (SELECT id FROM shared_collections WHERE {collections_pred})"
+    )
+    # Chunks belong to a document, which belongs to a source, which belongs
+    # to a collection — same three-hop join vector_coverage already uses.
+    chunks_owner_where = (
+        "" if owner is None
+        else f"""WHERE document_id IN (
+                    SELECT sd.id FROM shared_documents sd
+                    JOIN shared_sources ss ON sd.source_id = ss.id
+                    JOIN shared_collections sc ON ss.collection_id = sc.id
+                    WHERE sc.{collections_pred}
+                )"""
+    )
+    documents_owner_where = (
+        "" if owner is None
+        else f"""WHERE source_id IN (
+                    SELECT ss.id FROM shared_sources ss
+                    JOIN shared_collections sc ON ss.collection_id = sc.id
+                    WHERE sc.{collections_pred}
+                )"""
+    )
+    owner_params = () if owner is None else (owner,)
+
+    # Search aggregates. Scoped through the collection a retrieval touched —
+    # see the fail-closed NULL-collection_id note in the docstring above.
+    search_owner_clause = (
+        "" if owner is None
+        else "AND collection_id IN (SELECT id FROM shared_collections WHERE created_by = $2 OR visibility = 'shared')"
+    )
     search_row = await pool.fetchrow(
-        """SELECT COUNT(*) AS total,
+        f"""SELECT COUNT(*) AS total,
                   COUNT(*) FILTER (WHERE result_count = 0) AS zero_result_count,
                   ROUND(AVG(duration_ms) FILTER (WHERE duration_ms IS NOT NULL))::int AS avg_duration_ms
            FROM shared_retrievals
-           WHERE ($1::timestamptz IS NULL OR created_at >= $1)""",
-        since,
+           WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+             {search_owner_clause}""",
+        *((since,) if owner is None else (since, owner)),
     )
     total = search_row["total"]
     zero_result_count = search_row["zero_result_count"]
     zero_result_rate = round(zero_result_count / total, 3) if total > 0 else 0.0
 
-    # By requester type (aggregate counts + zero-result breakdown, no IDs)
+    # By requester type (aggregate counts + zero-result breakdown, no IDs).
+    # Same predicate as the search block above — its twin, not a second rule.
     type_rows = await pool.fetch(
-        """SELECT requester_type,
+        f"""SELECT requester_type,
                   COUNT(*) AS total,
                   COUNT(*) FILTER (WHERE result_count = 0) AS zero_result_count
            FROM shared_retrievals
            WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+             {search_owner_clause}
            GROUP BY requester_type""",
-        since,
+        *((since,) if owner is None else (since, owner)),
     )
     by_requester_type = []
     for r in type_rows:
@@ -888,9 +943,17 @@ async def get_shared_stats(
             "zero_result_rate": round(zrc / t, 3) if t > 0 else 0.0,
         })
 
-    # Ingest aggregates
+    # Ingest aggregates. Scoped through source -> collection.
+    ingest_owner_clause = (
+        "" if owner is None
+        else """AND source_id IN (
+                    SELECT ss.id FROM shared_sources ss
+                    JOIN shared_collections sc ON ss.collection_id = sc.id
+                    WHERE sc.created_by = $2 OR sc.visibility = 'shared'
+                )"""
+    )
     ingest_row = await pool.fetchrow(
-        """SELECT COUNT(*) AS total_jobs,
+        f"""SELECT COUNT(*) AS total_jobs,
                   COUNT(*) FILTER (WHERE status = 'completed') AS completed,
                   COUNT(*) FILTER (WHERE status = 'failed') AS failed,
                   COUNT(*) FILTER (WHERE status = 'running') AS running,
@@ -899,21 +962,24 @@ async def get_shared_stats(
                         FILTER (WHERE completed_at IS NOT NULL AND started_at IS NOT NULL))::int
                     AS avg_processing_ms
            FROM shared_ingest_jobs
-           WHERE ($1::timestamptz IS NULL OR created_at >= $1)""",
-        since,
+           WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+             {ingest_owner_clause}""",
+        *((since,) if owner is None else (since, owner)),
     )
     total_jobs = ingest_row["total_jobs"]
     failed = ingest_row["failed"]
     ingest_error_rate = round(failed / total_jobs, 3) if total_jobs > 0 else 0.0
 
-    # Source breakdown (current state, not time-scoped)
+    # Source breakdown (current state, not time-scoped).
     status_rows = await pool.fetch(
-        "SELECT status, COUNT(*) AS count FROM shared_sources GROUP BY status"
+        f"SELECT status, COUNT(*) AS count FROM shared_sources {sources_owner_where} GROUP BY status",
+        *owner_params,
     )
     by_status = {r["status"]: r["count"] for r in status_rows}
 
     type_source_rows = await pool.fetch(
-        "SELECT source_type, COUNT(*) AS count FROM shared_sources GROUP BY source_type"
+        f"SELECT source_type, COUNT(*) AS count FROM shared_sources {sources_owner_where} GROUP BY source_type",
+        *owner_params,
     )
     by_type = {r["source_type"]: r["count"] for r in type_source_rows}
 
@@ -922,20 +988,24 @@ async def get_shared_stats(
     # source degraded by a transient outage stayed degraded silently and
     # indefinitely. by_document_status is what the backfill works from.
     coverage_row = await pool.fetchrow(
-        """SELECT COUNT(*) AS chunks,
+        f"""SELECT COUNT(*) AS chunks,
                   COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded_chunks
-           FROM shared_chunks"""
+           FROM shared_chunks
+           {chunks_owner_where}""",
+        *owner_params,
     )
     doc_status_rows = await pool.fetch(
-        "SELECT embedding_status, COUNT(*) AS count FROM shared_documents GROUP BY embedding_status"
+        f"SELECT embedding_status, COUNT(*) AS count FROM shared_documents {documents_owner_where} GROUP BY embedding_status",
+        *owner_params,
     )
 
-    # Corpus totals (current state)
+    # Corpus totals (current state).
     corpus_row = await pool.fetchrow(
-        """SELECT (SELECT COUNT(*) FROM shared_collections) AS total_collections,
-                  (SELECT COUNT(*) FROM shared_sources) AS total_sources,
-                  (SELECT COUNT(*) FROM shared_chunks) AS total_chunks,
-                  (SELECT COALESCE(SUM(token_estimate), 0) FROM shared_chunks) AS total_tokens"""
+        f"""SELECT (SELECT COUNT(*) FROM shared_collections {"" if owner is None else f"WHERE {collections_pred}"}) AS total_collections,
+                  (SELECT COUNT(*) FROM shared_sources {sources_owner_where}) AS total_sources,
+                  (SELECT COUNT(*) FROM shared_chunks {chunks_owner_where}) AS total_chunks,
+                  (SELECT COALESCE(SUM(token_estimate), 0) FROM shared_chunks {chunks_owner_where}) AS total_tokens""",
+        *owner_params,
     )
 
     # Usage analytics — top collections and sources by retrieval count.
