@@ -556,20 +556,43 @@ To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"
     # noticed — check_deploy_drift.sh reads the container, not the image.
     # Borrowed from build-agentbox-images.yml's own "Verify the images exist
     # and carry the revision" step: a deploy that ships an unverifiable image
-    # should not be quiet about it. Scoped to knowledge, the one stack whose
-    # Dockerfile actually defines `ARG GIT_REVISION`/`LABEL com.hill90.revision`
-    # — the other four deployed-by-this-script images (api, ai, ui, mcp) have
-    # no such ARG to check, and asserting one would fail against Dockerfiles
-    # that were never built to carry it.
-    if [ "$stack" = "knowledge" ]; then
-        got="$(docker image inspect -f '{{index .Config.Labels "com.hill90.revision"}}' hill90/knowledge:latest 2>/dev/null || true)"
+    # should not be quiet about it.
+    #
+    # app#574 widened this from knowledge-only to all five deployed stacks.
+    # It started scoped to knowledge alone because at the time only its
+    # Dockerfile defined `ARG GIT_REVISION`/`LABEL com.hill90.revision` — the
+    # other four had no such ARG, and asserting one would have failed every
+    # deploy of a Dockerfile that was never built to carry it. #572 gave all
+    # four the same ARG/LABEL, but deliberately did NOT widen this guard in
+    # the same change: at that moment none of them had actually been BUILT
+    # with the arg yet, and a guard firing on a legitimately unbuilt image
+    # blocks deploys rather than catching a regression — a worse failure
+    # than the one being prevented. That precondition is now met, measured
+    # rather than assumed: all five stacks were deployed through the
+    # pipeline and read back off the host (2026-08-06) — api/ui/ai/mcp
+    # carrying the current main SHA, knowledge correctly older (nothing had
+    # touched services/knowledge since its last real build, so its image
+    # was never rebuilt this round and its label still reports whichever
+    # commit last did).
+    #
+    # STILL A PER-STACK ALLOWLIST, not "every stack except a retired few"
+    # and not unconditional: a stack added later without `ARG GIT_REVISION`
+    # in its Dockerfile's final stage would otherwise start failing every
+    # deploy the instant it is introduced, which is the exact failure mode
+    # #572 declined to risk, now just moved to a future stack instead of a
+    # current one. Add a stack here ONLY after confirming both that its
+    # Dockerfile defines the ARG/LABEL AND that it has actually been built
+    # with it at least once.
+    STACKS_WITH_REVISION_LABEL="api ai ui mcp knowledge"
+    if [[ " $STACKS_WITH_REVISION_LABEL " == *" $stack "* ]]; then
+        got="$(docker image inspect -f '{{index .Config.Labels "com.hill90.revision"}}' "hill90/${stack}:latest" 2>/dev/null || true)"
         if [ -z "$got" ]; then
-            die "hill90/knowledge:latest carries no com.hill90.revision label. The image cannot say what commit it is."
+            die "hill90/${stack}:latest carries no com.hill90.revision label. The image cannot say what commit it is."
         fi
         if [ "$got" != "$DEPLOY_REVISION" ]; then
-            die "hill90/knowledge:latest is stamped ${got}, expected ${DEPLOY_REVISION}. The compose build did not receive GIT_REVISION."
+            die "hill90/${stack}:latest is stamped ${got}, expected ${DEPLOY_REVISION}. The compose build did not receive GIT_REVISION."
         fi
-        success "hill90/knowledge:latest carries com.hill90.revision=${got:0:12}"
+        success "hill90/${stack}:latest carries com.hill90.revision=${got:0:12}"
     fi
 
     docker compose -p "$project_name" "${files[@]}" pull --ignore-buildable

@@ -133,19 +133,88 @@ setup() {
 }
 
 # ---------------------------------------------------------------------------
-# app#558: the knowledge image-label verification guard, executed for real
+# app#558 / app#574: the image-label verification guard, executed for real
 # against a stubbed `docker`. This is a build-time property (does the IMAGE
 # docker just built carry the right label) that no CI job actually builds an
 # image to check — so what's tested here is the shell logic that reads the
 # label back and reacts to it, the same "execute the real code with docker
 # stubbed" arrangement the revision-stamp tests above already use, not the
 # real docker build itself.
+#
+# app#574 widened the guard from knowledge-only to a per-stack allowlist
+# covering all five deployed stacks, now that #572 gave the other four
+# Dockerfiles the same ARG/LABEL and they have actually been built with it
+# (verified on the host, 2026-08-06). The tests below therefore exercise a
+# stack that was NOT covered before — api — rather than re-proving knowledge,
+# which app#558's own tests already did: the risk being controlled for here
+# is specifically "the widening blocks a legitimate deploy of one of the
+# newly-covered four", not "the original knowledge guard still works".
 # ---------------------------------------------------------------------------
 
-@test "the knowledge image-label guard passes when the label matches DEPLOY_REVISION" {
-    block=$(sed -n '/^    if \[ "\$stack" = "knowledge" \]; then$/,/^    fi$/p' "$DEPLOY")
+@test "the widened guard passes for API — a stack NOT covered before app#574 — when correctly stamped" {
+    block=$(sed -n '/^    STACKS_WITH_REVISION_LABEL=/,/^    fi$/p' "$DEPLOY")
     [ -n "$block" ]
     [[ "$block" == *"com.hill90.revision"* ]]
+    [[ "$block" == *"STACKS_WITH_REVISION_LABEL"* ]]
+
+    cat > "$STUB/docker" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+    echo "abc123def456"
+    exit 0
+fi
+exit 0
+SH
+    chmod +x "$STUB/docker"
+
+    run bash -c "
+        set -euo pipefail
+        source '$COMMON' >/dev/null 2>&1
+        stack=api
+        DEPLOY_REVISION=abc123def456
+        $block
+        echo REACHED_THE_END
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"REACHED_THE_END"* ]]
+    [[ "$output" == *"hill90/api:latest carries com.hill90.revision=abc123def456"* ]]
+}
+
+@test "CONTROL, THE FALSE-POSITIVE THE WIDENING RISKS: the guard DIES for API when it was built without --build-arg (label reads empty/unstamped)" {
+    # api was NOT covered before app#574. This is the demonstration the
+    # widening asked for in both directions: this test proves the widened
+    # assertion actually fires for a stack it did not use to touch — an
+    # image built without the build-arg, exactly as any of the four would
+    # have looked before #572 gave them one. If this test ever stops
+    # failing, the widening silently stopped checking the four stacks it
+    # was added for.
+    block=$(sed -n '/^    STACKS_WITH_REVISION_LABEL=/,/^    fi$/p' "$DEPLOY")
+
+    cat > "$STUB/docker" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+    echo ""
+    exit 0
+fi
+exit 0
+SH
+    chmod +x "$STUB/docker"
+
+    run bash -c "
+        set -euo pipefail
+        source '$COMMON' >/dev/null 2>&1
+        stack=api
+        DEPLOY_REVISION=abc123def456
+        $block
+        echo REACHED_THE_END
+    "
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"REACHED_THE_END"* ]]
+    [[ "$output" == *"hill90/api:latest carries no com.hill90.revision label"* ]]
+}
+
+@test "the knowledge image-label guard still passes when the label matches DEPLOY_REVISION" {
+    block=$(sed -n '/^    STACKS_WITH_REVISION_LABEL=/,/^    fi$/p' "$DEPLOY")
 
     cat > "$STUB/docker" <<'SH'
 #!/usr/bin/env bash
@@ -167,14 +236,14 @@ SH
     "
     [ "$status" -eq 0 ]
     [[ "$output" == *"REACHED_THE_END"* ]]
-    [[ "$output" == *"com.hill90.revision=abc123def456"* ]]
+    [[ "$output" == *"hill90/knowledge:latest carries com.hill90.revision=abc123def456"* ]]
 }
 
 @test "CONTROL: the guard dies when the image carries no revision label — the actual app#558 defect, reproduced" {
     # Simulates exactly what the missing `args:` block produced: `docker image
     # inspect` returning the empty string because the label was never set to
     # anything the build received.
-    block=$(sed -n '/^    if \[ "\$stack" = "knowledge" \]; then$/,/^    fi$/p' "$DEPLOY")
+    block=$(sed -n '/^    STACKS_WITH_REVISION_LABEL=/,/^    fi$/p' "$DEPLOY")
 
     cat > "$STUB/docker" <<'SH'
 #!/usr/bin/env bash
@@ -200,7 +269,7 @@ SH
 }
 
 @test "CONTROL: the guard dies when the image label does not match DEPLOY_REVISION" {
-    block=$(sed -n '/^    if \[ "\$stack" = "knowledge" \]; then$/,/^    fi$/p' "$DEPLOY")
+    block=$(sed -n '/^    STACKS_WITH_REVISION_LABEL=/,/^    fi$/p' "$DEPLOY")
 
     cat > "$STUB/docker" <<'SH'
 #!/usr/bin/env bash
@@ -225,14 +294,15 @@ SH
     [[ "$output" == *"is stamped stale-sha, expected abc123def456"* ]]
 }
 
-@test "the guard is skipped entirely for a stack other than knowledge" {
-    # api/ai/ui/mcp never defined ARG GIT_REVISION in their Dockerfiles (see
-    # compose-git-revision-args.bats), so this guard must not run `docker
-    # image inspect` for them at all — not merely tolerate whatever it
-    # returns. A docker call that FAILS proves the guard truly
-    # short-circuited rather than calling inspect and happening to accept an
-    # empty result.
-    block=$(sed -n '/^    if \[ "\$stack" = "knowledge" \]; then$/,/^    fi$/p' "$DEPLOY")
+@test "the guard is skipped entirely for a stack that has never carried the label — the allowlist stays finite" {
+    # app#574 kept this a per-stack allowlist deliberately: a stack added
+    # later without ARG GIT_REVISION in its Dockerfile's final stage must
+    # not start failing deploys the instant it is introduced. "future-stack"
+    # stands in for exactly that — not one of today's five, and not a
+    # retired stack either, so this cannot be confused with either of those.
+    # A docker call that FAILS proves the guard truly short-circuited rather
+    # than calling inspect and happening to accept an empty result.
+    block=$(sed -n '/^    STACKS_WITH_REVISION_LABEL=/,/^    fi$/p' "$DEPLOY")
 
     cat > "$STUB/docker" <<'SH'
 #!/usr/bin/env bash
@@ -244,11 +314,54 @@ SH
     run bash -c "
         set -euo pipefail
         source '$COMMON' >/dev/null 2>&1
-        stack=api
+        stack=future-stack
         DEPLOY_REVISION=abc123def456
         $block
         echo REACHED_THE_END
     "
     [ "$status" -eq 0 ]
     [[ "$output" == *"REACHED_THE_END"* ]]
+}
+
+@test "all five deployed stacks are in the allowlist" {
+    allowlist_line=$(grep -oE 'STACKS_WITH_REVISION_LABEL="[^"]*"' "$DEPLOY" | sed 's/.*"\(.*\)"/\1/')
+    [ -n "$allowlist_line" ]
+    for stack in api ai ui mcp knowledge; do
+        [[ " $allowlist_line " == *" $stack "* ]]
+    done
+}
+
+@test "A NORMAL DEPLOY STILL COMPLETES: the guard passes for every one of the five stacks when each is correctly stamped" {
+    # The risk this widening carries is blocking GOOD deploys, not admitting
+    # bad ones — so the positive-control half matters as much as the two
+    # dying-guard tests above, not less. Runs the exact same block once per
+    # real deployed stack name, matching what happens across a real
+    # `deploy.sh all` run: DEPLOY_REVISION set once, `docker image inspect`
+    # correctly reporting it for whichever stack is asked, no stack ever
+    # tripping the guard.
+    block=$(sed -n '/^    STACKS_WITH_REVISION_LABEL=/,/^    fi$/p' "$DEPLOY")
+
+    cat > "$STUB/docker" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+    echo "abc123def456"
+    exit 0
+fi
+exit 0
+SH
+    chmod +x "$STUB/docker"
+
+    for stack in ui api ai knowledge mcp; do
+        run bash -c "
+            set -euo pipefail
+            source '$COMMON' >/dev/null 2>&1
+            stack=$stack
+            DEPLOY_REVISION=abc123def456
+            $block
+            echo REACHED_THE_END
+        "
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"REACHED_THE_END"* ]]
+        [[ "$output" == *"hill90/${stack}:latest carries com.hill90.revision=abc123def456"* ]]
+    done
 }
