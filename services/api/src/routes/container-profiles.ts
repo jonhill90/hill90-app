@@ -141,7 +141,18 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
          updated_at = NOW()
        WHERE id = $1
        RETURNING *`,
-      [req.params.id, name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata !== undefined ? JSON.stringify(metadata) : null]
+      // metadata was `metadata !== undefined ? JSON.stringify(metadata) :
+      // null` — correct for an omitted field, but an explicit `metadata:
+      // null` also passes `!== undefined`, so JSON.stringify(null) bound
+      // the STRING "null" (not SQL NULL) into COALESCE($8, metadata),
+      // which then saw a non-NULL value and WROTE it — wiping the column
+      // instead of leaving it unchanged, the opposite of every other field
+      // in this same handler. Same idiom agents.ts's tools_config already
+      // uses for the identical shape: a truthy check, so null (like
+      // undefined, false, 0, '') falls through to SQL NULL and COALESCE's
+      // own "unchanged" behavior — matching the null-means-not-provided
+      // contract this file's name/docker_image fields now have too.
+      [req.params.id, name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata ? JSON.stringify(metadata) : null]
     );
 
     const profile = rows[0];

@@ -313,6 +313,32 @@ describe('Container Profiles routes', () => {
     expect(updateCall[1][3]).toBeNull();
   });
 
+  // Found in review: metadata's own PUT binding was `metadata !== undefined
+  // ? JSON.stringify(metadata) : null` — undefined correctly nulls, but an
+  // explicit `metadata: null` passes `!== undefined`, so
+  // JSON.stringify(null) produces the STRING "null" (confirmed directly:
+  // the bound param was the 4-character string "null", not SQL NULL).
+  // COALESCE($8, metadata) then sees a non-NULL value and WRITES it,
+  // wiping the column instead of leaving it unchanged — the opposite of
+  // every other field in this same request handler after the null-parity
+  // fix above. Real data loss on profiles like `browser`, whose metadata
+  // holds shm_size/extra_env that a Playwright container needs.
+  it('rejects the data-loss shape: metadata: null must be a no-op, not write JSON null', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [customProfile] }) // SELECT existing
+      .mockResolvedValueOnce({ rows: [{ ...customProfile, description: 'Updated' }] }); // UPDATE RETURNING
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ metadata: null, description: 'Updated' });
+
+    expect(res.status).toBe(200);
+    const updateCall = mockQuery.mock.calls[1];
+    // metadata is bound param index 7.
+    expect(updateCall[1][7]).toBeNull();
+  });
+
   // CP-16: PUT /container-profiles/:id non-admin returns 403
   it('PUT /container-profiles/:id non-admin returns 403', async () => {
     const res = await request(app)
