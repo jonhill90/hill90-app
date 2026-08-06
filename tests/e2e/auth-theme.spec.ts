@@ -2,14 +2,19 @@ import { test, expect } from "@playwright/test";
 
 test.describe("Hill90 Auth Theme — Login Page", () => {
   test.beforeEach(async ({ page }) => {
-    // Navigate to the account page which redirects to login
-    await page.goto("/realms/hill90/account");
+    // Realm `hill90` was retired 2026-07-30; this app's clients live in
+    // Keycloak's `platform` realm now (/realms/hill90/account is a 404,
+    // verified live). Navigate to the account page which redirects to login.
+    await page.goto("/realms/platform/account");
     // Wait for redirect to login page
-    await page.waitForURL(/\/realms\/hill90\/protocol\/openid-connect\//);
+    await page.waitForURL(/\/realms\/platform\/protocol\/openid-connect\//);
   });
 
   test("loads with correct title", async ({ page }) => {
-    await expect(page).toHaveTitle("Sign in to Hill90");
+    // Verified live 2026-08-06: the platform realm's branded login titles
+    // itself "Sign in to Hill90 Platform", not "Sign in to Hill90" — the
+    // realm name is part of the title, not just the URL.
+    await expect(page).toHaveTitle("Sign in to Hill90 Platform");
   });
 
   test("has Hill90 logo via header ::before background-image", async ({
@@ -88,9 +93,11 @@ test.describe("Hill90 Auth Theme — Login Page", () => {
 
 test.describe("Hill90 Auth Theme — Admin Console", () => {
   test("admin console redirects to branded login", async ({ page }) => {
-    await page.goto("/admin/hill90/console/");
+    // /admin/hill90/console/ is a 404 for the same reason as above — the
+    // realm is `platform` now. Verified live 2026-08-06.
+    await page.goto("/admin/platform/console/");
     // Wait for redirect to login
-    await page.waitForURL(/\/realms\/hill90\/protocol\/openid-connect\//);
-    await expect(page).toHaveTitle("Sign in to Hill90");
+    await page.waitForURL(/\/realms\/platform\/protocol\/openid-connect\//);
+    await expect(page).toHaveTitle("Sign in to Hill90 Platform");
   });
 });
