@@ -6,22 +6,25 @@
  * State survives, and so do in-flight requests: A's response can resolve after
  * B's and overwrite it.
  *
- * WHY THIS IS NOT A COSMETIC RACE. `fetchAgent` sets the schedule form fields:
+ * WHY THIS IS NOT A COSMETIC RACE. `fetchAgent` sets `agent` from whatever
+ * response lands last:
  *
- *     setAgent(data); setScheduleCron(data.schedule_cron || '')
+ *     setAgent(data)
  *
- * and `handleScheduleSave` PUTs to `/api/agents/${agentId}/schedule` — the agent
- * you are LOOKING AT — carrying `scheduleCron`, the value in state. So a late
- * response from A leaves B's page displaying A's cron, and saving writes A's
- * schedule onto B. Nothing on screen says otherwise: the URL, the heading and the
- * save target are all B.
+ * and every save handler (identity, tags, env vars) PUTs to
+ * `/api/agents/${agentId}` — the agent you are LOOKING AT — carrying state
+ * closed over from whatever last rendered. So a late response from A leaves
+ * B's page displaying A's data, and saving writes A's edit onto B. Nothing on
+ * screen says otherwise: the URL, the heading and the save target are all B.
  *
  * The test drives exactly that order: start A, switch to B, let B resolve, then
- * resolve A late.
+ * resolve A late. (app#586 removed the schedule feature this test originally
+ * exercised — `description` proves the same race just as directly, with no
+ * tab navigation needed to observe it.)
  */
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
 vi.mock('next/link', () => ({
@@ -40,12 +43,12 @@ import AgentDetailClient from '@/app/agents/[id]/AgentDetailClient'
 
 const ADMIN = { user: { name: 'A', email: 'a@h.com', roles: ['admin'] }, expires: '2099-01-01' }
 
-function agent(id: string, cron: string) {
+function agent(id: string) {
   return {
-    id, agent_id: id, name: `Agent ${id}`, description: '', status: 'stopped',
+    id, agent_id: id, name: `Agent ${id}`, description: `${id}-description`, status: 'stopped',
     tools_config: {}, cpus: '1.0', mem_limit: '1g', pids_limit: 200,
     soul_md: '', rules_md: '', created_at: '2026-01-01T00:00:00Z',
-    model_policy_id: null, skills: [], schedule_cron: cron, schedule_enabled: true,
+    model_policy_id: null, skills: [],
   }
 }
 
@@ -57,7 +60,7 @@ function deferredAgentFetch() {
     if (m) {
       return new Promise((resolve) => {
         gates[m[1]] = () =>
-          resolve({ ok: true, status: 200, json: () => Promise.resolve(agent(m[1], `${m[1]}-cron`)) })
+          resolve({ ok: true, status: 200, json: () => Promise.resolve(agent(m[1])) })
       })
     }
     // Everything else this page fetches: answer immediately and boringly.
@@ -70,7 +73,7 @@ describe('a late response from the previous agent must not overwrite the current
   beforeEach(() => { mockFetch.mockReset() })
   afterEach(() => cleanup())
 
-  it('keeps B\'s schedule when A resolves after the switch', async () => {
+  it('keeps B\'s data when A resolves after the switch', async () => {
     const gates = deferredAgentFetch()
 
     const { rerender } = render(<AgentDetailClient agentId="agent-a" session={ADMIN as any} />)
@@ -82,18 +85,15 @@ describe('a late response from the previous agent must not overwrite the current
 
     gates['agent-b']()                              // B lands first
     await waitFor(() => expect(screen.getByText('Agent agent-b')).toBeInTheDocument())
-
-    // The schedule form lives on the Configuration tab.
-    fireEvent.click(screen.getByText('Configuration'))
-    await waitFor(() => expect(screen.getByDisplayValue('agent-b-cron')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('agent-b-description')).toBeInTheDocument())
 
     gates['agent-a']()                              // A lands LATE
     await new Promise((r) => setTimeout(r, 50))
 
-    // The page is B's. The form must still be B's, or saving writes A's
-    // schedule onto B.
-    expect(screen.queryByDisplayValue('agent-a-cron')).not.toBeInTheDocument()
-    expect(screen.getByDisplayValue('agent-b-cron')).toBeInTheDocument()
+    // The page is B's. The data must still be B's, or saving writes A's
+    // edit onto B.
+    expect(screen.queryByText('agent-a-description')).not.toBeInTheDocument()
+    expect(screen.getByText('agent-b-description')).toBeInTheDocument()
     // And the page identity never wavered.
     expect(screen.getByText('Agent agent-b')).toBeInTheDocument()
   })
