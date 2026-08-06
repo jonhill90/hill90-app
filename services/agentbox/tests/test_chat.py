@@ -196,8 +196,9 @@ class TestDeliverCallback:
         events = _read_events(log_path)
         assert any(e["type"] == "chat_callback_sent" and e["success"] is True for e in events)
 
+    @patch("app.chat.time.sleep")
     @patch("app.chat.requests.post")
-    def test_callback_delivery_failure(self, mock_post, emitter):
+    def test_callback_delivery_failure(self, mock_post, mock_sleep, emitter):
         em, log_path = emitter
         mock_post.side_effect = Exception("Connection refused")
 
@@ -207,8 +208,53 @@ class TestDeliverCallback:
             emitter=em, work_id="w1",
         )
 
+        # app#492: a terminal callback (complete/error) gets one retry before
+        # being given up on — both attempts must have actually happened, not
+        # just one POST followed by a give-up.
+        assert mock_post.call_count == 2
         events = _read_events(log_path)
         assert any(e["type"] == "chat_callback_failed" for e in events)
+
+    @patch("app.chat.time.sleep")
+    @patch("app.chat.requests.post")
+    def test_callback_delivery_retry_recovers_the_answer(self, mock_post, mock_sleep, emitter):
+        """app#492 POSITIVE CONTROL: a single transient drop on the first
+        attempt must not lose an otherwise-successful callback — this is the
+        exact scenario the issue describes as a completed answer lost to a
+        one-shot delivery failure. Before this fix, `_deliver_callback` made
+        exactly one attempt, so this case reached `chat_callback_failed` with
+        the answer content gone; after it, the retry recovers it and the API
+        never sees a failure."""
+        em, log_path = emitter
+        mock_post.side_effect = [Exception("Connection refused"), MagicMock(status_code=200, text="ok")]
+
+        _deliver_callback(
+            "http://api:3000/cb", "token", "m1",
+            status="complete", content="Hello",
+            emitter=em, work_id="w1",
+        )
+
+        assert mock_post.call_count == 2
+        events = _read_events(log_path)
+        assert any(e["type"] == "chat_callback_sent" and e["success"] is True for e in events)
+        assert not any(e["type"] == "chat_callback_failed" for e in events)
+
+    @patch("app.chat.time.sleep")
+    @patch("app.chat.requests.post")
+    def test_thinking_callback_is_not_retried(self, mock_post, mock_sleep, emitter):
+        """`thinking` callbacks carry no unrecoverable content — a retry
+        would only add latency mid-tool-loop for no durability benefit."""
+        em, log_path = emitter
+        mock_post.side_effect = Exception("Connection refused")
+
+        _deliver_callback(
+            "http://api:3000/cb", "token", "m1",
+            status="thinking", content="still working",
+            emitter=em, work_id="w1",
+        )
+
+        assert mock_post.call_count == 1
+        mock_sleep.assert_not_called()
 
 
 class TestSystemPromptAssembly:

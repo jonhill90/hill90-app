@@ -1112,7 +1112,19 @@ def _deliver_callback(
     work_id: str,
     correlation_id: str | None = None,
 ) -> None:
-    """POST callback to API. Fire-and-forget — logs but does not retry."""
+    """POST callback to API.
+
+    Terminal callbacks (complete/error) get ONE immediate retry on delivery
+    failure before being given up on. This is not a durable queue — no
+    persistence, no backoff schedule, no redelivery after the process moves
+    on — just refusing to throw away an already-generated answer on a single
+    transient drop (app#492: a real, completed answer had nowhere to live
+    once this function's one POST attempt failed, and nothing on the API
+    side ever learns delivery was attempted at all). `thinking` callbacks
+    are not retried: they carry no unrecoverable content — a later thinking
+    or terminal callback supersedes them regardless — so a retry would only
+    add latency to the tool loop for no durability benefit.
+    """
     body = {
         "message_id": message_id,
         "content": content,
@@ -1123,44 +1135,54 @@ def _deliver_callback(
         "status": status,
         "error_message": error_message,
     }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
 
-    try:
-        resp = requests.post(
-            callback_url,
-            json=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            timeout=10,
-        )
+    attempts = 2 if status != "thinking" else 1
+    last_exc: Exception | None = None
 
-        if resp.status_code != 200:
-            logger.warning(
-                "Callback returned %d for message %s: %s",
-                resp.status_code, message_id, resp.text[:200],
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.post(callback_url, json=body, headers=headers, timeout=10)
+
+            if resp.status_code != 200:
+                logger.warning(
+                    "Callback returned %d for message %s: %s",
+                    resp.status_code, message_id, resp.text[:200],
+                )
+
+            emitter.emit(
+                type="chat_callback_sent",
+                tool="chat",
+                input_summary=f"message={message_id} status={status}",
+                output_summary=f"callback_status={resp.status_code}",
+                duration_ms=None,
+                success=resp.status_code == 200,
+                correlation_id=correlation_id,
+                metadata={"work_id": work_id, "message_id": message_id, "attempt": attempt},
             )
+            return
 
-        emitter.emit(
-            type="chat_callback_sent",
-            tool="chat",
-            input_summary=f"message={message_id} status={status}",
-            output_summary=f"callback_status={resp.status_code}",
-            duration_ms=None,
-            success=resp.status_code == 200,
-            correlation_id=correlation_id,
-            metadata={"work_id": work_id, "message_id": message_id},
-        )
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                logger.warning(
+                    "Callback delivery attempt %d failed for %s, retrying once: %s",
+                    attempt, message_id, exc,
+                )
+                time.sleep(2)
+                continue
 
-    except Exception as exc:
-        logger.error("Callback delivery failed for %s: %s", message_id, exc)
-        emitter.emit(
-            type="chat_callback_failed",
-            tool="chat",
-            input_summary=f"message={message_id} status={status}",
-            output_summary=f"error={str(exc)[:100]}",
-            duration_ms=None,
-            success=False,
-            correlation_id=correlation_id,
-            metadata={"work_id": work_id, "message_id": message_id},
-        )
+    logger.error("Callback delivery failed for %s after %d attempt(s): %s", message_id, attempts, last_exc)
+    emitter.emit(
+        type="chat_callback_failed",
+        tool="chat",
+        input_summary=f"message={message_id} status={status}",
+        output_summary=f"error={str(last_exc)[:100]}",
+        duration_ms=None,
+        success=False,
+        correlation_id=correlation_id,
+        metadata={"work_id": work_id, "message_id": message_id, "attempts": attempts},
+    )
