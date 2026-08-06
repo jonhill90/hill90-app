@@ -745,6 +745,42 @@ export async function reconcileAgentStatuses(
     const containerState = state ? state.status : CONTAINER_ABSENT;
     const containerIsRunning = state?.status === 'running';
 
+    // app#534. Every agent container runs `RestartPolicy: unless-stopped`
+    // (createAndStartContainer, above), so a single "not running" sighting is
+    // not durable truth for one — Docker's OWN restart policy can revive it
+    // between this pass's inspect and its UPDATE landing, or moments after,
+    // and nothing re-checked before this fix until the NEXT pass, up to
+    // AGENT_RECONCILE_INTERVAL_MS later. A demotion written on that stale
+    // sighting did not just flip back on the next pass and cost nothing: while
+    // wrong, `closeSessionsForStoppedAgents` (agent-reconciler.ts) closes the
+    // agent's session on `status <> 'running'`, and a session close is NOT
+    // undone by the next pass's promotion — only the status/container fields
+    // are. A container that blipped and came straight back left a permanently
+    // wrong `agent_sessions.stopped_at` behind.
+    //
+    // CONTAINER_ABSENT is a different claim and keeps its old, immediate
+    // behavior: a 404 means Docker has nothing left to revive — there is no
+    // restart policy to race against a container that no longer exists — so
+    // demoting on the first sighting is still correct there, and delaying it
+    // would only cost the "container was deleted" notification up to a full
+    // interval for no protective benefit.
+    //
+    // For a container that STILL EXISTS but is not running, this pass no
+    // longer trusts the sighting alone. It requires the PREVIOUS pass to have
+    // ALSO already recorded a non-running observation — `agent.container_state`
+    // is exactly that memory, already carried on the row for an unrelated
+    // reason (#239) — before writing `stopped`. A momentary exit is recorded
+    // (the branch below already does this, unconditionally) but not acted on
+    // until it has survived one full reconcile interval, which is comfortably
+    // longer than `unless-stopped`'s restart backoff in the case this exists
+    // to protect. This does not close the race outright — a container unlucky
+    // enough to be mid-restart on TWO consecutive passes 60s apart still
+    // demotes — but it converts "any blip demotes immediately" into "only a
+    // sighting that persists demotes", which is the actual claim this
+    // reconciler should be allowed to make.
+    const alreadyObservedNotRunning = agent.container_state !== null && agent.container_state !== 'running';
+    const confirmedDown = containerState === CONTAINER_ABSENT || alreadyObservedNotRunning;
+
     if (containerIsRunning && agent.status !== 'running') {
       // The direction that did not exist. Nothing else in the codebase looks
       // for this row, so if this pass does not correct it, nothing will.
@@ -760,8 +796,8 @@ export async function reconcileAgentStatuses(
       });
       result.promoted++;
       result.reconciled++;
-    } else if (!containerIsRunning && agent.status === 'running') {
-      console.log(`[reconcile] Agent ${agent.agent_id} marked running but container is ${containerState}`);
+    } else if (!containerIsRunning && agent.status === 'running' && confirmedDown) {
+      console.log(`[reconcile] Agent ${agent.agent_id} marked running but container is ${containerState} (confirmed on a prior pass too) — demoting`);
       await applyPatch({
         id: agent.id, agentId: agent.agent_id, createdBy: agent.created_by,
         previousStatus: agent.status, status: 'stopped',
@@ -775,6 +811,17 @@ export async function reconcileAgentStatuses(
       });
       result.demoted++;
       result.reconciled++;
+    } else if (!containerIsRunning && agent.status === 'running') {
+      // First sighting of "not running" for a container that still exists —
+      // app#534's grace period. Recorded via the same "what was seen" branch
+      // below would do it anyway (the condition falls through), but logged
+      // explicitly here so a demotion that never happens is not silent.
+      console.log(`[reconcile] Agent ${agent.agent_id} marked running but container is ${containerState} — not yet demoting, unless-stopped gets one pass to revive it (app#534)`);
+      await applyPatch({
+        id: agent.id, agentId: agent.agent_id, createdBy: agent.created_by,
+        previousStatus: agent.status, status: agent.status,
+        containerState,
+      });
     } else if (agent.container_state !== containerState) {
       // Status already agrees; record WHAT WAS SEEN so that `stopped` because
       // the container exited stays distinguishable from `stopped` because it is
