@@ -472,7 +472,21 @@ class TestWorkEvents:
 
     @pytest.mark.asyncio
     async def test_correlation_id_in_events(self, tmp_path):
-        """Correlation ID from work item appears in event summaries."""
+        """Correlation ID from work item appears in event summaries.
+
+        The `for event in events: assert ...` loop below is a real check
+        only because `assert len(events) == 2` runs first — without it, a
+        regression that made handle_work silently emit zero events would
+        still pass this test (a loop over an empty list runs zero times).
+        Found during a "tests that cannot fail" sweep across hill90-app's
+        test suites, dispatched in this conversation. `type: "test"` is an
+        unrecognised work type, which hits handle_work's synchronous
+        rejection branch (no background thread), so both events — the
+        unconditional work_received and the rejection's own work_failed —
+        are guaranteed present by the time handle_work returns; no sleep
+        needed. Verified directly: 2 events, both carrying the correlation
+        id, every run.
+        """
         runtime, _, log_path = _make_runtime(tmp_path)
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
@@ -480,7 +494,8 @@ class TestWorkEvents:
         )
         await runtime.handle_work(request)
 
-        events = [json.loads(line) for line in log_path.read_text().strip().split("\n") if line]
+        events = _read_events(log_path)
+        assert len(events) == 2
         for event in events:
             assert "my-corr-id" in event["input_summary"]
 
@@ -491,7 +506,22 @@ class TestWorkEvents:
         Uses type "chat" — an accepted type's 200 response body carries
         work_id; an unrecognised type's 400 body correctly does not
         (#222 finding 2's test_unknown_type_work_failed_carries_the_work_id
-        covers that shape instead, cross-referencing via work_received)."""
+        covers that shape instead, cross-referencing via work_received).
+
+        The `for event in events: assert ...` loop below is a real check
+        only because `assert len(events) >= 3` runs first — without it, a
+        regression that made handle_work silently emit zero events would
+        still pass this test. Found during a "tests that cannot fail"
+        sweep across hill90-app's test suites, dispatched in this
+        conversation. Unlike the unrecognised-type case above, "chat"
+        starts a background thread (_run_chat) and reading the log
+        immediately after handle_work returns is a genuine race —
+        verified directly: without a wait, the observed count varied
+        1/2/3 across five consecutive runs, because only work_received is
+        guaranteed synchronous before the thread starts. The 1.0s sleep
+        (matching this file's own test_shell_command_all_events_share_
+        work_id) makes the count stable at 3 across five runs with it.
+        """
         runtime, _, log_path = _make_runtime(tmp_path)
         request = _MockRequest(
             headers={"authorization": "Bearer test-token-123"},
@@ -501,7 +531,10 @@ class TestWorkEvents:
         response_body = json.loads(response.body)
         work_id = response_body["work_id"]
 
-        events = [json.loads(line) for line in log_path.read_text().strip().split("\n") if line]
+        time.sleep(1.0)
+
+        events = _read_events(log_path)
+        assert len(events) >= 3
         for event in events:
             assert event.get("metadata", {}).get("work_id") == work_id
 
