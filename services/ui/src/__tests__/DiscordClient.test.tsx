@@ -148,6 +148,43 @@ describe('DiscordClient', () => {
     expect(screen.getByText(/Channel: 123456789012345678/)).toBeInTheDocument()
   })
 
+  // Twin of the test above, but the fetch itself REJECTS (a network failure)
+  // rather than resolving with ok: false — handleDeleteBinding had no
+  // try/catch at all, so this used to be an unhandled promise rejection
+  // with nothing shown to the user. Representative of the same fix applied
+  // to all four handlers in this file: each already had this exact
+  // if(ok)/else(alert) shape for a non-2xx response, and the fix is a
+  // try/catch around it that routes a rejected fetch to the same alert.
+  it('shows an alert, not an unhandled rejection, when deleting a channel binding fails at the network level', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: any) => {
+      if (url === '/api/discord/bindings' && (!opts || !opts.method)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_BINDINGS) })
+      }
+      if (url === '/api/discord/bindings/b1' && opts?.method === 'DELETE') {
+        return Promise.reject(new Error('network error'))
+      }
+      if (url === '/api/discord/status') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    }))
+
+    render(<DiscordClient />)
+    await waitFor(() => {
+      expect(screen.getByText('Monitor Bot')).toBeInTheDocument()
+    })
+
+    const row = screen.getByText(/Channel: 123456789012345678/).closest('.rounded-md')!
+    fireEvent.click(row.querySelector('button')!)
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('Failed to remove channel binding')
+    })
+    expect(screen.getByText(/Channel: 123456789012345678/)).toBeInTheDocument()
+  })
+
   it('shows an alert, not a silently-open form, when linking a Discord user fails', async () => {
     vi.stubGlobal('alert', vi.fn())
     vi.stubGlobal('fetch', vi.fn((url: string, opts?: any) => {

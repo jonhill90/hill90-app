@@ -78,26 +78,34 @@ export default function McpServersClient() {
     setFormError('')
     const url = editingId ? `/api/mcp-servers/${editingId}` : '/api/mcp-servers'
     const method = editingId ? 'PUT' : 'POST'
-    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    if (res.ok) {
-      setShowForm(false)
-      setEditingId(null)
-      setForm({ name: '', description: '', transport: 'stdio', command: '', args: '', env: '', url: '' })
-      fetchServers()
-    } else {
-      const data = await res.json()
-      setFormError(data.error || (editingId ? 'Failed to update server' : 'Failed to create server'))
+    try {
+      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      if (res.ok) {
+        setShowForm(false)
+        setEditingId(null)
+        setForm({ name: '', description: '', transport: 'stdio', command: '', args: '', env: '', url: '' })
+        fetchServers()
+      } else {
+        const data = await res.json()
+        setFormError(data.error || (editingId ? 'Failed to update server' : 'Failed to create server'))
+      }
+    } catch {
+      setFormError(editingId ? 'Failed to update server' : 'Failed to create server')
     }
   }
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this MCP server?')) return
-    const res = await fetch(`/api/mcp-servers/${id}`, { method: 'DELETE' })
-    if (res.ok) {
-      fetchServers()
-    } else {
-      const data = await res.json()
-      alert(data.error || 'Failed to delete server')
+    try {
+      const res = await fetch(`/api/mcp-servers/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        fetchServers()
+      } else {
+        const data = await res.json()
+        alert(data.error || 'Failed to delete server')
+      }
+    } catch {
+      alert('Failed to delete server')
     }
   }
 

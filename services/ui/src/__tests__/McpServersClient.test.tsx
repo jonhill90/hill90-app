@@ -198,6 +198,37 @@ describe('McpServersClient', () => {
     expect(screen.getByText('GitHub MCP')).toBeInTheDocument()
   })
 
+  // Twin of the test above, but the fetch itself REJECTS (a network
+  // failure) rather than resolving with ok: false — handleDelete had no
+  // try/catch at all, so this used to be an unhandled promise rejection
+  // with nothing shown to the user. handleSubmit got the identical fix,
+  // routing a rejected fetch to its own existing setFormError path.
+  it('shows an alert, not an unhandled rejection, when deleting a server fails at the network level', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: any) => {
+      if (url === '/api/mcp-servers' && (!opts || !opts.method || opts.method === 'GET')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_SERVERS) })
+      }
+      if (url === '/api/mcp-servers/s1' && opts?.method === 'DELETE') {
+        return Promise.reject(new Error('network error'))
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+    render(<McpServersClient />)
+    await waitFor(() => {
+      expect(screen.getByText('GitHub MCP')).toBeInTheDocument()
+    })
+    const row = screen.getByText('GitHub MCP').closest('.rounded-lg')!
+    const rowButtons = row.querySelectorAll('button')
+    fireEvent.click(rowButtons[rowButtons.length - 1])
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('Failed to delete server')
+    })
+    expect(screen.getByText('GitHub MCP')).toBeInTheDocument()
+  })
+
   it('shows URL field for SSE transport', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) })))
     render(<McpServersClient />)

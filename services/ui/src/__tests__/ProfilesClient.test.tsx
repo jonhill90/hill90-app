@@ -121,4 +121,36 @@ describe('ProfilesClient', () => {
     })
     expect(screen.getByText('Custom Heavy')).toBeInTheDocument()
   })
+
+  // Twin of the test above, but the fetch itself REJECTS (a network
+  // failure) rather than resolving with ok: false — the delete button's
+  // onClick had no try/catch at all, so this used to be an unhandled
+  // promise rejection with nothing shown to the user. The create/edit save
+  // button got the identical fix, routing a rejected fetch to its own
+  // existing setFormError path.
+  it('shows an alert, not an unhandled rejection, when deleting a profile fails at the network level', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/container-profiles' && (!opts || !opts.method || opts.method === 'GET')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_PROFILES) })
+      }
+      if (url === '/api/container-profiles/profile-2' && opts?.method === 'DELETE') {
+        return Promise.reject(new Error('network error'))
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<ProfilesClient />)
+    await waitFor(() => {
+      expect(screen.getByText('Custom Heavy')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Delete'))
+
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith('Failed to delete profile')
+    })
+    expect(screen.getByText('Custom Heavy')).toBeInTheDocument()
+  })
 })
