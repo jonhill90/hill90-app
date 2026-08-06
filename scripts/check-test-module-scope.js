@@ -31,6 +31,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 // REPO-WIDE, not services/api only. This started life guarding one service,
 // which was the sibling-drift shape it exists to prevent, applied to itself.
@@ -51,13 +52,73 @@ const path = require('path');
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SKIP = new Set(['node_modules', '.git', '.next', 'dist', 'build', '.worktrees']);
 
+/**
+ * app#565. This used to be a single hardcoded name, '.worktrees' — but a
+ * SECOND agent-worktree convention, `.claude/worktrees/<branch>/`, walks in
+ * under '.claude', not '.worktrees', so the name-based skip never matched it.
+ * The check descended into other branches' full checkouts and reported their
+ * files as FAILing on main, on a clean tree, before anything was mutated.
+ *
+ * THE RULE CHOSEN, AND THE ONE REJECTED. Adding '.claude' to SKIP would have
+ * "fixed" this specific convention while leaving the check exactly as
+ * fragile against a third one — any future `git worktree add <anywhere>`
+ * breaks it again the same way, and '.claude' is too broad besides: it holds
+ * more than worktrees. The other option was skipping whatever `git` itself
+ * ignores, which was rejected on purpose — a gitignore-keyed skip would also
+ * silently skip a genuinely untracked NEW test file a developer just
+ * created and hasn't `git add`ed yet, which is exactly the file this check
+ * most needs to still catch. `git worktree list` has neither problem: it is
+ * git's own authoritative registry of what a worktree IS, regardless of
+ * where it lives or what convention named it, and it says nothing about
+ * what is tracked or ignored.
+ *
+ * Failure is non-fatal by design — this check runs in CI too, where a fresh
+ * checkout normally has no linked worktrees at all, and a `git` failure here
+ * must not turn an unrelated environment problem into a false FAIL against
+ * files that were never the issue.
+ */
+function linkedWorktreeRelativePaths(repoRoot) {
+  let out;
+  try {
+    out = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+  } catch (err) {
+    console.error(
+      `WARNING — 'git worktree list' failed (${err.message}); linked worktrees ` +
+        'inside this tree will not be skipped this run.',
+    );
+    return [];
+  }
+
+  const relPaths = [];
+  for (const line of out.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    const resolved = path.resolve(line.slice('worktree '.length).trim());
+    if (resolved === repoRoot) continue; // the primary checkout — the tree under test, never skip it
+    const rel = path.relative(repoRoot, resolved);
+    // Worktrees git lists that live outside this tree (elsewhere on disk, a
+    // common pattern this session) are never reachable by walk() anyway —
+    // only ones INSIDE repoRoot need excluding.
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) relPaths.push(rel);
+  }
+  return relPaths;
+}
+
+const WORKTREE_SKIP_PATHS = new Set(linkedWorktreeRelativePaths(REPO_ROOT));
+
 function walk(dir) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory() && SKIP.has(entry.name)) continue;
     const p = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walk(p));
-    else if (/\.(test|spec)\.tsx?$/.test(entry.name)) out.push(p);
+    if (entry.isDirectory()) {
+      if (SKIP.has(entry.name)) continue;
+      if (WORKTREE_SKIP_PATHS.has(path.relative(REPO_ROOT, p))) continue;
+      out.push(...walk(p));
+    } else if (/\.(test|spec)\.tsx?$/.test(entry.name)) {
+      out.push(p);
+    }
   }
   return out;
 }
