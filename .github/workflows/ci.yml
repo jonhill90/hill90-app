@@ -527,6 +527,19 @@ jobs:
       - name: Run bats tests
         run: bats --recursive tests/scripts/
 
+      # app#514. The eight authenticated tests/e2e specs used to resolve
+      # E2E_USERNAME independently of the skip guard, which keyed on
+      # E2E_PASSWORD — so setting only the password armed seven specs
+      # against Jon's real production account, and those specs write
+      # (upload-and-delete, create workflow, start agent). The fix removed
+      # every default; this keeps it removed. The check simulates the
+      # password-only scenario against the specs' own extracted source via
+      # node:vm rather than reimplementing their logic, so it fails if a
+      # default is reintroduced in any form, not just the current spelling.
+      # Node is already present in this job — it installs bats through npm.
+      - name: e2e specs cannot silently select a production account (app#514)
+        run: node tests/e2e/check-username-defaults.mjs
+
       # The standalone realm is a VENDORED copy of Hill90's platform-realm.json,
       # and a copy is safe only while something keeps it honest. Compares the
       # load-bearing fields against a committed extract of upstream, so this needs

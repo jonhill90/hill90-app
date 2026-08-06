@@ -1,9 +1,22 @@
 import { test, expect, type Page } from "@playwright/test";
 
-const E2E_USERNAME = process.env.E2E_USERNAME || "jon@hill90.com";
-const E2E_PASSWORD = process.env.E2E_PASSWORD || "";
+/**
+ * Requires env vars, BOTH explicitly set — app#514: this file previously
+ * had no doc comment at all, and its E2E_USERNAME defaulted independently
+ * to jon@hill90.com, a real production account, while only E2E_PASSWORD
+ * gated whether the suite ran. There is no default for either var now; a
+ * missing one skips the suite rather than silently selecting an identity.
+ *   E2E_USERNAME — this estate's documented test account: testuser01
+ *   E2E_PASSWORD — its password
+ */
 
-test.skip(!E2E_PASSWORD, "E2E_PASSWORD not set");
+const E2E_USERNAME = process.env.E2E_USERNAME ?? "";
+const E2E_PASSWORD = process.env.E2E_PASSWORD ?? "";
+
+test.skip(
+  !E2E_USERNAME || !E2E_PASSWORD,
+  "E2E_USERNAME and E2E_PASSWORD must both be set explicitly"
+);
 
 async function login(page: Page) {
   await page.goto("/");

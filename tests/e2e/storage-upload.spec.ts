@@ -7,15 +7,23 @@ import { test, expect, type Page } from "@playwright/test";
  * upload a test file, verify it appears in the listing, delete it,
  * verify it's gone.
  *
- * Requires env vars:
- *   E2E_USERNAME — Keycloak user (default: jon)
- *   E2E_PASSWORD — Keycloak password
+ * Requires env vars, BOTH explicitly set — app#514: a username default
+ * that resolves independently of the password guard is what let a human
+ * arm a production account by setting only the password. There is no
+ * default for either var; a missing one skips the suite rather than
+ * silently selecting an identity. This suite uploads and deletes a real
+ * object, so the identity it runs as matters.
+ *   E2E_USERNAME — this estate's documented test account: testuser01
+ *   E2E_PASSWORD — its password
  */
 
-const E2E_USERNAME = process.env.E2E_USERNAME || "jon";
-const E2E_PASSWORD = process.env.E2E_PASSWORD || "";
+const E2E_USERNAME = process.env.E2E_USERNAME ?? "";
+const E2E_PASSWORD = process.env.E2E_PASSWORD ?? "";
 
-test.skip(!E2E_PASSWORD, "E2E_PASSWORD not set — skipping storage E2E tests");
+test.skip(
+  !E2E_USERNAME || !E2E_PASSWORD,
+  "E2E_USERNAME and E2E_PASSWORD must both be set explicitly — skipping storage E2E tests"
+);
 
 async function login(page: Page) {
   await page.goto("/");
