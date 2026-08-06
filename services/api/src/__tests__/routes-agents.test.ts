@@ -549,6 +549,35 @@ describe('Agent lifecycle routes', () => {
     expect(updateCall).toBeDefined();
   });
 
+  it('POST /agents/:id/stop marks the row error, not stale running, when container removal fails', async () => {
+    // The start route's tool-install-cleanup-failure catch (above) writes
+    // status='error' when its own compensating stopAndRemoveContainer call
+    // throws — the row never claims a state nothing backs. The stop route's
+    // OWN call to stopAndRemoveContainer had no equivalent: a thrown
+    // remove() fell straight through to the route's outer catch, which only
+    // logs and responds 500 without ever touching the agents table, leaving
+    // the row claiming 'running' regardless of what actually happened to the
+    // container. THE ASSERTION THAT MATTERS is the row's own state after the
+    // throw, not merely that the request surfaces a 500.
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'uuid-1', agent_id: 'test-agent', status: 'running' }] }) // SELECT agent
+      .mockResolvedValueOnce({ rows: [] }); // UPDATE agents SET status = 'error' ...
+    mockStopAndRemoveContainer.mockRejectedValueOnce(new Error('docker daemon unreachable'));
+
+    const res = await request(app)
+      .post('/agents/uuid-1/stop')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(500);
+    expect(res.body.detail).toContain('docker daemon unreachable');
+
+    const errorUpdateCall = mockQuery.mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string' && call[0].includes("status = 'error'")
+    );
+    expect(errorUpdateCall).toBeDefined();
+    expect(errorUpdateCall![1]).toContain('uuid-1');
+  });
+
   it('GET /agents/:id/status scopes to owner', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{ agent_id: 'test', status: 'running', container_id: 'abc', error_message: null }],
