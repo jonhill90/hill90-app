@@ -1869,7 +1869,30 @@ router.post('/:id/stop', requireRole('admin'), async (req: Request, res: Respons
       }
     }
 
-    await stopAndRemoveContainer(agent.agent_id);
+    // The start route's tool-install-cleanup-failure catch (above) writes
+    // status='error' when ITS OWN compensating stopAndRemoveContainer call
+    // fails, so the row never outlives a container it lost track of. This
+    // call had no equivalent: a thrown remove() fell straight through to
+    // this route's outer catch, which only logs and responds 500 without
+    // ever touching the agents table — leaving the row claiming 'running'
+    // regardless of what actually happened to the container, for as long as
+    // it takes the next reconcile pass to notice. Matching the start route's
+    // shape closes that: the row is written to 'error' here, then rethrown
+    // so the outer catch's existing logging/response is unchanged.
+    try {
+      await stopAndRemoveContainer(agent.agent_id);
+    } catch (err: any) {
+      const detail = `Container removal failed: ${err instanceof Error ? err.message : String(err)}`;
+      try {
+        await getPool().query(
+          `UPDATE agents SET status = 'error', error_message = $1, updated_at = NOW() WHERE id = $2`,
+          [detail, req.params.id]
+        );
+      } catch (dbErr) {
+        console.error(`[agents] Failed to record stop failure for ${agent.agent_id}:`, dbErr);
+      }
+      throw new Error(detail);
+    }
 
     // Mark any pending chat messages from this agent as error (stale cleanup).
     // Contract: chat-dispatch uses agent UUID (agents.id) as author_id, not the slug.
