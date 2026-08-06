@@ -42,11 +42,12 @@ const mockQuery = jest.fn();
 jest.mock('../db/pool', () => ({ getPool: () => ({ query: mockQuery }) }));
 
 const mockExecInContainer = jest.fn();
+const mockGetContainerLogs = jest.fn();
 jest.mock('../services/docker', () => ({
   createAndStartContainer: jest.fn(),
   stopAndRemoveContainer: jest.fn(),
   inspectContainer: jest.fn(),
-  getContainerLogs: jest.fn(),
+  getContainerLogs: (...args: unknown[]) => mockGetContainerLogs(...args),
   removeAgentVolumes: jest.fn(),
   reconcileAgentStatuses: jest.fn(),
   execInContainer: (...args: unknown[]) => mockExecInContainer(...args),
@@ -54,6 +55,12 @@ jest.mock('../services/docker', () => ({
 
 const userToken = jwt.sign(
   { sub: 'owner-user', resource_access: { 'hill90-ui': { roles: ['user'] } } },
+  privateKey,
+  { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '1h' }
+);
+
+const adminToken = jwt.sign(
+  { sub: 'admin-user', resource_access: { 'hill90-ui': { roles: ['admin', 'user'] } } },
   privateKey,
   { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '1h' }
 );
@@ -85,12 +92,50 @@ function chattyContainer() {
   return s;
 }
 
+/**
+ * A chatty container LOG stream: Docker's multiplexed frame format (an 8-byte
+ * header — stream type, 3 bytes padding, big-endian uint32 payload size —
+ * ahead of each payload), which /:id/logs's stripDockerHeader() expects.
+ * Same pause/resume observability as chattyContainer() above.
+ */
+function dockerFrame(line: string): Buffer {
+  const payload = Buffer.from(line, 'utf-8');
+  const header = Buffer.alloc(8);
+  header.writeUInt8(1, 0); // stdout
+  header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([header, payload]);
+}
+
+function chattyLogContainer() {
+  let pushed = 0;
+  const frame = dockerFrame(`{"id":"${'x'.repeat(400)}","type":"log"}\n`);
+  const s: Readable & { paused?: boolean; pushedBytes?: number } = new Readable({
+    read() {
+      if (pushed > 40 * 1024 * 1024) {
+        this.push(null);
+        return;
+      }
+      pushed += frame.length;
+      s.pushedBytes = pushed;
+      this.push(frame);
+    },
+  }) as Readable & { paused?: boolean; pushedBytes?: number };
+  s.paused = false;
+  s.pushedBytes = 0;
+  const realPause = s.pause.bind(s);
+  const realResume = s.resume.bind(s);
+  s.pause = () => { s.paused = true; return realPause(); };
+  s.resume = () => { s.paused = false; return realResume(); };
+  return s;
+}
+
 let server: http.Server;
 let port: number;
 
 beforeEach(async () => {
   mockQuery.mockReset();
   mockExecInContainer.mockReset();
+  mockGetContainerLogs.mockReset();
   process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
   mockQuery.mockImplementation((sql: string) => {
     if (/FROM agents WHERE id/.test(sql)) {
@@ -141,6 +186,50 @@ describe('SSE backpressure', () => {
 
     // The claim: the producer was told to wait. Before this change nothing
     // consulted res.write()'s result, so it never was.
+    expect(container.paused).toBe(true);
+  }, 20000);
+
+  // /:id/logs?follow=true was the one live streaming data path left using a
+  // raw res.write() after the sweep above fixed its sibling — same defect,
+  // same fix. sse-writer.test.ts already pins the underlying rule (a false
+  // write pauses the source, nothing further is written until 'drain', an
+  // overflow refuses rather than queuing more); this proves the ROUTE is
+  // actually wired to that mechanism rather than writing straight to `res`.
+  // A test that just read this stream to completion would pass against the
+  // unfixed route too, since it also delivers the log lines successfully —
+  // it just also buffers them all in this process's memory for a client
+  // that has stopped reading, which is exactly what does not show up in a
+  // "did the client eventually get the data" assertion.
+  it('pauses the container LOG stream when the client stops reading', async () => {
+    const container = chattyLogContainer();
+    mockGetContainerLogs.mockResolvedValue(container);
+
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/agents/agent-uuid/logs?follow=true',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        },
+        (res) => {
+          // Headers received, then deliberately stop reading — same stalled-
+          // client shape as the /:id/events test above, applied to /:id/logs.
+          res.pause();
+          setTimeout(() => {
+            req.destroy();
+            resolve();
+          }, 2500);
+        },
+      );
+      req.on('error', () => resolve());
+      req.end();
+      setTimeout(() => reject(new Error('no response headers')), 8000);
+    });
+
+    // THE ASSERTION THAT MATTERS: the producer was told to wait, not that
+    // the stream delivered — raw res.write() delivers too, right up until
+    // it silently buffers without limit.
     expect(container.paused).toBe(true);
   }, 20000);
 });
