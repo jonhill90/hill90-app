@@ -30,7 +30,7 @@ function mockFetchDefaults(bindings: unknown[] = MOCK_BINDINGS, agents: unknown[
       return Promise.resolve({ ok: true, json: () => Promise.resolve(bindings) })
     }
     if (url === '/api/discord/status') {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, deployed: true, status: 'ready', message: '' }) })
     }
     if (url === '/api/agents') {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(agents) })
@@ -46,6 +46,107 @@ describe('DiscordClient', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+  })
+
+  // app#508. Before this fix, a page with zero bindings and a page where
+  // the bot genuinely wasn't running looked identical — "No channels bound
+  // yet" reads the same in both cases, and nothing said that a binding
+  // created here could never do anything.
+  it('THE ASSERTION THAT MATTERS: says the bot is not running BEFORE any binding is created, unconditionally — not gated on the binding list being empty', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url === '/api/discord/bindings') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_BINDINGS) })
+      }
+      if (url === '/api/discord/status') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            configured: false,
+            deployed: false,
+            status: 'not_deployed',
+            message: 'The Discord bot has no running container on the host, and the deploy pipeline does not build or start one. Bindings created now will not take effect.',
+          }),
+        })
+      }
+      if (url === '/api/agents') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    }))
+
+    render(<DiscordClient />)
+
+    // The binding list is NOT empty in this fixture — the banner must
+    // still appear. It must not be an "empty state" that only shows once
+    // nothing has been created yet.
+    await waitFor(() => {
+      expect(screen.getByText('Monitor Bot')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('bot-not-deployed-badge')).toBeInTheDocument()
+    expect(screen.getByTestId('bot-not-deployed-message')).toHaveTextContent(/no running container/i)
+    // Present-tense, no promise about the future.
+    expect(screen.getByTestId('bot-not-deployed-message')).not.toHaveTextContent(/will be|coming soon|soon|future/i)
+  })
+
+  it('TWIN: no "not running" banner at all when the bot is genuinely deployed', async () => {
+    vi.stubGlobal('fetch', mockFetchDefaults())
+    render(<DiscordClient />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Monitor Bot')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('bot-not-deployed-badge')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('bot-not-deployed-message')).not.toBeInTheDocument()
+  })
+
+  it('repeats the warning at the moment a binding is created, not only on the page-level banner', async () => {
+    vi.stubGlobal('alert', vi.fn())
+    vi.stubGlobal('fetch', vi.fn((url: string, opts?: any) => {
+      if (url === '/api/discord/bindings' && (!opts || !opts.method)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_BINDINGS) })
+      }
+      if (url === '/api/discord/bindings' && opts?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: () => Promise.resolve({
+            id: 'b2',
+            channel_id: '999888777666555444',
+            guild_id: '111000999888777666',
+            agent_id: 'a1',
+            warning: 'The Discord bot has no running container on the host, and the deploy pipeline does not build or start one. Bindings created now will not take effect.',
+          }),
+        })
+      }
+      if (url === '/api/discord/status') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ configured: false, deployed: false, status: 'not_deployed', message: 'not running' }),
+        })
+      }
+      if (url === '/api/agents') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    }))
+
+    render(<DiscordClient />)
+    await waitFor(() => {
+      expect(screen.getByText('Monitor Bot')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Bind Channel'))
+    fireEvent.change(screen.getByPlaceholderText('123456789012345678'), { target: { value: '999888777666555444' } })
+    fireEvent.change(screen.getByPlaceholderText('987654321098765432'), { target: { value: '111000999888777666' } })
+    fireEvent.change(screen.getByDisplayValue('Select agent...'), { target: { value: 'a1' } })
+    fireEvent.click(screen.getByText('Create'))
+
+    // THE ASSERTION THAT MATTERS: a real 201 (the row was created — this
+    // is not the failure-alert path any other test in this file covers)
+    // still surfaces the same warning, at creation time.
+    await waitFor(() => {
+      expect(window.alert).toHaveBeenCalledWith(expect.stringMatching(/no running container/i))
+    })
   })
 
   it('renders channel bindings after fetch', async () => {
@@ -70,7 +171,7 @@ describe('DiscordClient', () => {
         return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
       }
       if (url === '/api/discord/status') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, deployed: true, status: 'ready', message: '' }) })
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
     }))
@@ -91,7 +192,7 @@ describe('DiscordClient', () => {
         return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'db unavailable' }) })
       }
       if (url === '/api/discord/status') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, deployed: true, status: 'ready', message: '' }) })
       }
       if (url === '/api/agents') {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
@@ -129,7 +230,7 @@ describe('DiscordClient', () => {
         return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'db unavailable' }) })
       }
       if (url === '/api/discord/status') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, deployed: true, status: 'ready', message: '' }) })
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
     }))
@@ -166,7 +267,7 @@ describe('DiscordClient', () => {
         return Promise.reject(new Error('network error'))
       }
       if (url === '/api/discord/status') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, deployed: true, status: 'ready', message: '' }) })
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
     }))
@@ -192,7 +293,7 @@ describe('DiscordClient', () => {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_BINDINGS) })
       }
       if (url === '/api/discord/status') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, deployed: true, status: 'ready', message: '' }) })
       }
       if (url === '/api/agents') {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
@@ -229,7 +330,7 @@ describe('DiscordClient', () => {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_BINDINGS) })
       }
       if (url === '/api/discord/status') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, status: 'ok', message: '' }) })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ configured: true, deployed: true, status: 'ready', message: '' }) })
       }
       if (url === '/api/agents') {
         return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })

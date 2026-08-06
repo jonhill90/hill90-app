@@ -802,3 +802,35 @@ function parseMemLimit(limit: string): number {
     default: return value;
   }
 }
+
+/**
+ * Whether a container is present AND running, checked live against the
+ * Docker daemon — not a config flag, not an env var (app#508: a
+ * DISCORD_BOT_SERVICE_TOKEN could be configured in vault with no bot
+ * container ever having existed, which would have made a token-presence
+ * check alone actively misleading).
+ *
+ * Deliberately NOT `assertAgentboxName`-gated like the agent-management
+ * functions above: this is read-only (a plain inspect, nothing created,
+ * started, stopped or labeled), and `containerName` here is never
+ * caller-supplied — every call site passes a hardcoded constant — so the
+ * injection concern that guard exists for does not apply.
+ *
+ * Three-outcome, not two: a container that plainly doesn't exist resolves
+ * `false`; anything else that goes wrong talking to the daemon (proxy
+ * unreachable, unexpected error shape) is NOT collapsed into the same
+ * `false` — the docker-socket-proxy being briefly unreachable is not the
+ * same fact as "this service was never deployed," and the caller needs to
+ * tell "verified absent" from "could not check" apart, the same
+ * distinction agent-status-verification.ts already draws for agent
+ * containers.
+ */
+export async function isContainerRunning(containerName: string): Promise<boolean> {
+  try {
+    const info = await docker.getContainer(containerName).inspect();
+    return info.State.Status === 'running';
+  } catch (err: any) {
+    if (err.statusCode === 404) return false;
+    throw err;
+  }
+}
