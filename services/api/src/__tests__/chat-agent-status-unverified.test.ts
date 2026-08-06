@@ -50,7 +50,23 @@ jest.mock('dockerode', () =>
 
 const mockQuery = jest.fn();
 jest.mock('../db/pool', () => ({
-  getPool: () => ({ query: mockQuery }),
+  // `connect` backed by the same mockQuery, BEGIN/COMMIT/ROLLBACK answered
+  // without consuming the mock queue — POST /threads/:id/messages now runs
+  // its user-message INSERT and thread-timestamp UPDATE inside a
+  // transaction (the two writes must agree, see half-writes.test.ts), and
+  // this file's own `mockQuery.mockImplementation` substring-matches on
+  // query text alone, so it does not care whether a call arrived via
+  // `pool.query` or `client.query`.
+  getPool: () => ({
+    query: mockQuery,
+    connect: async () => ({
+      query: (sql: unknown, params?: unknown) =>
+        typeof sql === 'string' && /^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(sql)
+          ? Promise.resolve({ rows: [], rowCount: 0 })
+          : mockQuery(sql, params),
+      release: () => {},
+    }),
+  }),
 }));
 
 import { createApp } from '../app';
