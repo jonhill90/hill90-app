@@ -130,7 +130,7 @@ async function upsertInstallStatus(
 }
 
 async function installBuiltin(agentSlug: string, tool: ToolRow): Promise<void> {
-  const cmd = ['bash', '-lc', `command -v ${tool.name}`];
+  const cmd = ['bash', '-lc', `command -v ${shellQuote(tool.name)}`];
   const result = await execInContainerWithExit(agentSlug, cmd, INSTALL_TIMEOUTS.builtin);
   if (result.exitCode !== 0) {
     throw new Error(`Builtin tool "${tool.name}" not found in container PATH`);
@@ -142,7 +142,7 @@ async function installApt(agentSlug: string, tool: ToolRow): Promise<void> {
   const cmd = [
     'bash',
     '-lc',
-    `command -v ${tool.name} >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${shellQuote(pkg)})`,
+    `command -v ${shellQuote(tool.name)} >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${shellQuote(pkg)})`,
   ];
   const result = await execInContainerWithExit(agentSlug, cmd, INSTALL_TIMEOUTS.apt);
   if (result.exitCode !== 0) {
