@@ -1347,11 +1347,42 @@ describe('Chat callback', () => {
     expect(res.status).toBe(401);
   });
 
+  // An operator debugging "agentbox callbacks are all 401ing" (e.g. after a
+  // CHAT_CALLBACK_TOKEN rotation drifted between the API and agentbox) used
+  // to get zero server-side trace — the two 401 branches had no logging at
+  // all, unlike the missing-config branch three lines above them.
+  it('POST /internal/chat/callback logs a token mismatch WITHOUT the presented token value', async () => {
+    const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const res = await request(app)
+      .post('/internal/chat/callback')
+      .set('Authorization', 'Bearer distinctive-wrong-value-9f3a')
+      .send({ message_id: 'msg-uuid', content: 'test', status: 'complete' });
+
+    expect(res.status).toBe(401);
+
+    const loggedCalls = consoleWarnSpy.mock.calls.map(args => args.join(' '));
+    expect(loggedCalls.some(line => /did not match/i.test(line))).toBe(true);
+    // THE ASSERTION THAT MATTERS: the credential itself never reaches a log
+    // line, container logs being a worse leak surface than the value ever
+    // living in a request the operator can already see.
+    expect(loggedCalls.some(line => line.includes('distinctive-wrong-value-9f3a'))).toBe(false);
+
+    consoleWarnSpy.mockRestore();
+  });
+
   it('POST /internal/chat/callback rejects missing auth header (401)', async () => {
+    const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
     const res = await request(app)
       .post('/internal/chat/callback')
       .send({ message_id: 'msg-uuid', content: 'test', status: 'complete' });
     expect(res.status).toBe(401);
+
+    const loggedCalls = consoleWarnSpy.mock.calls.map(args => args.join(' '));
+    expect(loggedCalls.some(line => /missing or malformed/i.test(line))).toBe(true);
+
+    consoleWarnSpy.mockRestore();
   });
 
   it('POST /internal/chat/callback returns 503 when token not configured', async () => {
