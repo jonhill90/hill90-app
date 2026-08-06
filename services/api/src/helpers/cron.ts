@@ -9,8 +9,25 @@ import { CronExpressionParser } from 'cron-parser';
  * check before this (a field-count check with no range validation, and a
  * regex permitting out-of-range values like `60` in the minute field),
  * neither of which agreed with what cron-parser itself accepts (app#487).
+ *
+ * app#580: that claim had one gap of its own. `CronExpressionParser.parse('')`
+ * does NOT throw — cron-parser fills unspecified fields with their default
+ * (every-minute) range, so an empty string parsed as a genuine, if
+ * degenerate, "every minute" schedule and this function returned `true` for
+ * it. `computeNextRun` below treats a falsy `cronExpr` as "no schedule" and
+ * returns `null` WITHOUT ever calling the parser — so an empty string was
+ * simultaneously "valid" here and "no schedule, skip silently" there: the
+ * exact strict/loose mismatch this function's own header says it prevents.
+ * Rejecting falsy input explicitly closes it at the source, rather than
+ * requiring every call site to special-case it — an empty string is never a
+ * meaningful cron for anything that actually wants a schedule; a caller
+ * that means "no schedule" (a webhook-triggered workflow) already expresses
+ * that as `null`/omitted, not `''`, and never reaches this function with it
+ * (see routes/workflows.ts's POST /, which requires schedule_cron truthy
+ * before this is ever called).
  */
 export function isValidCronExpression(expr: string): boolean {
+  if (!expr) return false;
   try {
     CronExpressionParser.parse(expr);
     return true;
