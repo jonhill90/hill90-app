@@ -366,9 +366,25 @@ jobs:
       # after someone deletes the last test — a gate that cannot fire, which is
       # the exact fault this job was added to fix. Requiring at least one passing
       # package makes the gate prove it ran something.
+      #
+      # `set -o pipefail` is the fix this comment used to be silent about a
+      # second gap in. This job has no `shell:` override anywhere in the
+      # file, so GitHub's documented default applies: `bash -e {0}` — `-e`
+      # only, no pipefail. Under plain `-e`, a pipeline's reported exit
+      # status is its LAST command's — `tee`'s, which is always 0 — so a
+      # real `go test` failure never tripped `-e` on its own. With two
+      # tested packages (client, cmd), a FAIL in one alongside an ok in the
+      # other produced exactly the output the grep below was built to
+      # accept: at least one `^ok ` line. Verified directly, not assumed:
+      # reproduced this exact pipeline locally with a fixture containing
+      # both a FAIL and an ok line — pre-fix it exits 0 ("GATE VERDICT:
+      # PASS"), post-fix (this line added) it exits 1 before the grep is
+      # ever reached, and the "no test files at all" case this job was
+      # originally built for still correctly fails either way.
       - name: Test
         working-directory: services/knowledge/cli
         run: |
+          set -o pipefail
           go test ./... -count=1 | tee /tmp/go-test.out
           grep -q '^ok ' /tmp/go-test.out || {
             echo "::error::go test ran but no package reported ok — the CLI has no tests, or none were found"
