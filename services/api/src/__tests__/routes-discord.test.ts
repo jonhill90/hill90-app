@@ -7,10 +7,18 @@
  * discord-bot container exists at all, running or stopped, and the deploy
  * pipeline does not build or start one.
  *
- * These tests exercise the fix's two write-time and read-time signals:
- * GET /discord/status now checks the real container (not just whether a
- * token is configured), and POST /discord/bindings carries the same
- * warning at the moment of creation, not only on a separate page load.
+ * SECOND HALF OF THE FIX, and the reason this file changed shape rather than
+ * just gaining tests: the first version warned on a 201 whenever the bot
+ * wasn't RUNNING — which treated "confirmed absent, can never work" and
+ * "exists but merely stopped, a normal transient" identically. A bot that is
+ * down for maintenance is a legitimate binding target; a bot with no
+ * container object anywhere is not, and creating a binding for one leaves a
+ * row nothing will ever consume. The distinction now drives the response:
+ * `absent` is REFUSED before any write (409, nothing left behind); `stopped`
+ * and `unknown` still succeed (201) with an informational note, because
+ * refusing either would break a legitimate workflow (a bot that's merely
+ * down, or a check that could not complete) to fix what is, for that
+ * caller, a cosmetic warning.
  */
 import request from 'supertest';
 import * as crypto from 'crypto';
@@ -30,9 +38,9 @@ jest.mock('../db/pool', () => ({
   getPool: () => ({ query: mockQuery }),
 }));
 
-const mockIsContainerRunning = jest.fn();
+const mockInspectContainerPresence = jest.fn();
 jest.mock('../services/docker', () => ({
-  isContainerRunning: (...args: unknown[]) => mockIsContainerRunning(...args),
+  inspectContainerPresence: (...args: unknown[]) => mockInspectContainerPresence(...args),
 }));
 
 const app = createApp({
@@ -49,15 +57,18 @@ function makeToken(sub: string, roles: string[]) {
 }
 
 const userToken = makeToken('user-1', ['user']);
+const RUNNING = { exists: true, running: true };
+const STOPPED = { exists: true, running: false };
+const ABSENT = { exists: false, running: false };
 
 beforeEach(() => {
   mockQuery.mockReset();
-  mockIsContainerRunning.mockReset();
+  mockInspectContainerPresence.mockReset();
 });
 
-describe('GET /discord/status reports the real container, not just token config', () => {
+describe('GET /discord/status distinguishes running, stopped, absent and unknown', () => {
   it('POSITIVE CONTROL: the bot container is actually running', async () => {
-    mockIsContainerRunning.mockResolvedValueOnce(true);
+    mockInspectContainerPresence.mockResolvedValueOnce(RUNNING);
 
     const res = await request(app)
       .get('/discord/status')
@@ -66,13 +77,13 @@ describe('GET /discord/status reports the real container, not just token config'
     expect(res.status).toBe(200);
     expect(res.body.deployed).toBe(true);
     expect(res.body.status).toBe('ready');
-    expect(mockIsContainerRunning).toHaveBeenCalledWith('app-discord-bot');
+    expect(mockInspectContainerPresence).toHaveBeenCalledWith('app-discord-bot');
   });
 
   it('THE ASSERTION THAT MATTERS: a token being configured does not mean the bot is deployed', async () => {
     const savedToken = process.env.DISCORD_BOT_SERVICE_TOKEN;
     process.env.DISCORD_BOT_SERVICE_TOKEN = 'a-real-looking-token';
-    mockIsContainerRunning.mockResolvedValueOnce(false);
+    mockInspectContainerPresence.mockResolvedValueOnce(ABSENT);
 
     const res = await request(app)
       .get('/discord/status')
@@ -87,11 +98,29 @@ describe('GET /discord/status reports the real container, not just token config'
     expect(res.body.configured).toBe(true);
     expect(res.body.deployed).toBe(false);
     expect(res.body.status).toBe('not_deployed');
-    expect(res.body.message).toMatch(/no running container/i);
+    expect(res.body.message).toMatch(/no container/i);
   });
 
-  it('distinguishes "verified not running" from "could not check"', async () => {
-    mockIsContainerRunning.mockRejectedValueOnce(new Error('docker proxy unreachable'));
+  it('a container that EXISTS but is not running is "stopped", not "not_deployed"', async () => {
+    // The distinction app#508's second half exists for: this must not read
+    // the same as a bot that was never deployed at all.
+    mockInspectContainerPresence.mockResolvedValueOnce(STOPPED);
+
+    const res = await request(app)
+      .get('/discord/status')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    // deployed: true — a container object exists; this is a legitimate
+    // target, just not active right now.
+    expect(res.body.deployed).toBe(true);
+    expect(res.body.status).toBe('stopped');
+    expect(res.body.message).toMatch(/not currently running/i);
+    expect(res.body.message).not.toMatch(/never/i);
+  });
+
+  it('distinguishes "verified absent" from "could not check"', async () => {
+    mockInspectContainerPresence.mockRejectedValueOnce(new Error('docker proxy unreachable'));
 
     const res = await request(app)
       .get('/discord/status')
@@ -104,28 +133,23 @@ describe('GET /discord/status reports the real container, not just token config'
   });
 });
 
-describe('POST /discord/bindings carries the same warning at creation time', () => {
-  it('THE ASSERTION THAT MATTERS: a real row is still created (201), but with an explicit warning when the bot is not running', async () => {
-    mockIsContainerRunning.mockResolvedValueOnce(false);
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ id: 'binding-1', channel_id: 'chan-1', guild_id: 'guild-1', agent_id: 'agent-1' }],
-    });
+describe('POST /discord/bindings refuses a bot that cannot ever exist, accepts one that is merely stopped', () => {
+  it('THE ASSERTION THAT MATTERS: a confirmed-absent bot is REFUSED — 409, and nothing is written', async () => {
+    mockInspectContainerPresence.mockResolvedValueOnce(ABSENT);
 
     const res = await request(app)
       .post('/discord/bindings')
       .set('Authorization', `Bearer ${userToken}`)
       .send({ channel_id: 'chan-1', guild_id: 'guild-1', agent_id: 'agent-1' });
 
-    // The write itself really did succeed — 201 stays honest.
-    expect(res.status).toBe(201);
-    expect(res.body.id).toBe('binding-1');
-    // THE ASSERTION THAT MATTERS: the response also says the binding
-    // cannot do anything yet, at the moment the caller most needs to know.
-    expect(res.body.warning).toMatch(/no running container/i);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/no container/i);
+    // Nothing left behind: the write must never have been attempted.
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 
-  it('TWIN: no warning field at all when the bot is genuinely running', async () => {
-    mockIsContainerRunning.mockResolvedValueOnce(true);
+  it('TWIN: a bot that is merely STOPPED is a legitimate binding target — 201, with an informational note, not a refusal', async () => {
+    mockInspectContainerPresence.mockResolvedValueOnce(STOPPED);
     mockQuery.mockResolvedValueOnce({
       rows: [{ id: 'binding-2', channel_id: 'chan-2', guild_id: 'guild-1', agent_id: 'agent-1' }],
     });
@@ -134,6 +158,40 @@ describe('POST /discord/bindings carries the same warning at creation time', () 
       .post('/discord/bindings')
       .set('Authorization', `Bearer ${userToken}`)
       .send({ channel_id: 'chan-2', guild_id: 'guild-1', agent_id: 'agent-1' });
+
+    // The write really did happen — a stopped bot is not a failure.
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBe('binding-2');
+    expect(res.body.warning).toMatch(/not currently running/i);
+    expect(res.body.warning).not.toMatch(/never/i);
+  });
+
+  it('a check that could not complete does not block the write either — 201, with a "could not verify" note', async () => {
+    mockInspectContainerPresence.mockRejectedValueOnce(new Error('docker proxy unreachable'));
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'binding-3', channel_id: 'chan-3', guild_id: 'guild-1', agent_id: 'agent-1' }],
+    });
+
+    const res = await request(app)
+      .post('/discord/bindings')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ channel_id: 'chan-3', guild_id: 'guild-1', agent_id: 'agent-1' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBe('binding-3');
+    expect(res.body.warning).toMatch(/could not verify/i);
+  });
+
+  it('no warning field at all when the bot is genuinely running', async () => {
+    mockInspectContainerPresence.mockResolvedValueOnce(RUNNING);
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'binding-4', channel_id: 'chan-4', guild_id: 'guild-1', agent_id: 'agent-1' }],
+    });
+
+    const res = await request(app)
+      .post('/discord/bindings')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ channel_id: 'chan-4', guild_id: 'guild-1', agent_id: 'agent-1' });
 
     expect(res.status).toBe(201);
     expect(res.body.warning).toBeUndefined();

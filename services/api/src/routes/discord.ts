@@ -14,7 +14,7 @@ import { Router, Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { isAdmin } from '../helpers/elevated-scope';
-import { isContainerRunning } from '../services/docker';
+import { inspectContainerPresence } from '../services/docker';
 
 const router = Router();
 
@@ -31,25 +31,43 @@ const router = Router();
 const DISCORD_BOT_CONTAINER_NAME = 'app-discord-bot';
 
 const BOT_NOT_DEPLOYED_MESSAGE =
-  'The Discord bot has no running container on the host, and the deploy ' +
-  'pipeline does not build or start one. Bindings created now will not ' +
-  'take effect.';
+  'The Discord bot has no container on the host — running or stopped — and ' +
+  'the deploy pipeline does not build or start one. A binding aimed at it ' +
+  'can never take effect.';
+
+const BOT_STOPPED_MESSAGE =
+  'The Discord bot container exists but is not currently running. This ' +
+  'binding will take effect once it starts.';
 
 /**
- * Whether the Discord bot container is actually running, distinguishing
- * "verified not running" from "could not check" — collapsing the two
- * would tell a caller confidently what nobody actually confirmed. Callers
- * decide separately what to do with `checked: false` (both routes below
- * treat "could not check" as reason enough to warn, same as "verified
- * absent" — an unverifiable bot is not one to promise works).
+ * Three real states, not two, and the distinction is the fix (app#508's
+ * second half). A bot that is merely STOPPED — down for maintenance, mid
+ * redeploy, crashed once — is a normal, legitimate binding target; refusing
+ * it would break a legitimate workflow to fix what is, for that caller, a
+ * cosmetic warning. A bot with no container object anywhere — the
+ * production reality verified 2026-08-06 — can never act on a binding no
+ * matter how long the caller waits, and that is the one case worth refusing
+ * outright rather than warning about after the fact.
+ *
+ * `unknown` (the check itself failed — docker proxy unreachable, unexpected
+ * error) is treated as its own state, not folded into `absent`: an
+ * infrastructure hiccup is not the same fact as "this was never deployed,"
+ * and must not silently gate a write on unrelated flakiness. Both routes
+ * below treat `unknown` the way they treat `stopped` — warn, do not refuse
+ * — because refusing on a check nobody could actually complete is exactly
+ * the over-strict failure mode that would cost a legitimate caller their
+ * binding to fix a display problem.
  */
-async function checkBotDeployed(): Promise<{ deployed: boolean; checked: boolean }> {
+type BotState = 'running' | 'stopped' | 'absent' | 'unknown';
+
+async function checkBotState(): Promise<BotState> {
   try {
-    const deployed = await isContainerRunning(DISCORD_BOT_CONTAINER_NAME);
-    return { deployed, checked: true };
+    const { exists, running } = await inspectContainerPresence(DISCORD_BOT_CONTAINER_NAME);
+    if (!exists) return 'absent';
+    return running ? 'running' : 'stopped';
   } catch (err) {
     console.error('[discord] Could not verify bot container status:', err);
-    return { deployed: false, checked: false };
+    return 'unknown';
   }
 }
 
@@ -85,6 +103,20 @@ router.post('/bindings', requireRole('user'), async (req: Request, res: Response
       return;
     }
 
+    // app#508. Checked BEFORE the write, not after: a binding aimed at a
+    // bot with no container object anywhere can never take effect, and
+    // refusing it must leave nothing behind — no row, no upsert, nothing
+    // for the caller to have to notice and clean up later. `stopped` and
+    // `unknown` are NOT refused here — see checkBotState's own comment for
+    // why treating either as a hard failure would break a legitimate
+    // workflow (a bot that is merely down, or a check that could not
+    // complete) to fix what is, for that caller, a cosmetic warning.
+    const state = await checkBotState();
+    if (state === 'absent') {
+      res.status(409).json({ error: BOT_NOT_DEPLOYED_MESSAGE });
+      return;
+    }
+
     const { rows } = await getPool().query(
       `INSERT INTO discord_channel_bindings (channel_id, guild_id, agent_id, created_by)
        VALUES ($1, $2, $3, $4)
@@ -93,18 +125,16 @@ router.post('/bindings', requireRole('user'), async (req: Request, res: Response
       [channel_id, guild_id, agent_id, user.sub],
     );
 
-    // app#508: the row is real and the write genuinely succeeded — 201 is
-    // still the honest status. What was missing is any signal that the
-    // row has nothing to consume it. The bindings-page banner (driven by
-    // GET /status) says this before a binding is ever created; this
-    // repeats it at the moment of creation itself, in case that banner
-    // was missed or a caller never fetched /status at all.
+    // The row is real and the write genuinely succeeded — 201 is still the
+    // honest status for both remaining states. `stopped` and `unknown` are
+    // not failures, just imperfect information the caller is owed at the
+    // moment they most need it, in case the bindings-page banner (driven by
+    // GET /status) was missed or never fetched at all.
     const result: Record<string, unknown> = { ...rows[0] };
-    const { deployed, checked } = await checkBotDeployed();
-    if (!deployed) {
-      result.warning = checked
-        ? BOT_NOT_DEPLOYED_MESSAGE
-        : 'Could not verify whether the Discord bot is running — check the Bot Status panel before relying on this binding.';
+    if (state === 'stopped') {
+      result.warning = BOT_STOPPED_MESSAGE;
+    } else if (state === 'unknown') {
+      result.warning = 'Could not verify whether the Discord bot is running — check the Bot Status panel before relying on this binding.';
     }
 
     res.status(201).json(result);
@@ -200,12 +230,20 @@ router.get('/status', requireRole('user'), async (_req: Request, res: Response) 
   // app#508: `configured` only ever checked whether a token exists — a
   // token can be sitting in vault with no bot container ever having
   // existed to use it, which is exactly production's actual state
-  // (verified 2026-08-06). `deployed` is the fact that actually
-  // determines whether a binding does anything: a live container check,
-  // not a config flag.
-  const { deployed, checked } = await checkBotDeployed();
+  // (verified 2026-08-06). `state` is the fact that actually determines
+  // whether a binding does anything: a live container check, not a config
+  // flag.
+  //
+  // `deployed` stays a boolean for backward compatibility with existing
+  // callers of this response, but its MEANING changed with the fix: it now
+  // answers "does a container object exist for this bot at all" (running OR
+  // stopped), not "is it running right now" — because that is the question
+  // that actually decides whether a binding can ever take effect. `status`
+  // carries the finer distinction a caller needs to know whether to expect
+  // action immediately or only once the bot starts.
+  const state = await checkBotState();
 
-  if (deployed) {
+  if (state === 'running') {
     res.json({
       configured,
       deployed: true,
@@ -215,7 +253,17 @@ router.get('/status', requireRole('user'), async (_req: Request, res: Response) 
     return;
   }
 
-  if (!checked) {
+  if (state === 'stopped') {
+    res.json({
+      configured,
+      deployed: true,
+      status: 'stopped',
+      message: BOT_STOPPED_MESSAGE,
+    });
+    return;
+  }
+
+  if (state === 'unknown') {
     res.json({
       configured,
       deployed: false,

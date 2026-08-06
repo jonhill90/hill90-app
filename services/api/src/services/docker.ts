@@ -873,11 +873,24 @@ function parseMemLimit(limit: string): number {
 }
 
 /**
- * Whether a container is present AND running, checked live against the
- * Docker daemon — not a config flag, not an env var (app#508: a
- * DISCORD_BOT_SERVICE_TOKEN could be configured in vault with no bot
- * container ever having existed, which would have made a token-presence
+ * Whether a container EXISTS at all, and separately whether it is RUNNING —
+ * checked live against the Docker daemon, not a config flag, not an env var
+ * (app#508: a DISCORD_BOT_SERVICE_TOKEN could be configured in vault with no
+ * bot container ever having existed, which would have made a token-presence
  * check alone actively misleading).
+ *
+ * TWO BOOLEANS, NOT ONE, and this is the second half of app#508. The first
+ * version of this fix collapsed "confirmed absent" and "exists but stopped"
+ * into a single `false` — which meant a bot that is merely down for
+ * maintenance and a bot that has never been deployed to this environment at
+ * all produced the identical signal. That distinction matters at the write
+ * boundary: a binding aimed at a bot that is just stopped is a normal,
+ * legitimate thing to create and should still succeed; a binding aimed at a
+ * bot with no container object anywhere can never take effect and should be
+ * refused outright, with nothing left behind. Collapsing the two would force
+ * a caller creating the FIRST kind of binding into the same treatment as the
+ * second — breaking a legitimate workflow to fix what is, for that caller, a
+ * cosmetic warning.
  *
  * Deliberately NOT `assertAgentboxName`-gated like the agent-management
  * functions above: this is read-only (a plain inspect, nothing created,
@@ -885,21 +898,28 @@ function parseMemLimit(limit: string): number {
  * caller-supplied — every call site passes a hardcoded constant — so the
  * injection concern that guard exists for does not apply.
  *
- * Three-outcome, not two: a container that plainly doesn't exist resolves
- * `false`; anything else that goes wrong talking to the daemon (proxy
- * unreachable, unexpected error shape) is NOT collapsed into the same
- * `false` — the docker-socket-proxy being briefly unreachable is not the
- * same fact as "this service was never deployed," and the caller needs to
- * tell "verified absent" from "could not check" apart, the same
- * distinction agent-status-verification.ts already draws for agent
- * containers.
+ * Three-outcome on EXISTENCE, not two: a container that plainly doesn't
+ * exist resolves `exists: false`; anything else that goes wrong talking to
+ * the daemon (proxy unreachable, unexpected error shape) is NOT collapsed
+ * into the same `false` — it throws, same as before — the docker-socket-
+ * proxy being briefly unreachable is not the same fact as "this service was
+ * never deployed," and the caller needs to tell "verified absent" from
+ * "could not check" apart, the same distinction agent-status-verification.ts
+ * already draws for agent containers.
  */
-export async function isContainerRunning(containerName: string): Promise<boolean> {
+export interface ContainerPresence {
+  /** A container object exists under this name, in ANY Docker state — running, exited, created, restarting. False only for a confirmed 404. */
+  exists: boolean;
+  /** Only meaningful when `exists` is true. */
+  running: boolean;
+}
+
+export async function inspectContainerPresence(containerName: string): Promise<ContainerPresence> {
   try {
     const info = await docker.getContainer(containerName).inspect();
-    return info.State.Status === 'running';
+    return { exists: true, running: info.State.Status === 'running' };
   } catch (err: any) {
-    if (err.statusCode === 404) return false;
+    if (err.statusCode === 404) return { exists: false, running: false };
     throw err;
   }
 }
