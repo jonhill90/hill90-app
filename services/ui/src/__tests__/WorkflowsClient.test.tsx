@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
 vi.mock('next-auth/react', () => ({
@@ -259,6 +259,86 @@ describe('WorkflowsClient', () => {
       expect(window.alert).toHaveBeenCalledWith('Failed to delete workflow')
     })
     expect(screen.getByText('Daily Health Check')).toBeInTheDocument()
+  })
+
+  // app#452: handleDeleteStep used to skip the confirm() its sibling
+  // handleDelete has. Both tests below exercise the real UI path (open the
+  // workflow, switch to the Steps tab) rather than calling the handler
+  // directly, so a regression that moves the confirm() out of the click path
+  // would still be caught.
+  it('does NOT delete a step when the confirm is declined — the DELETE request must never fire', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    vi.stubGlobal('alert', vi.fn())
+    const fetchMock = vi.fn((url: string) => {
+      if (url === '/api/workflows') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_WORKFLOWS) })
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      if (url.includes('/runs')) return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+      if (url === '/api/workflows/wf-1/steps') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve([
+            { id: 'step-1', agent_id: 'a-1', agent_name: 'Monitor Bot', agent_slug: 'monitor-bot', prompt: 'Check things', step_order: 0 },
+          ]),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<WorkflowsClient />)
+    await waitFor(() => expect(screen.getByText('Daily Health Check')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('Daily Health Check'))
+    await waitFor(() => expect(screen.getByText('Steps (1)')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('Steps (1)'))
+    await waitFor(() => expect(screen.getByText('Check things')).toBeInTheDocument())
+
+    fireEvent.click(within(screen.getByText('Check things').parentElement!.parentElement!).getByTestId('icon-trash'))
+
+    expect(window.confirm).toHaveBeenCalledWith('Delete this step?')
+    // The step is still there — declining must be a true no-op, not a dialog
+    // that shows and deletes anyway.
+    expect(screen.getByText('Check things')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/workflows/wf-1/steps/step-1', expect.objectContaining({ method: 'DELETE' }))
+  })
+
+  it('deletes a step when the confirm is accepted', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.stubGlobal('alert', vi.fn())
+    let stepsCallCount = 0
+    const fetchMock = vi.fn((url: string, opts?: RequestInit) => {
+      if (url === '/api/workflows') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_WORKFLOWS) })
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      if (url.includes('/runs')) return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+      if (url === '/api/workflows/wf-1/steps/step-1' && opts?.method === 'DELETE') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      if (url === '/api/workflows/wf-1/steps') {
+        stepsCallCount += 1
+        const steps = stepsCallCount === 1
+          ? [{ id: 'step-1', agent_id: 'a-1', agent_name: 'Monitor Bot', agent_slug: 'monitor-bot', prompt: 'Check things', step_order: 0 }]
+          : []
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(steps) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<WorkflowsClient />)
+    await waitFor(() => expect(screen.getByText('Daily Health Check')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('Daily Health Check'))
+    await waitFor(() => expect(screen.getByText('Steps (1)')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('Steps (1)'))
+    await waitFor(() => expect(screen.getByText('Check things')).toBeInTheDocument())
+
+    fireEvent.click(within(screen.getByText('Check things').parentElement!.parentElement!).getByTestId('icon-trash'))
+
+    expect(window.confirm).toHaveBeenCalledWith('Delete this step?')
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/workflows/wf-1/steps/step-1', expect.objectContaining({ method: 'DELETE' }))
+    })
+    await waitFor(() => expect(screen.queryByText('Check things')).not.toBeInTheDocument())
   })
 
   it('shows an error, not a silent no-op, when creating a workflow fails', async () => {

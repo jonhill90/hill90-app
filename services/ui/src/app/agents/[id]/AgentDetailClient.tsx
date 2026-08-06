@@ -610,6 +610,14 @@ export default function AgentDetailClient({
     }
   }
 
+  // app#453: deliberately no confirm() here, unlike its siblings
+  // handleRemoveSkill and handleRemoveEnvVar. A tag is a short freeform label
+  // the user just typed (or can see was there); undoing a removal costs
+  // exactly re-typing the same string and clicking Add. That is not the same
+  // class of action as removing a skill (a capability grant, sometimes
+  // elevated-scope) or an env var (see handleRemoveEnvVar below — the value
+  // is unrecoverable, not just inconvenient to retype). Adding a dialog here
+  // would make the file LOOK uniform without making any action safer.
   const handleRemoveTag = async (tag: string) => {
     if (!agent) return
     const newTags = (agent.tags || []).filter((t: string) => t !== tag)
@@ -664,6 +672,14 @@ export default function AgentDetailClient({
   }
 
   const handleRemoveEnvVar = async (key: string) => {
+    // app#453: unlike handleRemoveTag above, this one gets the confirm() its
+    // sibling handleRemoveSkill has. Per app#374/#386 the API encrypts
+    // env var values at rest and never returns them, so this component never
+    // holds the plaintext to show back — a removed value is not "annoying to
+    // retype", it is GONE unless the user separately remembers or stores it
+    // themselves. That is a real, unrecoverable cost, not symmetry for its
+    // own sake.
+    if (!confirm(`Remove the environment variable "${key}"? Its value cannot be recovered once removed.`)) return
     setEnvSaving(true)
     try {
       const res = await fetch(`/api/agents/${agentId}`, {
