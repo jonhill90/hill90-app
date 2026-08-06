@@ -276,6 +276,10 @@ describe('Chat thread CRUD', () => {
     expect(res.status).toBe(201);
     expect(res.body.thread.id).toBe('thread-uuid');
     expect(res.body.message_id).toBe('placeholder-uuid');
+    // app#512's twin in this route: same fix, same reasoning as
+    // POST /chat/threads/:id/messages just below.
+    expect(res.body.dispatched).toEqual([{ agent_id: 'agent-uuid', message_id: 'placeholder-uuid' }]);
+    expect(res.body.failed).toEqual([]);
 
     // Verify dispatch was called
     expect(mockDispatchChatWork).toHaveBeenCalledWith(expect.objectContaining({
@@ -285,6 +289,52 @@ describe('Chat thread CRUD', () => {
       messageId: 'placeholder-uuid',
       model: 'gpt-4o-mini',
     }));
+  });
+
+  it('POST /chat/threads direct thread dispatch failure is reported, not silently 201d (app#512)', async () => {
+    // Twin of the /messages test with the same name: same defect, same fix,
+    // found by checking this route for the identical shape rather than
+    // assuming the fix in one place covered both.
+    mockDispatchChatWork.mockRejectedValue(new Error('Connection refused'));
+
+    mockQuery
+      .mockResolvedValueOnce({  // getAgentForDispatch
+        rows: [{
+          id: 'agent-uuid', agent_id: 'test-agent', name: 'Test Agent', status: 'running',
+          work_token: 'wt-123', models: ['gpt-4o-mini'],
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })  // getAgentElevatedScope
+      .mockResolvedValueOnce({  // INSERT thread
+        rows: [{
+          id: 'thread-uuid', type: 'direct', title: null,
+          created_by: 'regular-user', created_at: new Date(), updated_at: new Date(),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })  // INSERT participants
+      .mockResolvedValueOnce({  // INSERT user message
+        rows: [{ id: 'user-msg-uuid', seq: 1 }],
+      })
+      .mockResolvedValueOnce({  // INSERT assistant placeholder
+        rows: [{ id: 'placeholder-uuid' }],
+      })
+      .mockResolvedValueOnce({ rowCount: 1 });  // UPDATE placeholder to error
+
+    const res = await request(app)
+      .post('/chat/threads')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'agent-uuid', message: 'Hello agent' });
+
+    expect(res.status).toBe(201);
+    // Same shape-distinguishing assertion as the /messages twin: dispatched
+    // EMPTY, not just failed non-empty — the two together are what a success
+    // response can never produce.
+    expect(res.body.dispatched).toEqual([]);
+    expect(res.body.failed).toHaveLength(1);
+    expect(res.body.failed[0]).toEqual({
+      agent_id: 'agent-uuid', message_id: 'placeholder-uuid', reason: 'dispatch_failed',
+    });
+    expect(res.body.message_id).toBe('placeholder-uuid');
   });
 
   it('POST /chat/threads creates group thread with agent_ids', async () => {
@@ -1010,9 +1060,59 @@ describe('Chat multi-agent dispatch', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.message_id).toBe('placeholder-uuid');
-    // Direct thread response has no dispatched/skipped/failed arrays
-    expect(res.body.dispatched).toBeUndefined();
+    // app#512: the direct-thread response now carries the same
+    // dispatched/skipped/failed arrays the group-thread response already
+    // does, so a caller can tell success from failure without guessing at
+    // what a bare message_id points to. message_id stays for backward
+    // compatibility with callers written against the old response.
+    expect(res.body.dispatched).toEqual([{ agent_id: 'agent-uuid', message_id: 'placeholder-uuid' }]);
+    expect(res.body.failed).toEqual([]);
     expect(mockDispatchChatWork).toHaveBeenCalledTimes(1);
+  });
+
+  it('POST /chat/threads/:id/messages direct thread dispatch failure is reported, not silently 201d (app#512)', async () => {
+    // THE ASSERTION THAT MATTERS: a direct-thread dispatch failure must be
+    // DISTINGUISHABLE from a success in the response body — not merely
+    // return the same 201 both ways, which is exactly what the pre-fix code
+    // did. dispatchToAgents already marks the placeholder chat_messages row
+    // status='error' in the database on this path; before this fix, nothing
+    // in the HTTP response said so.
+    mockDispatchChatWork.mockRejectedValue(new Error('Connection refused'));
+
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1 }] })  // isParticipant
+      .mockResolvedValueOnce({ rows: [{ type: 'direct' }] })  // getThreadType
+      .mockResolvedValueOnce({ rows: [{ participant_id: 'agent-uuid' }] })  // getThreadAgents
+      .mockResolvedValueOnce({
+        rows: [{ id: 'agent-uuid', agent_id: 'test-agent', name: 'Test', status: 'running', work_token: 'wt', models: ['gpt-4o-mini'] }],
+      })
+      .mockResolvedValueOnce({ rows: [] })  // elevated scope
+      .mockResolvedValueOnce({ rows: [] })  // concurrency guard
+      .mockResolvedValueOnce({ rows: [{ id: 'user-msg', seq: 1 }] })  // INSERT user message
+      .mockResolvedValueOnce({ rows: [] })  // UPDATE thread timestamp
+      .mockResolvedValueOnce({ rows: [{ role: 'user', content: 'Hello' }] })  // message history
+      .mockResolvedValueOnce({ rows: [{ id: 'placeholder-uuid' }] })  // placeholder
+      .mockResolvedValueOnce({ rowCount: 1 });  // UPDATE placeholder to error
+
+    const res = await request(app)
+      .post('/chat/threads/thread-1/messages')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ message: 'How are you?' });
+
+    expect(res.status).toBe(201);
+    // Not just "failed is non-empty" — dispatched must be EMPTY too, so this
+    // shape cannot be produced by a success. A test asserting only
+    // `res.status === 201` would pass against the pre-fix code as well,
+    // since that code returned 201 unconditionally either way.
+    expect(res.body.dispatched).toEqual([]);
+    expect(res.body.failed).toHaveLength(1);
+    expect(res.body.failed[0]).toEqual({
+      agent_id: 'agent-uuid', message_id: 'placeholder-uuid', reason: 'dispatch_failed',
+    });
+    // The backward-compat message_id still resolves — to the FAILED
+    // placeholder, since dispatched is empty — and now the caller has
+    // `failed` to tell that apart from a real dispatch.
+    expect(res.body.message_id).toBe('placeholder-uuid');
   });
 
   it('POST /chat/threads/:id/messages dispatch failure marks placeholder as error (I14a)', async () => {
