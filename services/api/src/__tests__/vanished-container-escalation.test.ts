@@ -121,13 +121,24 @@ describe('deleted is escalated, stopped is not', () => {
     // The same demotion, the same `stopped`, no escalation — which is the
     // entire point of having kept the two apart. If this ever notifies, the
     // distinction has collapsed again and the test above proves nothing.
-    selectAgents([agentRow()]);
+    //
+    // container_state: 'exited', not the fixture default 'running' — app#534
+    // made a first sighting of "exited" a record-only, non-demoting write
+    // (`unless-stopped` gets one pass to revive it), so this row is already
+    // past that: it represents the SECOND pass, the one where demotion
+    // actually fires. `statusUpdates()` alone would pass on a first-sighting
+    // fixture too, since that record-only write is also an `UPDATE agents`
+    // call — it does not by itself prove a DEMOTION happened, only that some
+    // write did. Asserting the written status is what makes this test mean
+    // what its name says.
+    selectAgents([agentRow({ container_state: 'exited' })]);
     mockContainerInspect.mockResolvedValue(container('exited'));
 
     await runReconcilePass();
 
-    expect(statusUpdates()).toHaveLength(1);   // it WAS demoted
-    expect(mockNotify).not.toHaveBeenCalled(); // and said nothing about it
+    expect(statusUpdates()).toHaveLength(1);
+    expect(statusUpdates()[0][1][0]).toBe('stopped'); // it WAS demoted, not just recorded
+    expect(mockNotify).not.toHaveBeenCalled();         // and said nothing about it
   });
 
   it('an unverifiable container is not escalated either — cannot tell is not deleted', async () => {
