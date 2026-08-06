@@ -9,6 +9,15 @@ jobs:
   smoke:
     name: Auth theme smoke tests
     runs-on: ubuntu-latest
+    # No timeout here meant a hang inherited GitHub's 6-hour job default — a
+    # dispatched run was observed stuck in the test step for 20+ minutes with
+    # nothing to catch it. 10 minutes covers a real pass with room to spare
+    # (npm ci is cached; `playwright install --with-deps chromium` is
+    # typically 1-2 minutes on a cache miss; the auth project is a single
+    # spec file, 9 lightweight assertions against page load/computed-style,
+    # normally seconds) while still surfacing a hang within single-digit
+    # minutes instead of hours.
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -36,8 +45,18 @@ jobs:
       # own `if: always()`, independent of this flag — continue-on-error
       # added nothing to that and only suppressed the one thing that
       # mattered: a real production auth regression failing this job.
+      #
+      # A bare `npx playwright test` runs every project in
+      # tests/e2e/playwright.config.ts — smoke, auth, and app, ten spec
+      # files — not the auth theme this job's name and its
+      # deploy-auth-success trigger both promise. Eight of the app-project
+      # specs write to production (upload-and-delete, create workflow,
+      # start agent) and are app#514's subject; this job has no credentials
+      # for them and was never meant to run them. --project=auth scopes it
+      # to auth-theme.spec.ts against auth.hill90.com, matching what it is
+      # actually wired to.
       - name: Run smoke tests
-        run: npx playwright test
+        run: npx playwright test --project=auth
         working-directory: tests/e2e
 
       - name: Upload test report
