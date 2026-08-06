@@ -8,19 +8,35 @@ name: Manual Deploy App (Prod)
 # the name should lose the prefix at the same time.
 #
 # Hill90's deploy.yml also triggers on push to main behind path filters. This one
-# does not, for two reasons:
+# does not. The reason is one, not two, and the two the original text gave were
+# both false by 2026-08-06 — corrected here rather than left to mislead the next
+# person deciding whether to deploy, since this header is what they will read.
 #
-#   1. This app has never been deployed. The first run of a deploy path should be
-#      someone choosing to run it, not a merge doing it.
-#   2. Hill90's own runbook records an unattended push-triggered deploy as a risk
-#      (§4.5): a PR touching a filtered path fires a production deploy on merge,
-#      and one of Hill90's PRs was held for exactly that reason.
+#   THE REASON THAT HOLDS. Hill90's own runbook records an unattended
+#   push-triggered deploy as a risk (§4.5): a PR touching a filtered path fires a
+#   production deploy on merge, and one of Hill90's PRs was held for exactly that
+#   reason. That argument is unaffected by how many times this path has run.
 #
-# ci.yml in this repo is workflow_dispatch-only on the same reasoning, so this
-# matches the repository's existing posture rather than introducing a new one.
+#   WHAT WAS FALSE, AND WHY IT MATTERED. The header said "this app has never been
+#   deployed" and that "the first run of a deploy path should be someone choosing
+#   to run it". Measured 2026-08-06: 125 runs, 115 of them successful, the first
+#   on 2026-07-29 and the most recent that same morning. It also said "ci.yml in
+#   this repo is workflow_dispatch-only on the same reasoning" — ci.yml runs on
+#   `pull_request` and on `push` to main, and has throughout. Anyone reading this
+#   header to decide whether deploying was routine was being told the opposite of
+#   the truth.
 #
-# A push trigger can be added once the path has actually run and the deploy is
-# boring. It is not boring yet.
+#   The closing line, "a push trigger can be added once the path has actually run
+#   and the deploy is boring — it is not boring yet", has therefore had its stated
+#   condition met for some time. Whether to actually add one is a real trade
+#   against §4.5 above and is NOT settled here: it is an open decision, tracked as
+#   an issue, and it should be made against what is true now rather than against
+#   this paragraph's former claims.
+#
+# HOW THIS ROTTED. Nothing checks a comment. The claims were true the day they
+# were written and nothing was watching for the day they stopped being true —
+# the same shape as app#517, where a spec kept pointing at a realm deleted a week
+# earlier because the workflow that would have noticed had never run.
 
 on:
   workflow_dispatch:
