@@ -242,6 +242,67 @@ describe('AgentDetailClient', () => {
     expect(screen.getByText('ResearchBot')).toBeInTheDocument()
   })
 
+  // This sweep's finding #1/#2: Start/Stop/Delete/Clone/Assign-Skill/
+  // Remove-Skill/Reconcile all had `res.json()` on the failure branch with
+  // no `.catch()`, and an outer catch that only `console.error`'d — so a
+  // non-JSON error body (a 502/504 from a proxy timeout) made the action
+  // fail completely silently. THE ASSERTION THAT MATTERS is not "no
+  // unhandled rejection" — a version that swallows the error into silence
+  // would pass that too, which is the same defect wearing a different coat
+  // (hit twice already today, #513 and #518). What has to be checked is
+  // whether the USER sees something: a toast with text in it.
+  describe('a non-JSON error body no longer fails silently (this sweep)', () => {
+    it('Start shows a toast, not silence, when the server answers with a body res.json() cannot parse', async () => {
+      mockFetchDefaults()
+      const defaultImpl = mockFetch.getMockImplementation()!
+      mockFetch.mockImplementation((url: string, opts?: any) => {
+        if (url === '/api/agents/uuid-1/start' && opts?.method === 'POST') {
+          return Promise.resolve({ ok: false, status: 502, json: () => Promise.reject(new Error('not json')) })
+        }
+        return defaultImpl(url, opts)
+      })
+
+      render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+      await waitFor(() => {
+        expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+      })
+
+      // MOCK_AGENT.status is 'stopped', so the visible action is Start.
+      fireEvent.click(screen.getByRole('button', { name: 'Start' }))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('toast-error')).toBeInTheDocument()
+      })
+      expect(screen.getByTestId('toast-error')).toHaveTextContent('HTTP 502')
+    })
+
+    it('Delete shows a toast, not silence, and does not navigate away, on the same failure shape', async () => {
+      mockFetchDefaults()
+      const defaultImpl = mockFetch.getMockImplementation()!
+      mockFetch.mockImplementation((url: string, opts?: any) => {
+        if (url === '/api/agents/uuid-1' && opts?.method === 'DELETE') {
+          return Promise.resolve({ ok: false, status: 502, json: () => Promise.reject(new Error('not json')) })
+        }
+        return defaultImpl(url, opts)
+      })
+
+      render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+      await waitFor(() => {
+        expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('toast-error')).toBeInTheDocument()
+      })
+      expect(screen.getByTestId('toast-error')).toHaveTextContent('HTTP 502')
+      // The believed-saved-and-lost case in the other direction: a failed
+      // delete must not navigate away as though it had succeeded.
+      expect(mockPush).not.toHaveBeenCalled()
+    })
+  })
+
   it('clicking Configuration tab shows skills runtime summary', async () => {
     render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
 

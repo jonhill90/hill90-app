@@ -136,38 +136,49 @@ export default function AgentsClient({ session }: { session: Session }) {
       delete next[agentId]
       return next
     })
+    // The bulk siblings below (handleBulkStart/handleBulkStop/handleBulkDelete)
+    // already get this right: each per-item failure is caught individually and
+    // always alerted. This single-agent path was the one twin left out — its
+    // `res.json()` calls had no `.catch()` fallback, and this function's own
+    // outer catch only `console.error`'d, so a non-JSON error body (a 502/504
+    // from a proxy timeout, not a hypothetical) made Start/Stop/Restart fail
+    // completely silently: the button just stopped loading.
     try {
       if (action === 'restart') {
         // Stop then start
         const stopRes = await fetch(`/api/agents/${agentId}/stop`, { method: 'POST' })
         if (!stopRes.ok) {
-          const data = await stopRes.json()
+          const data = await stopRes.json().catch(() => ({}))
           alert(data.error || 'Failed to stop agent')
           return
         }
         // Brief pause for container cleanup
         await new Promise(r => setTimeout(r, 1000))
         const startRes = await fetch(`/api/agents/${agentId}/start`, { method: 'POST' })
-        const startData = await startRes.json()
         if (!startRes.ok) {
+          const startData = await startRes.json().catch(() => ({}))
           alert(startData.error || 'Failed to start agent')
           return
         }
+        const startData = await startRes.json().catch(() => ({}))
         if (Array.isArray(startData.warnings) && startData.warnings.length > 0) {
           setStartWarnings(prev => ({ ...prev, [agentId]: startData.warnings }))
         }
       } else {
         const res = await fetch(`/api/agents/${agentId}/${action}`, { method: 'POST' })
-        const data = await res.json()
         if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
           alert(data.error || `Failed to ${action} agent`)
-        } else if (action === 'start' && Array.isArray(data.warnings) && data.warnings.length > 0) {
-          setStartWarnings(prev => ({ ...prev, [agentId]: data.warnings }))
+        } else {
+          const data = await res.json().catch(() => ({}))
+          if (action === 'start' && Array.isArray(data.warnings) && data.warnings.length > 0) {
+            setStartWarnings(prev => ({ ...prev, [agentId]: data.warnings }))
+          }
         }
       }
       await fetchData()
-    } catch (err) {
-      console.error(`Failed to ${action} agent:`, err)
+    } catch {
+      alert(`Failed to ${action} agent: the request did not complete`)
     } finally {
       setActionLoading(null)
     }
