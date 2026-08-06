@@ -18,3 +18,25 @@ export function isValidCronExpression(expr: string): boolean {
     return false;
   }
 }
+
+/**
+ * The single next-run-time computation for every write path that sets
+ * next_run_at. Moved here from workflow-scheduler.ts (app#488) so
+ * routes/workflows.ts's create path can compute the same value the
+ * scheduler would — previously only the scheduler could ever populate
+ * next_run_at, via a one-time sweep at process boot, which left every
+ * workflow created after boot stuck at next_run_at = NULL until a restart.
+ *
+ * Throws on an unparseable cron; callers that already validated with
+ * isValidCronExpression (same underlying parse) should not see it throw in
+ * practice, but callers reached without that check first (i.e.
+ * workflow-scheduler.ts's own callers, reading a cron already stored in the
+ * database) still need to handle it. `cronExpr` falsy (a webhook-triggered
+ * workflow, which stores no schedule_cron by design) is not an error and
+ * returns null without throwing.
+ */
+export function computeNextRun(cronExpr: string | null): Date | null {
+  if (!cronExpr) return null;
+  const interval = CronExpressionParser.parse(cronExpr);
+  return interval.next().toDate();
+}

@@ -24,7 +24,7 @@ import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { isAdmin } from '../helpers/elevated-scope';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
-import { isValidCronExpression } from '../helpers/cron';
+import { isValidCronExpression, computeNextRun } from '../helpers/cron';
 
 const router = Router();
 
@@ -126,9 +126,32 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       ? crypto.createHash('sha256').update(webhookToken).digest('hex')
       : null;
 
+    // app#488: the scheduler only ever computed next_run_at for a workflow
+    // that didn't have one via a ONE-TIME sweep at process boot
+    // (initializeNextRuns) — tick() itself only polls
+    // `next_run_at <= NOW()`, it never looks for NULL. A workflow created
+    // any time after boot (the overwhelmingly common case for a long-lived
+    // process) was written with next_run_at = NULL and stayed that way,
+    // indistinguishable from a legitimate webhook-triggered workflow, until
+    // someone happened to restart the API. Computing it here — with the
+    // exact function the scheduler itself uses, so "accepted at creation"
+    // can never drift from "the value the scheduler would have computed" —
+    // closes the gap at its source instead of teaching the scheduler to
+    // poll for NULL rows on every tick. initializeNextRuns() stays as a
+    // backstop for genuine stragglers (e.g. a row where this computation
+    // failed transiently), not the only path for the common case.
+    //
+    // The cron was already validated by isValidCronExpression above, backed
+    // by the same cron-parser call computeNextRun makes, so this is not
+    // expected to throw here in practice — but it is not re-guarded with
+    // its own try/catch, because a throw at this point means the two checks
+    // have silently diverged, which is a bug worth surfacing as a 500, not
+    // masking as a workflow silently created with no schedule.
+    const nextRunAt = triggerType === 'webhook' ? null : computeNextRun(schedule_cron);
+
     const { rows } = await getPool().query(
-      `INSERT INTO workflows (name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled, created_by, trigger_type, webhook_token_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO workflows (name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled, created_by, trigger_type, webhook_token_hash, next_run_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING ${PUBLIC_COLUMNS}`,
       [
         name,
@@ -142,6 +165,7 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
         user.sub,
         triggerType,
         webhookTokenHash,
+        nextRunAt,
       ]
     );
 
