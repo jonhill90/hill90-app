@@ -544,6 +544,34 @@ To deploy anyway, knowing login is broken: ALLOW_CLIENT_SECRET_MISMATCH=1"
     info "revision stamp: ${DEPLOY_REVISION:0:12}"
 
     docker compose -p "$project_name" "${files[@]}" build --parallel
+
+    # A build succeeding is not evidence the label landed on the IMAGE —
+    # app#558. hill90/knowledge is built here from docker-compose.knowledge.yml
+    # AND separately by build-agentbox-images.yml (agentbox copies the akm CLI
+    # out of it), and only the latter passed --build-arg GIT_REVISION; this
+    # compose build had no `args:`, so the Dockerfile's ARG default applied and
+    # the image came out labelled the literal string "unstamped" regardless of
+    # what commit built it. The CONTAINER label two lines below (via compose
+    # `labels:`) was correctly stamped the whole time, which is why nobody
+    # noticed — check_deploy_drift.sh reads the container, not the image.
+    # Borrowed from build-agentbox-images.yml's own "Verify the images exist
+    # and carry the revision" step: a deploy that ships an unverifiable image
+    # should not be quiet about it. Scoped to knowledge, the one stack whose
+    # Dockerfile actually defines `ARG GIT_REVISION`/`LABEL com.hill90.revision`
+    # — the other four deployed-by-this-script images (api, ai, ui, mcp) have
+    # no such ARG to check, and asserting one would fail against Dockerfiles
+    # that were never built to carry it.
+    if [ "$stack" = "knowledge" ]; then
+        got="$(docker image inspect -f '{{index .Config.Labels "com.hill90.revision"}}' hill90/knowledge:latest 2>/dev/null || true)"
+        if [ -z "$got" ]; then
+            die "hill90/knowledge:latest carries no com.hill90.revision label. The image cannot say what commit it is."
+        fi
+        if [ "$got" != "$DEPLOY_REVISION" ]; then
+            die "hill90/knowledge:latest is stamped ${got}, expected ${DEPLOY_REVISION}. The compose build did not receive GIT_REVISION."
+        fi
+        success "hill90/knowledge:latest carries com.hill90.revision=${got:0:12}"
+    fi
+
     docker compose -p "$project_name" "${files[@]}" pull --ignore-buildable
     docker compose -p "$project_name" "${files[@]}" up -d
 
