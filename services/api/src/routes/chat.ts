@@ -2185,6 +2185,7 @@ export async function chatCallbackHandler(req: Request, res: Response): Promise<
 
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.warn('[chat-callback] rejected: missing or malformed Authorization header');
     res.status(401).json({ error: 'unauthorized' });
     return;
   }
@@ -2193,6 +2194,16 @@ export async function chatCallbackHandler(req: Request, res: Response): Promise<
   const expected = Buffer.from(configuredToken);
   const received = Buffer.from(token);
   if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
+    // Never log `token`/`received` here — only that a mismatch occurred.
+    // The comparison above IS constant-time (crypto.timingSafeEqual with a
+    // length pre-check before it), so this line adds no timing information
+    // either way. The reason to withhold the value: the realistic trigger
+    // is CHAT_CALLBACK_TOKEN rotation drift between this API and agentbox,
+    // not an attack, and the presented value is a credential regardless of
+    // whether it matches — container logs are shipped to and retained in
+    // Loki, the same worse-leak-surface reasoning sanitizeDispatchReason
+    // already applies to a work_token elsewhere in this file.
+    console.warn('[chat-callback] rejected: a callback presented a token that did not match');
     res.status(401).json({ error: 'unauthorized' });
     return;
   }
