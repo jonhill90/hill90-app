@@ -1263,19 +1263,42 @@ router.post('/threads/:id/messages', requireRole('user'), async (req: Request, r
       return;
     }
 
-    // Create user message
-    const { rows: [userMsg] } = await pool.query(
-      `INSERT INTO chat_messages (thread_id, author_id, author_type, role, content, status, idempotency_key, target_agents)
-       VALUES ($1, $2, 'human', 'user', $3, 'complete', $4, $5)
-       RETURNING id, seq`,
-      [threadId, user.sub, message.trim(), idempotency_key || null, targetAgentsJson ? JSON.stringify(targetAgentsJson) : null]
-    );
-
-    // Update thread timestamp
-    await pool.query(
-      `UPDATE chat_threads SET updated_at = NOW() WHERE id = $1`,
-      [threadId]
-    );
+    // Create user message and bump the thread's timestamp together.
+    //
+    // These were two independent pool.query() calls, each committing on its
+    // own. A failure on the SECOND — the thread UPDATE, or (before dispatch
+    // is even reached) the history SELECT or participant lookups just below
+    // — left the INSERT already committed: a 'complete' user message with no
+    // assistant reply ever dispatched for it, and the caller told the send
+    // failed. Without an idempotency_key a retry does not find it (it only
+    // checks for a PENDING agent message, and this row is the human side,
+    // already 'complete') and creates a second, duplicate message instead —
+    // so the first sits there forever, indistinguishable from a message an
+    // agent simply hasn't answered yet. Same defect family as
+    // discord-internal.ts's relay path and the original POST /threads here;
+    // fixed the same way, one transaction over the writes that must agree.
+    const client = await pool.connect();
+    let userMsg: { id: string; seq: number };
+    try {
+      await client.query('BEGIN');
+      const { rows: [msg] } = await client.query(
+        `INSERT INTO chat_messages (thread_id, author_id, author_type, role, content, status, idempotency_key, target_agents)
+         VALUES ($1, $2, 'human', 'user', $3, 'complete', $4, $5)
+         RETURNING id, seq`,
+        [threadId, user.sub, message.trim(), idempotency_key || null, targetAgentsJson ? JSON.stringify(targetAgentsJson) : null]
+      );
+      userMsg = msg;
+      await client.query(
+        `UPDATE chat_threads SET updated_at = NOW() WHERE id = $1`,
+        [threadId]
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => { /* the connection may already be gone */ });
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
     // Load message history for dispatch
     const { rows: history } = await pool.query(
