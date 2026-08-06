@@ -47,6 +47,13 @@ tests/e2e/playwright-report/
 .vscode/
 .idea/
 
+# Per-agent git worktrees (git worktree add .worktrees/<branch> -b <branch>),
+# so one Claude Code lane editing a branch cannot collide with another lane's
+# uncommitted changes in the same shared checkout — the only thing that
+# actually prevents it, since two processes editing one working tree can
+# still stomp on each other regardless of how carefully each commits.
+.worktrees/
+
 # Local development stack (scripts/local.sh)
 .env.local
 .local/
