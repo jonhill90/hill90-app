@@ -217,9 +217,70 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
     const { name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled } = req.body;
 
-    if (schedule_cron && !isValidCronExpression(schedule_cron)) {
+    // app#580: was `if (schedule_cron && !isValidCronExpression(...))` — a
+    // truthy check, which SKIPPED validation entirely for an empty string.
+    // `COALESCE($4, schedule_cron)` only falls back to the existing value on
+    // SQL NULL, and an empty string is not NULL, so `schedule_cron: ""`
+    // would have written an unvalidated empty string straight into the
+    // column. Changed to `!== undefined && !== null` so any PROVIDED value,
+    // including '', now reaches isValidCronExpression — which itself was
+    // just corrected (helpers/cron.ts) to reject '' explicitly, since
+    // cron-parser alone does not throw on it. Without that second fix this
+    // check alone would not have been enough: isValidCronExpression('')
+    // used to return true.
+    if (schedule_cron !== undefined && schedule_cron !== null && !isValidCronExpression(schedule_cron)) {
       res.status(400).json({ error: 'Invalid cron expression' });
       return;
+    }
+
+    // app#580: next_run_at was completely absent from the UPDATE below — not
+    // even COALESCE'd, just never mentioned — so Postgres left it exactly as
+    // it was. Read the row's CURRENT enabled/schedule_cron/trigger_type
+    // first, both to detect the two transitions that make the stored value
+    // wrong and to compute against the correct POST-UPDATE cron (mirrors
+    // the UPDATE's own COALESCE logic) without a second write.
+    const { rows: existingRows } = await getPool().query(
+      `SELECT enabled, schedule_cron, trigger_type FROM workflows WHERE id = $1 ${admin ? '' : 'AND created_by = $2'}`,
+      admin ? [req.params.id] : [req.params.id, user.sub]
+    );
+    if (existingRows.length === 0) {
+      res.status(404).json({ error: 'Workflow not found' });
+      return;
+    }
+    const existing = existingRows[0];
+
+    const resultingSchedule = schedule_cron ?? existing.schedule_cron;
+    const resultingEnabled = enabled ?? existing.enabled;
+    const scheduleChanged = typeof schedule_cron === 'string' && schedule_cron !== existing.schedule_cron;
+    const reEnabled = existing.enabled === false && resultingEnabled === true;
+
+    // Recompute on the two transitions that can make the stored value
+    // wrong. Independent of the resulting `enabled` state — matching
+    // app#488's own POST /workflows, which computes next_run_at from the
+    // cron alone and does not gate it on `enabled` either — so a cron edit
+    // made WHILE a workflow is disabled does not leave a second, separate
+    // stale value sitting there until the workflow happens to be
+    // re-enabled later. tick() itself still filters `WHERE enabled = true`,
+    // so this is inert for a disabled row either way; keeping the column
+    // accurate regardless just means "what would next fire, per the
+    // current cron" never lies while inspected (UI, API response) during
+    // the time a workflow happens to be off.
+    //
+    //   - schedule_cron changing: the stored value was computed from the
+    //     OLD cron and is now simply wrong for the new one.
+    //   - false -> true (re-enable): the stored value may be stale from
+    //     however long the workflow sat disabled — possibly far in the
+    //     past — which would make it fire on the very next tick instead of
+    //     at its real next occurrence. Recomputed fresh from NOW, the same
+    //     never-catch-up-a-backlog behavior executeWorkflow already applies
+    //     when it skips a run and still advances next_run_at forward rather
+    //     than leaving a past due-time in place.
+    //   - Disabling (true -> false) alone, with no cron change, is NOT one
+    //     of these: nothing about the due-time itself became wrong, only
+    //     whether it is currently consulted. Left untouched.
+    let nextRunAt: Date | null = null; // null = do not touch (COALESCE keeps existing)
+    if (existing.trigger_type !== 'webhook' && (scheduleChanged || reEnabled)) {
+      nextRunAt = computeNextRun(resultingSchedule);
     }
 
     const { rows } = await getPool().query(
@@ -232,12 +293,13 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
         output_type = COALESCE($6, output_type),
         output_config = COALESCE($7, output_config),
         enabled = COALESCE($8, enabled),
+        next_run_at = COALESCE($9, next_run_at),
         updated_at = NOW()
-       WHERE id = $9 ${admin ? '' : 'AND created_by = $10'}
+       WHERE id = $10 ${admin ? '' : 'AND created_by = $11'}
        RETURNING ${PUBLIC_COLUMNS}`,
       admin
-        ? [name, description, agent_id, schedule_cron, prompt, output_type, output_config ? JSON.stringify(output_config) : null, enabled, req.params.id]
-        : [name, description, agent_id, schedule_cron, prompt, output_type, output_config ? JSON.stringify(output_config) : null, enabled, req.params.id, user.sub]
+        ? [name, description, agent_id, schedule_cron, prompt, output_type, output_config ? JSON.stringify(output_config) : null, enabled, nextRunAt, req.params.id]
+        : [name, description, agent_id, schedule_cron, prompt, output_type, output_config ? JSON.stringify(output_config) : null, enabled, nextRunAt, req.params.id, user.sub]
     );
 
     if (rows.length === 0) {
