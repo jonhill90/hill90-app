@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     # Internal service token for /internal/* endpoints
     model_router_internal_service_token: str = ""
 
+    # app#548. /internal/embeddings has no agent JWT and so no per-caller
+    # policy to check against — whose budget this spend should bill to is
+    # a real, undecided design question (see the issue). This is NOT that
+    # decision: it is a coarse, service-wide ceiling on the endpoint as a
+    # whole, so "no spend without a check" is true today regardless of how
+    # attribution is eventually resolved. Generous by design — the goal is
+    # catching a runaway caller, not metering a legitimate one; the one
+    # known legitimate caller is services/knowledge's ingest/search/memory
+    # traffic, none of which should approach these numbers in practice.
+    internal_embeddings_max_rpm: int = 300
+    internal_embeddings_max_tokens_per_day: int = 5_000_000
+
     # AES-256-GCM key for decrypting user provider API keys (BYOK)
     provider_key_encryption_key: str = ""
 
