@@ -9,8 +9,8 @@
  */
 
 import { getPool } from '../db/pool';
-import { CronExpressionParser } from 'cron-parser';
 import { dispatchChatWork } from './chat-dispatch';
+import { computeNextRun } from '../helpers/cron';
 
 const CHECK_INTERVAL_MS = 60_000;
 const ADVISORY_LOCK_ID = 900_001; // arbitrary unique ID for workflow scheduler
@@ -242,19 +242,13 @@ export async function executeWorkflow(pool: any, wf: any): Promise<void> {
   );
 }
 
-// Throws (does not swallow) on an unparseable cron — app#487. Its three
-// callers above are each responsible for deciding what "the cron I was
-// given can't be parsed" means for their own moment (skip a tick, abort
-// initialization for this row, or note it after a run), and each now
-// records that failure via recordCronFailure rather than letting `next`
-// silently become null with no trace of why. `cronExpr` falsy (a
-// webhook-triggered workflow, which stores no schedule_cron by design) is
-// not an error and returns null without throwing.
-function computeNextRun(cronExpr: string | null): Date | null {
-  if (!cronExpr) return null;
-  const interval = CronExpressionParser.parse(cronExpr);
-  return interval.next().toDate();
-}
+// computeNextRun moved to helpers/cron.ts (app#488), so routes/workflows.ts's
+// create path can compute the same next_run_at the scheduler would, instead
+// of relying on the scheduler's one-time startup sweep to ever set it. Its
+// three callers above are each still responsible for deciding what "the cron
+// I was given can't be parsed" means for their own moment (skip a tick, abort
+// initialization for this row, or note it after a run) — that throwing
+// behavior (app#487) is unchanged by the move, only its location is.
 
 // Makes an unparseable cron visible the same way a dispatch failure
 // already is: a workflow_runs row with status='error' and a reason, so a
