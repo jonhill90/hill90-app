@@ -318,6 +318,24 @@ router.post('/:id/run', requireRole('user'), async (req: Request, res: Response)
     );
     const threadId = threadRows[0].id;
 
+    // app#542: set thread_id on the run THE MOMENT it is known, not after
+    // dispatch and the trailing updates. It used to be set last, after the
+    // fire-and-forget dispatchChatWork() call below — dispatch itself
+    // cannot fail this write (it is fire-and-forget), but if EITHER of the
+    // two statements that used to sit after it threw, the outer catch
+    // labelled the run 'error' correctly while thread_id stayed NULL
+    // forever: a real chat thread and a real dispatch already happened,
+    // orphaned from the run record a human would use to find them. Not a
+    // half-write masked by a different value — this write simply never
+    // reached that column, because a later statement threw first. Setting
+    // it here closes the window entirely rather than covering specific
+    // failure branches, the same "self-identifying beats detectable" shape
+    // as runId being hoisted above.
+    await pool.query(
+      `UPDATE workflow_runs SET thread_id = $1 WHERE id = $2`,
+      [threadId, run.id]
+    );
+
     // Add agent as participant
     await pool.query(
       `INSERT INTO chat_participants (thread_id, participant_id, participant_type)
@@ -391,12 +409,6 @@ router.post('/:id/run', requireRole('user'), async (req: Request, res: Response)
     await pool.query(
       `UPDATE workflows SET last_run_at = NOW(), updated_at = NOW() WHERE id = $1`,
       [wf.id]
-    );
-
-    // Update run with thread reference
-    await pool.query(
-      `UPDATE workflow_runs SET thread_id = $1 WHERE id = $2`,
-      [threadId, run.id]
     );
 
     res.json({ ...run, thread_id: threadId, status: 'running' });
