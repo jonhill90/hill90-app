@@ -6,15 +6,23 @@ import { test, expect, type Page } from "@playwright/test";
  * Verifies the full lifecycle: start agent → create chat thread → send command →
  * verify response → inspect Live Session (terminal + browser tabs).
  *
- * Requires env vars:
- *   E2E_USERNAME — Keycloak user (default: jon)
- *   E2E_PASSWORD — Keycloak password
+ * Requires env vars, BOTH explicitly set — app#514: a username default
+ * that resolves independently of the password guard is what let a human
+ * arm a production account by setting only the password. There is no
+ * default for either var; a missing one skips the suite rather than
+ * silently selecting an identity. This suite starts an agent and sends
+ * commands, so the identity it runs as matters.
+ *   E2E_USERNAME — this estate's documented test account: testuser01
+ *   E2E_PASSWORD — its password
  */
 
-const E2E_USERNAME = process.env.E2E_USERNAME || "jon";
-const E2E_PASSWORD = process.env.E2E_PASSWORD || "";
+const E2E_USERNAME = process.env.E2E_USERNAME ?? "";
+const E2E_PASSWORD = process.env.E2E_PASSWORD ?? "";
 
-test.skip(!E2E_PASSWORD, "E2E_PASSWORD not set — skipping agent chat flow E2E tests");
+test.skip(
+  !E2E_USERNAME || !E2E_PASSWORD,
+  "E2E_USERNAME and E2E_PASSWORD must both be set explicitly — skipping agent chat flow E2E tests"
+);
 
 /** Log in through Keycloak and return to the app. */
 async function login(page: Page) {
