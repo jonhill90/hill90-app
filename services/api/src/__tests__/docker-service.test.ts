@@ -255,6 +255,58 @@ describe('createAndStartContainer edge-network attach failure is signalled, not 
   });
 });
 
+describe('isContainerRunning (app#508)', () => {
+  const mockInspect = jest.fn();
+  const mockGetContainer = jest.fn().mockReturnValue({ inspect: mockInspect });
+
+  beforeEach(() => {
+    jest.resetModules();
+    mockInspect.mockReset();
+    mockGetContainer.mockClear();
+
+    jest.doMock('dockerode', () => {
+      return jest.fn().mockImplementation(() => ({
+        getContainer: mockGetContainer,
+      }));
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('POSITIVE CONTROL: a container in State.Status "running" resolves true', async () => {
+    const { isContainerRunning } = require('../services/docker');
+    mockInspect.mockResolvedValueOnce({ State: { Status: 'running' } });
+
+    await expect(isContainerRunning('app-discord-bot')).resolves.toBe(true);
+    expect(mockGetContainer).toHaveBeenCalledWith('app-discord-bot');
+  });
+
+  it('a container that exists but is stopped resolves false, not true', async () => {
+    const { isContainerRunning } = require('../services/docker');
+    mockInspect.mockResolvedValueOnce({ State: { Status: 'exited' } });
+
+    await expect(isContainerRunning('app-discord-bot')).resolves.toBe(false);
+  });
+
+  it('THE ASSERTION THAT MATTERS: a container that does not exist at all (404) resolves false, not throw', async () => {
+    const { isContainerRunning } = require('../services/docker');
+    const err: any = new Error('no such container');
+    err.statusCode = 404;
+    mockInspect.mockRejectedValueOnce(err);
+
+    await expect(isContainerRunning('app-discord-bot')).resolves.toBe(false);
+  });
+
+  it('an unrelated daemon/proxy error is NOT collapsed into false — it propagates, so the caller can tell "absent" from "could not check"', async () => {
+    const { isContainerRunning } = require('../services/docker');
+    mockInspect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    await expect(isContainerRunning('app-discord-bot')).rejects.toThrow('ECONNREFUSED');
+  });
+});
+
 describe('resolveAgentNetwork', () => {
   const { resolveAgentNetwork, AGENT_NETWORK, AGENT_SANDBOX_NETWORK } = require('../services/docker');
 
