@@ -72,7 +72,11 @@ async function initializeNextRuns(): Promise<void> {
   }
 }
 
-async function tick(): Promise<void> {
+// Exported so a test can call it — same rationale as executeWorkflow below:
+// the scheduler's unit of batch behavior was reachable only through a
+// 60-second timer, so app#469's per-item isolation had no way to be tested
+// against the actual loop until this was named.
+export async function tick(): Promise<void> {
   running = true;
   try {
     const pool = getPool();
@@ -98,8 +102,33 @@ async function tick(): Promise<void> {
          WHERE w.enabled = true AND w.next_run_at <= NOW()`
       );
 
+      // app#469. executeWorkflow can still throw from writes that sit
+      // outside its own internal try/catch — the initial workflow_runs
+      // insert, the agent-not-running skip's next_run_at update, and the
+      // final next_run_at advance after a normal run. Almost always a DB
+      // blip, not a defect in this workflow's own config or cron (every
+      // computeNextRun call site already has its own local try/catch that
+      // routes into recordCronFailure, so an invalid stored cron cannot
+      // reach here — checked, not assumed). Before this, ANY such throw
+      // aborted this entire loop: with dueWorkflows.length possibly 10,
+      // one workflow's bad luck this tick silently cost every workflow
+      // queued behind it, and the due-workflows query above has no ORDER
+      // BY, so which workflows got skipped was not even consistent from
+      // one tick to the next — this could read as sporadic flakiness
+      // across many workflows rather than one broken one. Contained here
+      // per item, and recorded against the workflow that actually failed,
+      // so a human looking at ITS history sees why — not swallowed, and
+      // not blamed on its neighbours.
       for (const wf of dueWorkflows) {
-        await executeWorkflow(pool, wf);
+        try {
+          await executeWorkflow(pool, wf);
+        } catch (err) {
+          console.error(
+            '[workflow-scheduler] executeWorkflow threw for workflow "%s" (%s) — containing so the rest of this batch still runs:',
+            wf.name, wf.id, err
+          );
+          await recordUnexpectedFailure(pool, wf.id, err);
+        }
       }
     } finally {
       // Release advisory lock
@@ -264,5 +293,29 @@ async function recordCronFailure(pool: any, workflowId: string, cronExpr: string
     );
   } catch (recordErr) {
     console.error('[workflow-scheduler] Failed to record cron failure for workflow %s:', workflowId, recordErr);
+  }
+}
+
+// app#469. The per-item catch in tick()'s loop routes here — self-contained
+// the same way recordCronFailure is, so a failure while recording THIS
+// failure can never re-escape and undo the very isolation it exists to
+// provide. Deliberately does NOT also try to advance next_run_at: the
+// exception that got us here already means at least one write for this
+// workflow failed moments ago, so another write attempted from inside a
+// catch block is more likely to fail the same way than to succeed. Leaving
+// next_run_at untouched means this workflow stays "due" and is retried on
+// the next tick — the same self-healing behavior every other unguarded
+// throw in this file already had by accident; this just makes it
+// deliberate and contained instead of accidental and batch-wide.
+async function recordUnexpectedFailure(pool: any, workflowId: string, err: unknown): Promise<void> {
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    await pool.query(
+      `INSERT INTO workflow_runs (workflow_id, status, error, completed_at, duration_ms)
+       VALUES ($1, 'error', $2, NOW(), 0)`,
+      [workflowId, `Scheduler tick failed for this workflow: ${message}`]
+    );
+  } catch (recordErr) {
+    console.error('[workflow-scheduler] Failed to record unexpected failure for workflow %s:', workflowId, recordErr);
   }
 }
