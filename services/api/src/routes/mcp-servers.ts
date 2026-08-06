@@ -42,7 +42,7 @@ const router = Router();
 // is ever reached.
 const VALID_TRANSPORTS = ['stdio', 'sse', 'http'];
 function invalidTransportError(transport: unknown): string | null {
-  if (transport === undefined || transport === null) return null;
+  if (!wasProvided(transport)) return null;
   if (!VALID_TRANSPORTS.includes(transport as string)) {
     return `transport must be one of: ${VALID_TRANSPORTS.join(', ')}`;
   }
@@ -251,9 +251,20 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     // unchanged" contract every other field here already has. There is no
     // decrypt-then-compare shortcut: the caller must send the whole config
     // to change any part of it, exactly like provider_connections' api_key.
+    //
+    // wasProvided(), not a bare `!== undefined` — this is the same bug the
+    // comment above already describes and the rest of this file already
+    // avoids (see `name`'s check a few lines up). An explicit
+    // `connection_config: null` used to pass the old `!== undefined` gate,
+    // encryptConfig(null) produced a real Buffer, and COALESCE saw a
+    // non-NULL value — so a client's own stored credential (a command's
+    // --token arg, an env block; the entire reason app#369 encrypted this
+    // column) was silently overwritten with an encryption of `{}`. Caught
+    // in review as the metadata bug's twin, on a credential field instead
+    // of a config option.
     let newEncrypted: Buffer | null = null;
     let newNonce: Buffer | null = null;
-    if (connection_config !== undefined) {
+    if (wasProvided(connection_config)) {
       const enc = encryptConfig(connection_config);
       newEncrypted = enc.encrypted;
       newNonce = enc.nonce;

@@ -307,13 +307,16 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     // `COALESCE($4, schedule_cron)` only falls back to the existing value on
     // SQL NULL, and an empty string is not NULL, so `schedule_cron: ""`
     // would have written an unvalidated empty string straight into the
-    // column. Changed to `!== undefined && !== null` so any PROVIDED value,
-    // including '', now reaches isValidCronExpression — which itself was
-    // just corrected (helpers/cron.ts) to reject '' explicitly, since
-    // cron-parser alone does not throw on it. Without that second fix this
-    // check alone would not have been enough: isValidCronExpression('')
-    // used to return true.
-    if (schedule_cron !== undefined && schedule_cron !== null && !isValidCronExpression(schedule_cron)) {
+    // column. Changed to wasProvided() so any PROVIDED value, including '',
+    // now reaches isValidCronExpression — which itself was just corrected
+    // (helpers/cron.ts) to reject '' explicitly, since cron-parser alone
+    // does not throw on it. Without that second fix this check alone would
+    // not have been enough: isValidCronExpression('') used to return true.
+    // #594 review: converged onto the shared helper from an inline
+    // `!== undefined && !== null` — behaviorally identical, but a second
+    // hand-written copy of the contract is exactly how it stops agreeing
+    // with the helper the next time the helper's definition changes.
+    if (wasProvided(schedule_cron) && !isValidCronExpression(schedule_cron)) {
       res.status(400).json({ error: 'Invalid cron expression' });
       return;
     }
@@ -323,7 +326,8 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     // value never corrupted the row — it threw a raw FK-violation, caught
     // by the generic catch below as an undifferentiated 500 instead of the
     // clean 404 POST already gives for the identical input. Same check.
-    if (agent_id !== undefined && agent_id !== null && !(await agentExists(getPool(), agent_id))) {
+    // Converged onto wasProvided(), same reasoning as schedule_cron above.
+    if (wasProvided(agent_id) && !(await agentExists(getPool(), agent_id))) {
       res.status(404).json({ error: 'Agent not found' });
       return;
     }

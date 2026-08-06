@@ -196,8 +196,14 @@ describe('PUT /workflows/:id and next_run_at (app#580)', () => {
 
     const updateCall = mockQuery.mock.calls.find((c) => /UPDATE workflows SET/.test(String(c[0])));
     const bound = updateCall![1] as unknown[];
-    // null = "do not touch" (COALESCE keeps the existing column value) —
-    // not a real value being written.
+    // #594 review: this test already sends enabled: false but only ever
+    // asserted on next_run_at (bound[8]) — nothing confirmed the enabled
+    // value itself (bound[7]) actually reaches the query as `false` rather
+    // than, say, being lost to a `||`/truthy check somewhere upstream. Both
+    // asserted now: `enabled: false` is genuinely written...
+    expect(bound[7]).toBe(false);
+    // ...and null = "do not touch" (COALESCE keeps the existing column
+    // value) — not a real value being written.
     expect(bound[8]).toBeNull();
   });
 

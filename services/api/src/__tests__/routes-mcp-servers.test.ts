@@ -413,6 +413,30 @@ describe('MCP Servers routes', () => {
       expect(encryptedParams.filter((p: unknown) => Buffer.isBuffer(p))).toHaveLength(0);
     });
 
+    // THE ASSERTION THAT MATTERS (#594 review, blocking): an explicit JSON
+    // `connection_config: null` used to pass the old `!== undefined` gate,
+    // encryptConfig(null) produced a real Buffer, and COALESCE saw a
+    // non-NULL value — silently overwriting whatever credential was
+    // already stored (a command's --token arg, an env block — the entire
+    // reason app#369 encrypts this column) with an encryption of `{}`.
+    // Same "not provided" contract this file already applies to name and
+    // transport, now proven for connection_config specifically rather than
+    // assumed from the pattern holding elsewhere.
+    it('PUT connection_config: null is treated as "not provided" — does NOT overwrite the stored credential', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER] });
+
+      await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: 'Renamed only', connection_config: null });
+
+      const [, params] = mockQuery.mock.calls[0];
+      const encryptedParams = params.filter((p: unknown) => p === null || Buffer.isBuffer(p));
+      // If this regresses, the failure is a Buffer showing up here — the
+      // encryption of `{}` that would have overwritten the real ciphertext.
+      expect(encryptedParams.filter((p: unknown) => Buffer.isBuffer(p))).toHaveLength(0);
+    });
+
     // POSITIVE CONTROL. Proves the assertions above can actually fail, not
     // just that they happen to pass — a query text that (wrongly) named the
     // encrypted columns must be caught, the same discipline as #359 and #367.
