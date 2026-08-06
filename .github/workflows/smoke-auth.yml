@@ -29,8 +29,14 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: tests/e2e
 
+      # Hill90#792 finding 3: continue-on-error here made this job green
+      # whatever Playwright found — the file had zero occurrences of
+      # `outcome`/`conclusion`, so nothing downstream ever read the real
+      # result. The report upload below is already unconditional via its
+      # own `if: always()`, independent of this flag — continue-on-error
+      # added nothing to that and only suppressed the one thing that
+      # mattered: a real production auth regression failing this job.
       - name: Run smoke tests
-        continue-on-error: true
         run: npx playwright test
         working-directory: tests/e2e
 
