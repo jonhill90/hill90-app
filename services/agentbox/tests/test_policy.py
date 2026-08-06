@@ -2,6 +2,7 @@
 
 import os
 import shutil
+from unittest.mock import patch
 
 import pytest
 
@@ -96,12 +97,45 @@ class TestCommandPolicy:
         assert result["success"] is False
         assert "denied pattern" in result["error"]
 
-    def test_timeout_clamped(self):
+    def test_timeout_clamped(self, tmp_path):
+        """The comment said "Timeout should be clamped" and the assertion
+        only checked `isinstance(result, dict)` — true whether or not
+        timeout=999 was actually clamped to max_timeout=10, since `echo
+        fast` finishes long before either value elapses. It was also true
+        regardless of whether the command even succeeded: the original
+        test never passed a real `cwd`, so `execute()`'s own default
+        (`/home/agentuser`) doesn't exist outside the real container —
+        verified directly, the command actually fails in a bare host
+        environment like this one, and `isinstance({"success": False,
+        ...}, dict)` is still `True`, so the old assertion never noticed.
+
+        Found during a "tests that cannot fail" sweep across hill90-app's
+        test suites, dispatched in this conversation. test_runtime.py's
+        own test_shell_command_timeout_clamped_to_max does this correctly
+        one layer up (mocking shell.execute_command to capture the
+        runtime's clamped value) — that pattern was available and not
+        applied here. Same idea, applied at the layer this test actually
+        calls: capture the real `timeout` kwarg CommandPolicy.execute
+        passes to subprocess.run. `cwd=str(tmp_path)` matches this file's
+        own test_short_name_execute_succeeds, the established way other
+        tests in this file make `echo` actually succeed.
+        """
         policy = CommandPolicy(max_timeout=10)
-        # Timeout should be clamped to max_timeout
-        result = policy.execute("echo fast", timeout=999)
-        # Should succeed since echo is fast
-        assert isinstance(result, dict)
+
+        captured = {}
+        real_run = __import__("subprocess").run
+
+        def spy_run(argv, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return real_run(argv, **kwargs)
+
+        with patch("app.policy.subprocess.run", side_effect=spy_run):
+            result = policy.execute("echo fast", timeout=999, cwd=str(tmp_path))
+
+        # THE ASSERTION THAT MATTERS: the value actually handed to the
+        # subprocess call, not merely that execute() returned a dict.
+        assert captured["timeout"] == 10
+        assert result["success"] is True
 
     def test_execute_echo(self, tmp_path):
         """Verify actual execution works with no allowlist."""
