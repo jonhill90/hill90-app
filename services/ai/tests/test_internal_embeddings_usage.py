@@ -92,6 +92,46 @@ async def test_internal_embeddings_records_usage_with_real_token_counts(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_internal_embeddings_propagates_upstream_error_status(monkeypatch):
+    """app#454. This is the producer side of the fix, not the consumer's
+
+    reaction to it: proxy_embeddings returning a non-200 result must make
+    THIS endpoint's own response carry that status, not silently default to
+    200 because FastAPI's JSONResponse does when status_code is omitted.
+    (The 429 arms above are this endpoint raising its OWN rate limit before
+    ever calling proxy_embeddings — they say nothing about propagating a
+    status LiteLLM itself returned.) Reverting the status_code=... argument
+    at the JSONResponse call in main.py must fail this exact assertion.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@fake-host:5432/db")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    conn = AsyncMock()
+    mock_log_usage = AsyncMock()
+    mock_proxy = AsyncMock(return_value={
+        "status_code": 500, "body": {"error": {"message": "upstream failure"}}, "headers": {},
+        "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
+    })
+
+    with patch.object(app_main, "get_db_conn", conn_ctx(conn)), \
+         patch.object(app_main, "log_usage", mock_log_usage), \
+         patch.object(app_main, "proxy_embeddings", mock_proxy), \
+         patch.object(app_main, "check_rate_limit", _ALLOWED_RATE), \
+         patch.object(app_main, "check_token_budget", _ALLOWED_BUDGET), \
+         patch.object(app_main, "get_settings", lambda: _Settings()), \
+         patch.object(app_main, "_http_client", MagicMock()):
+        req = FakeRequest({"model": "text-embedding-3-small", "input": ["hello world"]})
+        res = await app_main.internal_embeddings(req, authorization="Bearer svc-token")
+
+    assert res.status_code == 500
+
+    mock_log_usage.assert_called_once()
+    _, kwargs = mock_log_usage.call_args
+    assert kwargs["status"] == "error"
+
+
+@pytest.mark.asyncio
 async def test_internal_embeddings_records_usage_on_upstream_error(monkeypatch):
     """A proxy exception must also be recorded — same shape as /v1/embeddings'
     identical error path — so a failed internal call is not silently invisible
