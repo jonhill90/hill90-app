@@ -6,7 +6,6 @@ Python/FastAPI with MCP SDK
 import os
 
 import requests as http_requests
-from cryptography.hazmat.primitives import serialization
 from fastapi import Depends, FastAPI
 from jose import jwk
 
@@ -22,6 +21,13 @@ KEYCLOAK_JWKS_URI = os.environ.get(
     "KEYCLOAK_JWKS_URI",
     f"{KEYCLOAK_ISSUER}/protocol/openid-connect/certs",
 )
+# app#485. hill90-ui is the only realm client whose tokens carry this audience
+# (platform-realm.json's "hill90-api-audience" protocol mapper, attached to
+# hill90-ui only) — the same audience app-api's own callers already carry.
+# Not a secret — it's a public client identifier, the same shape as
+# services/ai's EXPECTED_AUDIENCE constant — so a plain default is fine here,
+# unlike KEYCLOAK_ISSUER above, where a wrong-but-valid value was the danger.
+KEYCLOAK_AUDIENCE = os.environ.get("KEYCLOAK_AUDIENCE", "hill90-api")
 
 # Simple in-memory JWKS cache
 _jwks_cache: dict | None = None
@@ -37,10 +43,7 @@ def _jwks_key_resolver(header: dict) -> str:
         for key in _jwks_cache.get("keys", []):
             if key.get("kid") == kid:
                 key_obj = jwk.construct(key)
-                return key_obj.public_key().public_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
-                ).decode()
+                return key_obj.to_pem().decode()
 
     # Fetch fresh JWKS
     resp = http_requests.get(KEYCLOAK_JWKS_URI, timeout=10)
@@ -50,10 +53,7 @@ def _jwks_key_resolver(header: dict) -> str:
     for key in _jwks_cache.get("keys", []):
         if key.get("kid") == kid:
             key_obj = jwk.construct(key)
-            return key_obj.public_key().public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            ).decode()
+            return key_obj.to_pem().decode()
 
     raise ValueError(f"Key with kid={kid!r} not found in JWKS")
 
@@ -61,6 +61,7 @@ def _jwks_key_resolver(header: dict) -> str:
 verify_token = make_verify_token(
     issuer=KEYCLOAK_ISSUER,
     get_signing_key=_jwks_key_resolver,
+    audience=KEYCLOAK_AUDIENCE,
 )
 
 

@@ -19,11 +19,13 @@ _public_pem = _public_key.public_bytes(
 ).decode()
 
 TEST_ISSUER = "https://auth.hill90.com/realms/platform"
+TEST_AUDIENCE = "hill90-api"
 
 # Build verify_token with test key — no JWKS fetch
 _verify_token = make_verify_token(
     issuer=TEST_ISSUER,
     get_signing_key=lambda _header: _public_pem,
+    audience=TEST_AUDIENCE,
 )
 
 # Minimal FastAPI app with auth dependency on a protected route
@@ -53,19 +55,34 @@ def test_invalid_token_returns_401():
 
 
 def test_wrong_issuer_returns_401():
-    token = _sign_token({"sub": "user1", "iss": "https://wrong-issuer.com", "exp": 9999999999})
+    token = _sign_token({"sub": "user1", "iss": "https://wrong-issuer.com", "aud": TEST_AUDIENCE, "exp": 9999999999})
     response = client.get("/protected", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
 
 
 def test_missing_exp_returns_401():
-    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER})
+    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER, "aud": TEST_AUDIENCE})
     response = client.get("/protected", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
 
 
 def test_valid_token_returns_200():
-    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER, "exp": 9999999999})
+    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER, "aud": TEST_AUDIENCE, "exp": 9999999999})
     response = client.get("/protected", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json()["sub"] == "user1"
+
+
+# app#485 — this is the shape that used to pass silently: a real, correctly
+# signed, correctly issued token, minted for a DIFFERENT client in the same
+# realm. Before the fix, verify_aud was False and this authenticated.
+def test_wrong_audience_returns_401():
+    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER, "aud": "grafana", "exp": 9999999999})
+    response = client.get("/protected", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+
+
+def test_missing_audience_returns_401():
+    token = _sign_token({"sub": "user1", "iss": TEST_ISSUER, "exp": 9999999999})
+    response = client.get("/protected", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
