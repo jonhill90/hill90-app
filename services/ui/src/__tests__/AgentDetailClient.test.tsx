@@ -501,6 +501,81 @@ describe('AgentDetailClient', () => {
     expect(putBody).toEqual({ env_vars_unset: ['LOG_LEVEL'] })
   })
 
+  // app#453: handleRemoveEnvVar used to skip the confirm() its sibling
+  // handleRemoveSkill has. Unlike a tag (see the app#453 comment on
+  // handleRemoveTag in the component itself), an env var's value is never
+  // readable back from the API once set — removing one is not "annoying to
+  // retype", the value is gone. This test declines the dialog and asserts
+  // the DELETE-shaped PUT never fires, not merely that a dialog appeared.
+  it('does NOT remove an environment variable when the confirm is declined — no PUT must fire', async () => {
+    const agentWithTwoVars = { ...MOCK_AGENT, env_var_keys: ['ANTHROPIC_API_KEY', 'LOG_LEVEL'] }
+    mockFetchDefaults(agentWithTwoVars as any)
+    const defaultImpl = mockFetch.getMockImplementation()!
+    let putCalled = false
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/agents/uuid-1' && opts?.method === 'PUT') {
+        putCalled = true
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(agentWithTwoVars) })
+      }
+      return defaultImpl(url, opts)
+    })
+
+    const confirmMock = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirmMock)
+
+    render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+    await waitFor(() => expect(screen.getByText('ResearchBot')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    await waitFor(() => expect(screen.getByText('LOG_LEVEL')).toBeInTheDocument())
+
+    const row = screen.getByText('LOG_LEVEL').closest('tr')!
+    fireEvent.click(within(row).getByRole('button'))
+
+    expect(confirmMock).toHaveBeenCalledWith('Remove the environment variable "LOG_LEVEL"? Its value cannot be recovered once removed.')
+    // Declining must be a true no-op — no request, and the row still there.
+    expect(putCalled).toBe(false)
+    expect(screen.getByText('LOG_LEVEL')).toBeInTheDocument()
+
+    vi.stubGlobal('confirm', vi.fn(() => true))
+  })
+
+  // app#453: the deliberate other half. handleRemoveTag does NOT confirm —
+  // this pins that as intended behavior (see the comment on handleRemoveTag
+  // itself) so a future "make it consistent with its siblings" pass doesn't
+  // add a dialog here reflexively. A removed tag costs nothing to redo: it
+  // is a short string the user just typed, retypeable and re-addable in one
+  // step, unlike a skill grant or an unrecoverable env var value.
+  it('removes a tag with NO confirm dialog — deliberately, unlike handleRemoveSkill/handleRemoveEnvVar', async () => {
+    const agentWithTag = { ...MOCK_AGENT, tags: ['staging'] }
+    mockFetchDefaults(agentWithTag as any)
+    const defaultImpl = mockFetch.getMockImplementation()!
+    let putBody: any = null
+    mockFetch.mockImplementation((url: string, opts?: any) => {
+      if (url === '/api/agents/uuid-1' && opts?.method === 'PUT') {
+        putBody = JSON.parse(opts.body)
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(agentWithTag) })
+      }
+      return defaultImpl(url, opts)
+    })
+
+    const confirmMock = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirmMock)
+
+    render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+    await waitFor(() => expect(screen.getByText('ResearchBot')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
+    await waitFor(() => expect(screen.getByText('staging')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('×'))
+
+    await waitFor(() => expect(putBody).not.toBeNull())
+    expect(putBody).toEqual({ tags: [] })
+    // The point of this test: removal happened without ever asking.
+    expect(confirmMock).not.toHaveBeenCalled()
+
+    vi.stubGlobal('confirm', vi.fn(() => true))
+  })
+
   it('Model Access tab shows assigned models', async () => {
     render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
 
