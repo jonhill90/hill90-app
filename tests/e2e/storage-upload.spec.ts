@@ -7,13 +7,27 @@ import { test, expect, type Page } from "@playwright/test";
  * upload a test file, verify it appears in the listing, delete it,
  * verify it's gone.
  *
+ * REQUIRES ADMIN ROLE. services/api/src/routes/storage.ts gates
+ * GET/DELETE .../objects on requireRole('admin') unconditionally, and
+ * upload on requireUploadRole, which only waives that for the
+ * chat-attachments bucket by exact name — agent-avatars, the bucket this
+ * suite uses, is not it, so upload needs admin here too. Found while
+ * auditing whether this suite still matches the app (it had never once
+ * run, so this had never been discovered): secrets.spec.ts documented its
+ * own admin requirement, this file did not — the same "never run, so
+ * nobody knew" blind spot as app#517's realm rot, just landing on
+ * credentials instead of a selector. If the account set below lacks
+ * admin, every request in this suite 403s.
+ *
  * Requires env vars, BOTH explicitly set — app#514: a username default
  * that resolves independently of the password guard is what let a human
  * arm a production account by setting only the password. There is no
  * default for either var; a missing one skips the suite rather than
  * silently selecting an identity. This suite uploads and deletes a real
  * object, so the identity it runs as matters.
- *   E2E_USERNAME — this estate's documented test account: testuser01
+ *   E2E_USERNAME — this estate's documented test account: testuser01.
+ *                  Confirm it carries admin BEFORE the first real run —
+ *                  this file does not verify that for you, and never has.
  *   E2E_PASSWORD — its password
  */
 
