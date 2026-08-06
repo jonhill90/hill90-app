@@ -120,7 +120,7 @@ export async function createAndStartContainer(opts: CreateAgentContainerOpts): P
   }
 
   const configMount = `${hostPath}/${opts.agentId}`;
-  const nanoCpus = Math.round(parseFloat(opts.cpus) * 1e9);
+  const nanoCpus = Math.round(parseCpus(opts.cpus) * 1e9);
   const memoryBytes = parseMemLimit(opts.memLimit);
 
   // Build env array with optional profile extra_env
@@ -788,6 +788,28 @@ export async function reconcileAgentStatuses(
   }
 
   return result;
+}
+
+/**
+ * Fail closed on a malformed `cpus` value rather than silently dropping the
+ * CPU limit. The bug this replaces: `Math.round(parseFloat(opts.cpus) * 1e9)`
+ * turns any unparseable string into `NaN`, `JSON.stringify` turns `NaN` into
+ * `null`, and `NanoCpus: null` means "no limit" to the Docker Engine API —
+ * so a malformed value did not fail, it silently started the container with
+ * unlimited CPU.
+ *
+ * Deliberately shaped to match `parseMemLimit` below: validate with a regex
+ * FIRST and throw on mismatch, so `parseFloat` only ever runs against a
+ * string the regex already proved is a bare non-negative decimal — it can't
+ * itself produce `NaN` from that. `parseMemLimit` already followed this
+ * shape; this field just hadn't, until now.
+ */
+export function parseCpus(cpus: string): number {
+  const match = typeof cpus === 'string' ? cpus.match(/^(\d+(?:\.\d+)?)$/) : null;
+  if (!match) throw new Error(`Invalid cpus: ${cpus}`);
+  const value = parseFloat(match[1]);
+  if (value <= 0) throw new Error(`Invalid cpus: ${cpus}`);
+  return value;
 }
 
 function parseMemLimit(limit: string): number {

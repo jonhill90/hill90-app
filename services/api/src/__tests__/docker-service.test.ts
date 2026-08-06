@@ -307,6 +307,119 @@ describe('isContainerRunning (app#508)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// parseCpus: a malformed cpus value must fail closed, not silently produce
+// an unlimited container.
+//
+// THE BUG THIS REPLACES: `Math.round(parseFloat(opts.cpus) * 1e9)` turns any
+// unparseable string into NaN; `JSON.stringify({NanoCpus: NaN})` turns NaN
+// into `null` on the wire; `NanoCpus: null` means "no limit" to the Docker
+// Engine API. So a malformed cpus value did not fail — it silently started
+// the container with unlimited CPU, and `createContainer` still returned
+// success. The assertion that matters is never "did creation succeed" —
+// that passes against both the fixed and the broken code — it's what
+// reaches (or, on the malformed path, does NOT reach) the constructed
+// Docker config.
+// ---------------------------------------------------------------------------
+describe('parseCpus (unit)', () => {
+  const { parseCpus } = require('../services/docker');
+
+  it('parses a plain integer', () => {
+    expect(parseCpus('2')).toBe(2);
+  });
+
+  it('parses a decimal', () => {
+    expect(parseCpus('1.5')).toBe(1.5);
+  });
+
+  it.each(['garbage', '', 'NaN', 'unlimited', '1.0.0', '1,0', ' 1.0', '1.0 ', '1e9'])(
+    'rejects %j rather than returning NaN',
+    (bad) => {
+      expect(() => parseCpus(bad)).toThrow(/Invalid cpus/);
+    }
+  );
+
+  it('rejects zero — a zero CPU limit is not a meaningful request', () => {
+    expect(() => parseCpus('0')).toThrow(/Invalid cpus/);
+  });
+
+  it('rejects a negative value', () => {
+    expect(() => parseCpus('-1')).toThrow(/Invalid cpus/);
+  });
+});
+
+describe('createAndStartContainer: malformed cpus fails closed', () => {
+  const mockStart = jest.fn().mockResolvedValue(undefined);
+  const mockInspect = jest.fn().mockResolvedValue({ Id: 'container-id-abc' });
+  const mockCreateContainer = jest.fn().mockResolvedValue({ start: mockStart, inspect: mockInspect });
+  const mockGetContainer = jest.fn().mockImplementation(() => {
+    const err: any = new Error('not found');
+    err.statusCode = 404;
+    throw err;
+  });
+
+  beforeEach(() => {
+    jest.resetModules();
+    mockCreateContainer.mockClear();
+    mockStart.mockClear();
+    mockInspect.mockClear();
+    process.env.AGENTBOX_CONFIG_HOST_PATH = '/opt/hill90/agentbox-configs';
+
+    jest.doMock('dockerode', () => {
+      return jest.fn().mockImplementation(() => ({
+        createContainer: mockCreateContainer,
+        getContainer: mockGetContainer,
+      }));
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.AGENTBOX_CONFIG_HOST_PATH;
+    jest.restoreAllMocks();
+  });
+
+  it('THE ASSERTION THAT MATTERS: a malformed cpus value never reaches the Docker API at all — refused, not created with an unlimited CPU', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await expect(createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: 'garbage',
+      memLimit: '1g',
+      pidsLimit: 200,
+    })).rejects.toThrow(/Invalid cpus/);
+
+    // Not "creation failed somehow" — specifically that createContainer was
+    // never called, so there is no HostConfig for NanoCpus to be silently
+    // null inside. A test asserting only the rejection above would pass
+    // even if this fix regressed to logging-and-continuing; this is the
+    // line that would catch that.
+    expect(mockCreateContainer).not.toHaveBeenCalled();
+    expect(mockStart).not.toHaveBeenCalled();
+  });
+
+  it('TWIN: a valid cpus value produces a real, non-null NanoCpus and the container starts', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '2.0',
+      memLimit: '1g',
+      pidsLimit: 200,
+    });
+
+    expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+    const createOpts = mockCreateContainer.mock.calls[0][0];
+    // Round-tripped through JSON, the same boundary the real bug crossed —
+    // NaN silently becomes null there; a real number does not.
+    const wireHostConfig = JSON.parse(JSON.stringify(createOpts.HostConfig));
+    expect(wireHostConfig.NanoCpus).toBe(2_000_000_000);
+    expect(wireHostConfig.NanoCpus).not.toBeNull();
+    expect(mockStart).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('resolveAgentNetwork', () => {
   const { resolveAgentNetwork, AGENT_NETWORK, AGENT_SANDBOX_NETWORK } = require('../services/docker');
 
