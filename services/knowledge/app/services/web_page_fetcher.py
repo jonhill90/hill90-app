@@ -3,6 +3,8 @@
 Implements the Fetch Safety Contract:
 - URL validation (scheme, credentials, port, internal hostnames)
 - Pre-connect DNS resolution check against blocked CIDR ranges
+- The connection itself dials the address that check validated — not a
+  second, independent resolution (app#545)
 - Manual redirect following with re-validation on every hop
 - Error messages omit resolved IP addresses
 - Response size limits
@@ -13,6 +15,74 @@ missing check (non-2xx status) here BECAUSE this docstring claimed
 completeness and stopped at five items. Keep this list and the code in the
 same commit as any future item; the artifact whose incompleteness caused
 that defect is this one.
+
+APP#545 — WHY THE CONNECTION LAYER HAD TO CHANGE, NOT JUST THE CHECK.
+`_resolve_and_check` validated a hostname's resolved IP before every
+connection attempt, including on every redirect hop — but the actual
+connection never used that resolution. `httpx.AsyncClient` was constructed
+with no `transport=` override, so it resolved the SAME hostname again,
+independently, at connect time. Two separate calls to the OS resolver for
+the same hostname is a textbook DNS-rebinding window: a hostname with a
+very low or zero TTL, served by a resolver that honors it, can legitimately
+answer differently a few milliseconds apart. The check would validate one
+answer; the connection would dial whatever the second, unrelated lookup
+returned.
+
+THREE OPTIONS WERE WEIGHED, not just the one shipped:
+
+1. IP-pinning by rewriting the request to target the literal IP (the
+   fix this issue itself first suggested) — connect to the validated
+   address directly, carrying the original Host header and SNI by hand.
+   Closes the window, but naively done it also BREAKS things: a
+   hand-rolled "connect to this IP, but still verify this hostname's TLS
+   cert" needs the SNI and hostname-verification logic reproduced exactly
+   right per-request, and a URL that IS the pinned IP stops working for
+   any legitimately multi-IP host if only one address is ever tried.
+
+2. A custom resolver/transport that hands httpx an already-validated
+   address instead of letting httpx resolve on its own — the shape
+   actually shipped, detailed below.
+
+3. Re-validate deeper inside the connection path, after httpx has already
+   resolved and is about to connect — rejected: by the time anything past
+   httpx's own resolution can observe an address, the TOCTOU has already
+   happened; validating a THIRD time after an independent SECOND
+   resolution does not close the gap between validation and connection,
+   it just moves it.
+
+OPTION 2, CHOSEN, AND WHAT IT GIVES UP. `_SsrfSafeNetworkBackend` below
+overrides `httpcore.AnyIOBackend.connect_tcp` — the exact call httpx's
+default transport delegates a connection's DNS resolution and TCP dial to.
+This is the ONE hook in the whole stack where "resolve" and "connect to
+what was resolved" can be made atomic: `connect_tcp` receives a hostname,
+and this override resolves it itself (`_resolve_all_validated`, the same
+blocklist logic `_resolve_and_check` already used), validates every
+candidate, and dials one of the validated candidates directly — with no
+second, independent resolution able to occur in between, because none is
+ever made. TLS is UNAFFECTED by construction, not by care taken to
+preserve it: SNI and hostname verification happen in a separate step
+(`AsyncNetworkStream.start_tls`, called by httpcore AFTER `connect_tcp`
+returns) that receives the ORIGINAL hostname regardless of which IP the
+socket connected to — this codebase never has to reconstruct that logic
+by hand, unlike option 1. Round-robin/multi-address hosts are preserved
+too: EVERY candidate `getaddrinfo` returns is validated (a single blocked
+candidate among several still refuses the whole hostname, matching
+`_resolve_and_check`'s existing conservative behaviour), and connect_tcp
+tries each validated candidate in turn — a host with several equally
+valid addresses keeps failing over exactly as an unguarded client would,
+because none of its options were ever ruled out on validation grounds
+alone.
+
+What this gives up, stated rather than left implicit: a CDN or host that
+deliberately returns a DIFFERENT valid address on every single connection
+attempt (not just on retry) will see that entropy reduced to "whatever
+this one resolution returned" for the lifetime of ONE connection — the
+same granularity `_resolve_and_check`'s per-hop re-validation already
+assumed (a fresh resolution happens per hop / per new connection, not
+once for the whole fetch), so this is not a NEW narrowing, but it is
+real: a backend relying on picking a fresh address on every single TCP
+handshake to the same origin, faster than httpcore's connection pooling
+would reuse one, will not see that from this fetcher.
 """
 
 from __future__ import annotations
@@ -23,6 +93,7 @@ import ssl
 from typing import Any
 from urllib.parse import urlparse
 
+import httpcore
 import httpx
 import structlog
 import trafilatura
@@ -140,13 +211,23 @@ def _validate_url(url: str) -> tuple[str, str, int | None]:
     return parsed.scheme, hostname, port
 
 
-def _resolve_and_check(hostname: str, port: int | None) -> None:
-    """Resolve hostname via DNS and check all IPs against blocked ranges.
+def _resolve_all_validated(hostname: str, resolve_port: int) -> list[str]:
+    """Resolve hostname via DNS ONCE and validate every candidate.
 
-    Raises FetchError if any resolved IP is blocked.
-    Does NOT include the resolved IP in the error message.
+    Returns the validated IP literals in the order the resolver returned
+    them. Raises FetchError if ANY resolved candidate is blocked — the same
+    all-or-nothing posture `_resolve_and_check` always had: a hostname that
+    answers with one public and one internal address is refused entirely,
+    not served from whichever candidate happened to look safe.
+
+    THE SHARED CORE of app#545's fix. `_resolve_and_check` (the pre-connect
+    fast-fail check) and `_SsrfSafeNetworkBackend.connect_tcp` (the actual
+    security boundary, since it is what the connection dials) call this
+    SAME function rather than each maintaining their own copy of the
+    blocklist-scanning loop — the twin-drift shape this codebase has hit
+    before (parseMemLimit/parseCpus, install_ref/tool.name): one guarded,
+    its sibling not, because they were never the same code to begin with.
     """
-    resolve_port = port or 443
     try:
         results = socket.getaddrinfo(hostname, resolve_port, proto=socket.IPPROTO_TCP)
     except socket.gaierror:
@@ -155,12 +236,129 @@ def _resolve_and_check(hostname: str, port: int | None) -> None:
     if not results:
         raise FetchError(f"DNS resolution returned no results for hostname '{hostname}'")
 
+    validated: list[str] = []
     for family, _type, _proto, _canonname, sockaddr in results:
-        ip_str = sockaddr[0]
+        ip_str = str(sockaddr[0])
         if _is_blocked_ip(ip_str):
             raise FetchError(
                 f"Hostname '{hostname}' resolves to a blocked private/internal IP address range"
             )
+        validated.append(ip_str)
+    return validated
+
+
+def _resolve_and_check(hostname: str, port: int | None) -> None:
+    """Resolve hostname via DNS and check all IPs against blocked ranges.
+
+    Raises FetchError if any resolved IP is blocked.
+    Does NOT include the resolved IP in the error message.
+
+    A FAST PRE-CHECK, NOT THE SECURITY BOUNDARY (app#545). This runs before
+    any network I/O so a caller gets a clean FetchError instead of whatever
+    exception shape the network layer would produce — but it is not what
+    makes a blocked address unreachable. `_SsrfSafeNetworkBackend` is: it
+    performs this same validation again, atomically with the actual
+    connection, so a caller that somehow reached the connection layer
+    without going through this pre-check would still be safe.
+    """
+    resolve_port = port or 443
+    _resolve_all_validated(hostname, resolve_port)
+
+
+class _SsrfSafeNetworkBackend(httpcore.AnyIOBackend):
+    """Resolves and validates INSIDE connect_tcp, atomically with the dial.
+
+    app#545. This is the actual fix: `connect_tcp` is the one place in the
+    whole httpx/httpcore stack where "resolve a hostname" and "connect to
+    what was resolved" can be made the same operation. The default backend
+    (this class's own parent) resolves the hostname itself via
+    `anyio.connect_tcp`, independently of whatever `_resolve_and_check`
+    validated earlier — the TOCTOU. This override resolves and validates
+    FIRST, then hands the validated literal IP to the parent's own
+    `connect_tcp`, which — given a literal IP instead of a hostname —
+    performs no further resolution at all; there is no second lookup left
+    for a rebinding DNS answer to be seen by.
+
+    EVERY VALIDATED CANDIDATE IS TRIED, not just the first, so a host with
+    several equally valid addresses (round-robin, multi-region) keeps
+    failing over exactly as an unguarded client would — nothing here
+    reduces a legitimately multi-address host to a single one; it only
+    ever removes candidates that were blocked outright.
+    """
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.AsyncNetworkStream:
+        import anyio
+
+        try:
+            candidates = await anyio.to_thread.run_sync(_resolve_all_validated, host, port)
+        except FetchError as exc:
+            # Re-raised as httpcore.ConnectError, not left as FetchError:
+            # httpcore's own connection-establishment machinery only
+            # expects ConnectError out of connect_tcp, and fetch_and_extract
+            # already has a clean `except httpx.ConnectError` branch that
+            # turns this back into a FetchError with the message intact —
+            # letting a raw FetchError escape here would otherwise get
+            # swallowed into httpcore's own generic "All connection attempts
+            # failed", losing exactly the detail this exists to report.
+            raise httpcore.ConnectError(str(exc)) from exc
+
+        last_exc: Exception | None = None
+        for ip in candidates:
+            try:
+                return await super().connect_tcp(
+                    host=ip,
+                    port=port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            # ConnectTimeout too, not just ConnectError — a candidate that
+            # hangs rather than refusing outright must still fall back to
+            # the next one. Catching only ConnectError left a genuinely
+            # unresponsive (not merely refused) candidate free to consume
+            # the connection's entire timeout budget on its own, before a
+            # perfectly reachable second candidate was ever tried — found
+            # by exercising the fallback loop with a real unresponsive
+            # address, not by reading the two exception types apart.
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_exc = exc
+                continue
+        assert last_exc is not None  # candidates is never empty — _resolve_all_validated guarantees it
+        raise last_exc
+
+
+def _build_ssrf_safe_transport(ssl_context: ssl.SSLContext) -> httpx.AsyncHTTPTransport:
+    """An httpx transport whose connections dial exactly what was validated.
+
+    NOT `httpx.AsyncHTTPTransport(verify=ssl_context)` — that builds its own
+    `httpcore.AsyncConnectionPool` with the default network backend
+    (`httpcore.AnyIOBackend`, unmodified), which is precisely the object
+    app#545 exists to replace. `httpx.AsyncHTTPTransport.__init__` does not
+    accept a `network_backend=` override, so this builds the same
+    `httpcore.AsyncConnectionPool` httpx would have, by hand, with
+    `_SsrfSafeNetworkBackend` in place of the default — and reuses
+    `httpx.AsyncHTTPTransport`'s own `handle_async_request`/`aclose` by
+    assigning to `self._pool`, the exact attribute those methods read.
+    Reaching into that attribute is deliberate, not a shortcut: both of
+    those methods are short, stable, and already read directly from
+    `httpx`'s source above to confirm what they need — reproducing them
+    independently would be MORE fragile against a future httpx change,
+    not less, since it would silently stop tracking whatever
+    `handle_async_request` does next.
+    """
+    transport = httpx.AsyncHTTPTransport(verify=ssl_context)
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=ssl_context,
+        network_backend=_SsrfSafeNetworkBackend(),
+    )
+    return transport
 
 
 async def fetch_and_extract(url: str) -> dict[str, Any]:
@@ -182,7 +380,11 @@ async def fetch_and_extract(url: str) -> dict[str, Any]:
         timeout=httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT),
         follow_redirects=False,
         headers={"User-Agent": USER_AGENT},
-        verify=ssl.create_default_context(),
+        # NOT verify=ssl.create_default_context() — that lets httpx build its
+        # own default transport, the one app#545 exists to replace. The
+        # ssl_context still goes in, just carried by our own transport instead
+        # (see _build_ssrf_safe_transport's own docstring for why).
+        transport=_build_ssrf_safe_transport(ssl.create_default_context()),
     ) as client:
         while True:
             try:
