@@ -18,7 +18,7 @@ _public_pem = _public_key.public_bytes(
     serialization.PublicFormat.SubjectPublicKeyInfo,
 ).decode()
 
-TEST_ISSUER = "https://auth.hill90.com/realms/hill90"
+TEST_ISSUER = "https://auth.hill90.com/realms/platform"
 
 # Build verify_token with test key — no JWKS fetch
 _verify_token = make_verify_token(

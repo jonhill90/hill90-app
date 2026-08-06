@@ -20,7 +20,7 @@ _public_pem = _public_key.public_bytes(
     serialization.PublicFormat.SubjectPublicKeyInfo,
 ).decode()
 
-TEST_ISSUER = "https://auth.hill90.com/realms/hill90"
+TEST_ISSUER = "https://auth.hill90.com/realms/platform"
 
 _test_verify_token = make_verify_token(
     issuer=TEST_ISSUER,
