@@ -422,6 +422,104 @@ describe('createAndStartContainer: malformed cpus fails closed', () => {
     expect(wireHostConfig.NanoCpus).not.toBeNull();
     expect(mockStart).toHaveBeenCalledTimes(1);
   });
+
+  // Unbounded cpus/mem_limit/pids_limit — established live against the real
+  // production Docker daemon (29.5.3, 4 CPUs / ~16GiB RAM) before choosing
+  // these bounds, not assumed: `docker run --cpus=9999` is REJECTED by the
+  // Engine API itself ("range of CPUs is from 0.01 to 4.00"), so a cpus
+  // value exceeding host capacity was never a live resource-exhaustion
+  // path — it surfaced as a generic 500 from POST /:id/start's catch-all
+  // instead of a clean 400 at write time. `docker run --memory=9999g` is
+  // ACCEPTED without complaint — a cgroup ceiling far beyond physical RAM is,
+  // for practical purposes, no limit at all, and this WAS a live DoS
+  // surface. `docker run --pids-limit=-1` produced the identical cgroup
+  // pids.max as specifying no limit at all (Docker's own ~100k-process
+  // default on that host) — pids_limit had no validation of any kind before
+  // this, so a caller could disable fork-bomb protection outright with a
+  // single field.
+  it('THE ASSERTION THAT MATTERS: cpus exceeding VPS capacity never reaches the Docker API', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await expect(createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '9999',
+      memLimit: '1g',
+      pidsLimit: 200,
+    })).rejects.toThrow(/Invalid cpus.*exceeds VPS capacity/);
+
+    expect(mockCreateContainer).not.toHaveBeenCalled();
+  });
+
+  it('TWIN: cpus AT the VPS ceiling (4) is accepted', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '4',
+      memLimit: '1g',
+      pidsLimit: 200,
+    });
+
+    expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('THE ASSERTION THAT MATTERS: mem_limit exceeding VPS RAM never reaches the Docker API', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await expect(createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '1.0',
+      memLimit: '9999g',
+      pidsLimit: 200,
+    })).rejects.toThrow(/Invalid mem_limit.*exceeds VPS total RAM/);
+
+    expect(mockCreateContainer).not.toHaveBeenCalled();
+  });
+
+  it('THE ASSERTION THAT MATTERS: a negative pids_limit (Docker\'s own "unlimited" sentinel) never reaches the Docker API', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await expect(createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '1.0',
+      memLimit: '1g',
+      pidsLimit: -1,
+    })).rejects.toThrow(/Invalid pidsLimit/);
+
+    expect(mockCreateContainer).not.toHaveBeenCalled();
+  });
+
+  it('THE ASSERTION THAT MATTERS: pids_limit exceeding the profile ceiling never reaches the Docker API', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await expect(createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '1.0',
+      memLimit: '1g',
+      pidsLimit: 9999,
+    })).rejects.toThrow(/Invalid pidsLimit/);
+
+    expect(mockCreateContainer).not.toHaveBeenCalled();
+  });
+
+  it('TWIN: pids_limit AT the ceiling (300, the browser profile\'s value) is accepted', async () => {
+    const { createAndStartContainer } = require('../services/docker');
+
+    await createAndStartContainer({
+      agentId: 'test-agent',
+      hostConfigPath: '/opt/hill90/agentbox-configs',
+      cpus: '1.0',
+      memLimit: '1g',
+      pidsLimit: 300,
+    });
+
+    expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('resolveAgentNetwork', () => {
