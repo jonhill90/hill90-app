@@ -15,7 +15,7 @@ import { requireRole } from '../middleware/role';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isAdmin } from '../helpers/elevated-scope';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
-import { requiredNonEmptyError } from '../helpers/required-field';
+import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
 
 const router = Router();
 
@@ -197,9 +197,12 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     // app#599: POST requires name non-empty; PUT had no validator for it,
     // and it's passed raw into COALESCE below (no `|| null` conversion), so
     // an explicit '' would have been WRITTEN — the exact input POST already
-    // refuses. Only validated when actually provided, matching every other
-    // optional PUT field here's "omitted means unchanged" contract.
-    if (name !== undefined) {
+    // refuses. Only validated when actually provided — wasProvided(), not
+    // a bare `!== undefined`, so an explicit JSON `null` is treated the
+    // same as an omitted field (COALESCE's own behavior for a bound SQL
+    // NULL), matching #594's identical decision for transport in this same
+    // file. See helpers/required-field.ts.
+    if (wasProvided(name)) {
       const nameError = requiredNonEmptyError(name, 'name');
       if (nameError) {
         res.status(400).json({ error: nameError });

@@ -292,6 +292,27 @@ describe('Container Profiles routes', () => {
     expect(mockQuery.mock.calls.length).toBe(1);
   });
 
+  // Cross-review of #594/#601: null and undefined both mean "not
+  // provided", matching #594's already-argued position for transport and
+  // COALESCE's own behavior for a bound SQL NULL.
+  it('accepts docker_image: null as "not provided" (no-op)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [customProfile] }) // SELECT existing
+      .mockResolvedValueOnce({ rows: [{ ...customProfile, description: 'Updated' }] }); // UPDATE RETURNING
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ docker_image: null, description: 'Updated' });
+
+    expect(res.status).toBe(200);
+    const updateCall = mockQuery.mock.calls[1];
+    // docker_image is bound param index 3 (after req.params.id, name,
+    // description) in this route's UPDATE ... COALESCE($2, name),
+    // COALESCE($3, description), COALESCE($4, docker_image) ordering.
+    expect(updateCall[1][3]).toBeNull();
+  });
+
   // CP-16: PUT /container-profiles/:id non-admin returns 403
   it('PUT /container-profiles/:id non-admin returns 403', async () => {
     const res = await request(app)

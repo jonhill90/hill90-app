@@ -25,7 +25,7 @@ import { requireRole } from '../middleware/role';
 import { isAdmin } from '../helpers/elevated-scope';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isValidCronExpression, computeNextRun } from '../helpers/cron';
-import { requiredNonEmptyError } from '../helpers/required-field';
+import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
 
 const router = Router();
 
@@ -48,7 +48,7 @@ const router = Router();
 // risk of a migration against data this session cannot see.
 const VALID_OUTPUT_TYPES = ['none'];
 function invalidOutputTypeError(outputType: unknown): string | null {
-  if (outputType === undefined || outputType === null) return null;
+  if (!wasProvided(outputType)) return null;
   if (!VALID_OUTPUT_TYPES.includes(outputType as string)) {
     return `output_type must be one of: ${VALID_OUTPUT_TYPES.join(', ')}`;
   }
@@ -270,16 +270,19 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     // for either, and both are passed raw into COALESCE below (no `|| null`
     // conversion), so an explicit '' would have been WRITTEN — an unnamed,
     // promptless workflow, the exact input POST already refuses. Only
-    // validated when actually provided, matching the "omitted means
-    // unchanged" contract every other optional PUT field here already has.
-    if (name !== undefined) {
+    // validated when actually provided — wasProvided(), not a bare
+    // `!== undefined`, so an explicit JSON `null` is treated the same as
+    // an omitted field (COALESCE's own behavior for a bound SQL NULL),
+    // matching #594's identical decision for transport. See
+    // helpers/required-field.ts for why.
+    if (wasProvided(name)) {
       const nameError = requiredNonEmptyError(name, 'name');
       if (nameError) {
         res.status(400).json({ error: nameError });
         return;
       }
     }
-    if (prompt !== undefined) {
+    if (wasProvided(prompt)) {
       const promptError = requiredNonEmptyError(prompt, 'prompt');
       if (promptError) {
         res.status(400).json({ error: promptError });

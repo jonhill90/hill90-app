@@ -327,6 +327,32 @@ describe('PUT /workflows/:id required-field and output_type parity (app#599)', (
     expect(mockQuery.mock.calls.length).toBe(0);
   });
 
+  // Cross-review of #594/#601: null and undefined both mean "not
+  // provided", matching #594's already-argued position for transport and
+  // COALESCE's own behavior for a bound SQL NULL.
+  it('accepts prompt: null as "not provided" (no-op)', async () => {
+    const { createApp } = await import('../app');
+    const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
+    await startAlreadyRunningScheduler();
+
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ enabled: true, schedule_cron: '0 9 * * *', trigger_type: 'cron' }],
+    });
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'wf-11', description: 'Updated desc' }],
+    });
+
+    const res = await request(app)
+      .put('/workflows/wf-11')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ prompt: null, description: 'Updated desc' });
+
+    expect(res.status).toBe(200);
+    const updateCall = mockQuery.mock.calls.find((c) => /UPDATE workflows SET/.test(String(c[0])));
+    // prompt is bound param index 4 in this route's UPDATE ordering.
+    expect((updateCall![1] as unknown[])[4]).toBeNull();
+  });
+
   it('accepts a real name/prompt/output_type change and updates normally', async () => {
     const { createApp } = await import('../app');
     const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });

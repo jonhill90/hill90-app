@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { auditLog } from '../helpers/audit';
-import { requiredNonEmptyError } from '../helpers/required-field';
+import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
 
 const router = Router();
 
@@ -110,16 +110,18 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
     // WRITTEN. `docker_image` is the consequential one — an empty value on
     // an existing profile breaks every future container start for every
     // agent assigned to it, not merely a blank list entry. Only validated
-    // when actually provided, matching every other optional PUT field
-    // here's "omitted means unchanged" contract.
-    if (name !== undefined) {
+    // when actually provided — wasProvided(), not a bare `!== undefined`,
+    // so an explicit JSON `null` is treated the same as an omitted field
+    // (COALESCE's own behavior for a bound SQL NULL), matching #594's
+    // identical decision for transport. See helpers/required-field.ts.
+    if (wasProvided(name)) {
       const nameError = requiredNonEmptyError(name, 'name');
       if (nameError) {
         res.status(400).json({ error: nameError });
         return;
       }
     }
-    if (docker_image !== undefined) {
+    if (wasProvided(docker_image)) {
       const dockerImageError = requiredNonEmptyError(docker_image, 'docker_image');
       if (dockerImageError) {
         res.status(400).json({ error: dockerImageError });
