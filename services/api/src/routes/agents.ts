@@ -2765,12 +2765,45 @@ router.get('/:id/logs', requireRole('admin'), async (req: Request, res: Response
         liveStream = stream as unknown as { destroy?: () => void };
         if (closed) { liveStream.destroy?.(); return; }
 
+        // Every SSE frame goes through this rather than a raw res.write(). The
+        // sibling /:id/events?follow=true route above already carries this fix;
+        // this route did not — sse-writer.ts's own header documents 18 res.write()
+        // call sites fixed for exactly this gap ("NONE of which consulted the
+        // return value... no 'drain' listener... anywhere in the service") and
+        // this one was left out of that sweep. res.write() returns false when the
+        // socket is full and Node buffers past that without limit; this service
+        // already runs with --max-old-space-size=320 and a compose mem_limit
+        // because of a prior unbounded-buffer incident (issue #144, cited in
+        // relay-backpressure.ts) — a second unbounded buffer in a process already
+        // sized around the first one is not a theoretical risk.
+        const sse = createBoundedSseWriter(res as never, {
+          hardCapBytes: SSE_DEFAULTS.hardCapBytes,
+          onOverflow: (queued) => {
+            console.error(
+              `[agents] SSE aborted: ${queued} bytes queued for a client that is not reading`,
+            );
+            (stream as unknown as { destroy?: () => void }).destroy?.();
+            res.write(
+              `event: error\ndata: ${JSON.stringify({
+                error: 'Client not reading',
+                detail: 'The event stream was stopped because its buffer limit was exceeded.',
+              })}\n\n`,
+            );
+            res.end();
+          },
+        });
+        // The producer to slow down when the client falls behind — same
+        // backpressure-first shape as the /:id/events route: pause the
+        // container's log stream rather than queueing for a client that
+        // isn't reading.
+        sse.setSource(stream as unknown as { pause(): void; resume(): void });
+
         stream.on('data', (chunk: Buffer) => {
           // Docker stream has 8-byte header per frame; strip it
           const lines = stripDockerHeader(chunk);
           const filtered = filterLogLines(lines, search, since, until);
           for (const line of filtered) {
-            res.write(`data: ${line}\n\n`);
+            sse.write(`data: ${line}\n\n`);
           }
         });
 
