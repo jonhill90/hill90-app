@@ -266,6 +266,44 @@ describe('MCP Servers routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.transport).toBe('sse');
     });
+
+    // app#599: POST requires name non-empty; PUT had no validator for it,
+    // and it's passed raw into COALESCE (no `|| null` conversion), so an
+    // explicit '' would have been WRITTEN — the exact input POST already
+    // refuses.
+    it("rejects name: '' — matching POST — and writes nothing", async () => {
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('name');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    // Cross-review of #594/#601 found these two PRs disagreeing on
+    // explicit JSON null: transport treated it as "not provided" (COALESCE
+    // keeps the column unchanged), name treated it as invalid provided
+    // input (400). Settled on #594's already-argued position — null and
+    // undefined both mean "not provided", matching COALESCE's own
+    // behavior for a bound SQL NULL — and this proves name now agrees.
+    it('accepts name: null as "not provided" (no-op), matching transport', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ ...MOCK_SERVER, description: 'Updated desc' }] });
+
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: null, description: 'Updated desc' });
+
+      expect(res.status).toBe(200);
+      // THE ASSERTION THAT MATTERS: null was bound as the actual query
+      // parameter for name, not silently substituted with anything else —
+      // COALESCE(NULL, name) is what makes this a genuine no-op at the SQL
+      // layer, not just an app-level skip.
+      const updateCall = mockQuery.mock.calls[0];
+      expect(updateCall[1][0]).toBeNull();
+    });
   });
 
   describe('DELETE /mcp-servers/:id', () => {

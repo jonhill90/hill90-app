@@ -25,6 +25,7 @@ import { requireRole } from '../middleware/role';
 import { isAdmin } from '../helpers/elevated-scope';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isValidCronExpression, computeNextRun } from '../helpers/cron';
+import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
 
 const router = Router();
 
@@ -37,6 +38,32 @@ const router = Router();
 async function agentExists(pool: ReturnType<typeof getPool>, agentId: string): Promise<boolean> {
   const { rows } = await pool.query('SELECT id FROM agents WHERE id = $1', [agentId]);
   return rows.length > 0;
+}
+
+// app#599 (Type B — no validator existed in either route, not a PUT/POST
+// parity gap). `output_type VARCHAR(32) NOT NULL DEFAULT 'none'` has no DB
+// CHECK constraint, and neither route validated it — any string could be
+// written from either POST or PUT. Deliberately choosing NEW behavior here,
+// not matching an existing rule: 'none' is the ONLY value any code path in
+// this repo has ever produced or consumed (workflow-scheduler.ts SELECTs
+// the column but never branches on it; the UI's WorkflowsClient.tsx has no
+// control to set it to anything else — checked both before choosing this,
+// not assumed). If a second output_type is designed later, extend this
+// list in the same commit that adds its handling, not before.
+//
+// Route-level validator only, deliberately NOT a DB CHECK constraint: a
+// CHECK added by migration against `output_type NOT IN ('none')` would
+// fail outright if any existing row already violates it, and there is no
+// way to check live production data from here. The route guard closes the
+// only thing this fix is actually about — new writes — without the added
+// risk of a migration against data this session cannot see.
+const VALID_OUTPUT_TYPES = ['none'];
+function invalidOutputTypeError(outputType: unknown): string | null {
+  if (!wasProvided(outputType)) return null;
+  if (!VALID_OUTPUT_TYPES.includes(outputType as string)) {
+    return `output_type must be one of: ${VALID_OUTPUT_TYPES.join(', ')}`;
+  }
+  return null;
 }
 
 // app#374: webhook_token_hash must never reach a response — it's a SHA-256
@@ -101,8 +128,30 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const { name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled } = req.body;
 
-    if (!name || !agent_id || !schedule_cron || !prompt) {
+    if (!agent_id || !schedule_cron) {
       res.status(400).json({ error: 'name, agent_id, schedule_cron, and prompt are required' });
+      return;
+    }
+    // app#599: name/prompt's own "required" check moved into a helper
+    // shared with PUT below (and with container-profiles.ts/mcp-servers.ts,
+    // which have the identical shape on their own required fields) — see
+    // helpers/required-field.ts for why. agent_id/schedule_cron stay a
+    // plain check here: both get deeper validation a few lines down
+    // (existence, cron parsing) that already fully covers "missing", and
+    // neither has PUT's asymmetry this fix exists to close.
+    const nameError = requiredNonEmptyError(name, 'name');
+    if (nameError) {
+      res.status(400).json({ error: nameError });
+      return;
+    }
+    const promptError = requiredNonEmptyError(prompt, 'prompt');
+    if (promptError) {
+      res.status(400).json({ error: promptError });
+      return;
+    }
+    const outputTypeError = invalidOutputTypeError(output_type);
+    if (outputTypeError) {
+      res.status(400).json({ error: outputTypeError });
       return;
     }
 
@@ -223,6 +272,35 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const admin = isAdmin(req);
     const { name, description, agent_id, schedule_cron, prompt, output_type, output_config, enabled } = req.body;
+
+    // app#599: POST requires name/prompt non-empty; PUT had no validator
+    // for either, and both are passed raw into COALESCE below (no `|| null`
+    // conversion), so an explicit '' would have been WRITTEN — an unnamed,
+    // promptless workflow, the exact input POST already refuses. Only
+    // validated when actually provided — wasProvided(), not a bare
+    // `!== undefined`, so an explicit JSON `null` is treated the same as
+    // an omitted field (COALESCE's own behavior for a bound SQL NULL),
+    // matching #594's identical decision for transport. See
+    // helpers/required-field.ts for why.
+    if (wasProvided(name)) {
+      const nameError = requiredNonEmptyError(name, 'name');
+      if (nameError) {
+        res.status(400).json({ error: nameError });
+        return;
+      }
+    }
+    if (wasProvided(prompt)) {
+      const promptError = requiredNonEmptyError(prompt, 'prompt');
+      if (promptError) {
+        res.status(400).json({ error: promptError });
+        return;
+      }
+    }
+    const outputTypeError = invalidOutputTypeError(output_type);
+    if (outputTypeError) {
+      res.status(400).json({ error: outputTypeError });
+      return;
+    }
 
     // app#580: was `if (schedule_cron && !isValidCronExpression(...))` — a
     // truthy check, which SKIPPED validation entirely for an empty string.

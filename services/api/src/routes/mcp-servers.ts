@@ -15,6 +15,7 @@ import { requireRole } from '../middleware/role';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isAdmin } from '../helpers/elevated-scope';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
+import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
 
 const router = Router();
 
@@ -118,8 +119,9 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const { name, description, transport, connection_config, is_platform } = req.body;
 
-    if (!name) {
-      res.status(400).json({ error: 'name is required' });
+    const nameError = requiredNonEmptyError(name, 'name');
+    if (nameError) {
+      res.status(400).json({ error: nameError });
       return;
     }
 
@@ -221,6 +223,22 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const admin = isAdmin(req);
     const { name, description, transport, connection_config } = req.body;
+
+    // app#599: POST requires name non-empty; PUT had no validator for it,
+    // and it's passed raw into COALESCE below (no `|| null` conversion), so
+    // an explicit '' would have been WRITTEN — the exact input POST already
+    // refuses. Only validated when actually provided — wasProvided(), not
+    // a bare `!== undefined`, so an explicit JSON `null` is treated the
+    // same as an omitted field (COALESCE's own behavior for a bound SQL
+    // NULL), matching #594's identical decision for transport in this same
+    // file. See helpers/required-field.ts.
+    if (wasProvided(name)) {
+      const nameError = requiredNonEmptyError(name, 'name');
+      if (nameError) {
+        res.status(400).json({ error: nameError });
+        return;
+      }
+    }
 
     const transportError = invalidTransportError(transport);
     if (transportError) {
