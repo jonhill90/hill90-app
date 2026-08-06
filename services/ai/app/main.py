@@ -677,6 +677,13 @@ async def chat_completions(request: Request, claims: AgentClaims = Depends(requi
         # this call must honour: "Every caller wraps this in a handler that
         # logs and continues." The success path below already does; this one
         # didn't.
+        #
+        # input_tokens/output_tokens/cost_usd are explicitly UNKNOWN here, not
+        # zero (app#549). proxy_chat_completion raised before any response
+        # body was ever received — if LiteLLM had already completed its own
+        # call to the real provider and been billed, this process has no way
+        # to know that. Recording 0 would say "this cost nothing," which is a
+        # claim this code cannot back up.
         try:
             async with get_db_conn() as conn:
                 await log_usage(
@@ -686,6 +693,9 @@ async def chat_completions(request: Request, claims: AgentClaims = Depends(requi
                     request_type="chat.completion",
                     status="error",
                     latency_ms=elapsed_ms,
+                    input_tokens=None,
+                    output_tokens=None,
+                    cost_usd=None,
                     delegation_id=delegation_id,
                     owner=owner,
                     requested_model=policy_result.requested_model,
@@ -740,6 +750,12 @@ async def _handle_streaming(settings, body, claims, resolved_model, delegation_i
         )
     except Exception as e:
         elapsed_ms = int((time.monotonic() - start) * 1000)
+        # Twin of chat_completions' identical non-streaming error path
+        # (app#549) — this is the SAME shape, missed there because it lives
+        # in a different function. stream_chat_completion raised before any
+        # response was ever received, so cost is genuinely UNKNOWN, not
+        # zero: if LiteLLM had already opened the stream and started
+        # billing before this connection died, this process cannot know.
         try:
             async with get_db_conn() as conn:
                 await log_usage(
@@ -749,6 +765,9 @@ async def _handle_streaming(settings, body, claims, resolved_model, delegation_i
                     request_type="chat.completion",
                     status="error",
                     latency_ms=elapsed_ms,
+                    input_tokens=None,
+                    output_tokens=None,
+                    cost_usd=None,
                     delegation_id=delegation_id,
                     owner=owner,
                     requested_model=requested_model,
@@ -766,6 +785,12 @@ async def _handle_streaming(settings, body, claims, resolved_model, delegation_i
     # Non-2xx from LiteLLM before stream started — return upstream error body
     if open_result.error_body is not None:
         elapsed_ms = int((time.monotonic() - start) * 1000)
+        # A real response was received (just not 2xx), so this is a KNOWN
+        # zero token count — no generation happened — but cost_usd is real
+        # data already parsed from that same response's headers by
+        # stream_chat_completion (app#549), not a guess. Recording it rather
+        # than letting it fall back to log_usage's 0.0 default.
+        cost_usd = open_result.streaming_result.cost_usd if open_result.streaming_result else 0.0
         try:
             async with get_db_conn() as conn:
                 await log_usage(
@@ -775,6 +800,7 @@ async def _handle_streaming(settings, body, claims, resolved_model, delegation_i
                     request_type="chat.completion",
                     status="error",
                     latency_ms=elapsed_ms,
+                    cost_usd=cost_usd,
                     delegation_id=delegation_id,
                     owner=owner,
                     requested_model=requested_model,
@@ -877,6 +903,9 @@ async def embeddings(request: Request, claims: AgentClaims = Depends(require_age
         # write only runs because the proxy call already failed, so a
         # second, unguarded DB failure here must not replace the deliberate
         # 502 below.
+        #
+        # input_tokens/cost_usd are explicitly UNKNOWN, not zero (app#549) —
+        # proxy_embeddings raised before any response was ever received.
         try:
             async with get_db_conn() as conn:
                 await log_usage(
@@ -886,6 +915,9 @@ async def embeddings(request: Request, claims: AgentClaims = Depends(require_age
                     request_type="embedding",
                     status="error",
                     latency_ms=elapsed_ms,
+                    input_tokens=None,
+                    output_tokens=None,
+                    cost_usd=None,
                     delegation_id=delegation_id,
                     owner=owner,
                     requested_model=policy_result.requested_model,
@@ -1209,6 +1241,9 @@ async def internal_embeddings(request: Request, authorization: str = Header(...)
         # paths: this write only runs because the proxy call already
         # failed, so a second, unguarded DB failure here must not replace
         # the deliberate 502 below.
+        #
+        # input_tokens/cost_usd are explicitly UNKNOWN, not zero (app#549) —
+        # proxy_embeddings raised before any response was ever received.
         try:
             async with get_db_conn() as conn:
                 await log_usage(
@@ -1218,6 +1253,9 @@ async def internal_embeddings(request: Request, authorization: str = Header(...)
                     request_type="embedding",
                     status="error",
                     latency_ms=elapsed_ms,
+                    input_tokens=None,
+                    output_tokens=None,
+                    cost_usd=None,
                     owner=owner,
                 )
         except Exception as usage_exc:

@@ -248,7 +248,44 @@ class TestStreamChatCompletion:
         assert open_result.error_body is not None
         assert open_result.error_body["error"]["message"] == "Rate limit exceeded"
         assert open_result.generator is None
-        assert open_result.streaming_result is None
+        # app#549: streaming_result is now populated even on a non-2xx
+        # response — it carries whatever cost_usd was parsed from this same
+        # response's real headers, which the caller (main.py's
+        # _handle_streaming) needs to record instead of silently discarding.
+        # No cost header was set in this test (empty headers), so 0.0 here
+        # is a genuine parsed zero, not evidence the value survived — see
+        # test_non_2xx_preserves_real_cost_header below for that.
+        assert open_result.streaming_result is not None
+        assert open_result.streaming_result.cost_usd == 0.0
+
+    @pytest.mark.asyncio
+    async def test_non_2xx_preserves_real_cost_header(self):
+        """app#549: a non-2xx response's real cost header must survive to
+        the caller, not be silently discarded — this is RECOVERABLE data
+        (a real response was received), not the unknown-cost case."""
+        mock_response = AsyncMock()
+        mock_response.status_code = 402
+        mock_response.headers = {"x-litellm-response-cost": "0.0042"}
+        mock_response.aread = AsyncMock(return_value=b'{"error":{"message":"insufficient balance"}}')
+        mock_response.aclose = AsyncMock()
+
+        mock_client = AsyncMock()
+        mock_client.build_request = MagicMock(return_value=MagicMock())
+        mock_client.send = AsyncMock(return_value=mock_response)
+
+        open_result = await stream_chat_completion(
+            client=mock_client,
+            litellm_url="http://litellm:4000",
+            litellm_master_key="test-key",
+            request_body={"model": "gpt-4o-mini", "messages": []},
+        )
+
+        # THE ASSERTION THAT MATTERS: the real parsed value, not just
+        # "streaming_result is not None" — a fix that populated
+        # streaming_result with a fresh, empty StreamingResult() would pass
+        # a not-None check while still losing the real cost.
+        assert open_result.streaming_result is not None
+        assert open_result.streaming_result.cost_usd == 0.0042
 
     @pytest.mark.asyncio
     async def test_non_2xx_with_non_json_body(self):

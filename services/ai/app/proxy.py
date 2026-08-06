@@ -212,9 +212,15 @@ async def stream_chat_completion(
 
     Returns StreamOpenResult:
         - On success (2xx): generator + streaming_result populated, error_body=None
-        - On non-2xx: error_body + status_code populated, generator=None
+        - On non-2xx: error_body + status_code populated, generator=None,
+          streaming_result IS still populated (app#549) — its cost_usd is
+          real data parsed from this response's own headers, even though no
+          generation happened; input_tokens/output_tokens stay 0 (unset),
+          which is correct here since a rejected request produced none.
 
-    Raises httpx.HTTPError on connection failure (network error, timeout).
+    Raises httpx.HTTPError on connection failure (network error, timeout) —
+    the caller has no StreamOpenResult at all in that case, and cost is
+    genuinely unknown rather than zero.
     """
     # Inject stream_options to guarantee usage in final chunk
     body = dict(request_body)
@@ -249,9 +255,17 @@ async def stream_chat_completion(
             error_body = json_mod.loads(raw_body)
         except (json_mod.JSONDecodeError, ValueError):
             error_body = {"error": {"message": raw_body.decode("utf-8", errors="replace")[:1000]}}
+        # `result.cost_usd` was already parsed from this same response's headers
+        # a few lines above — real data LiteLLM sent us, not a guess. It used to
+        # be discarded here: this branch returned a bare StreamOpenResult with
+        # no streaming_result at all, so the caller's log_usage call fell back
+        # to its 0.0 default even when a real (if usually zero) cost header was
+        # right there (app#549). Threading it through costs nothing and loses
+        # nothing that was ever actually known.
         return StreamOpenResult(
             status_code=response.status_code,
             error_body=error_body,
+            streaming_result=result,
         )
 
     async def _generate() -> AsyncIterator[bytes]:
