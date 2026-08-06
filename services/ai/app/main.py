@@ -1039,12 +1039,39 @@ async def create_delegation_endpoint(
         logger.error("delegation_token_sign_failed", status=resp.status_code, body=resp.text)
         raise HTTPException(status_code=502, detail="Failed to sign delegation token")
 
-    token_result = resp.json()
+    # A 200 does not guarantee this shape. Latent today, not live: the API
+    # service's /internal/delegation-token always returns both fields or a
+    # non-200 (see model-router-delegation.ts) — so no caller reaches this
+    # branch under the current paired implementation. It is still worth
+    # guarding the same way the non-200 branch just above it already is:
+    # this is a cross-service contract, and a rolling deploy routinely runs
+    # the two services several commits apart (the drift alarm exists
+    # because of exactly that). The same shape bit knowledge/ai for real
+    # today — generate_embeddings grew an `owner` kwarg, an integration
+    # stub with the old signature made the ingest route 500 — caught only
+    # by CI because the two services happened to be tested together. This
+    # is the same assumption one layer down: a sibling service's response
+    # holding its documented shape, with a permanently orphaned
+    # `pending-<uuid>` row if it ever doesn't.
+    try:
+        token_result = resp.json()
+        child_jti = token_result["jti"]
+        child_token = token_result["token"]
+    except Exception as e:
+        try:
+            async with get_db_conn() as conn:
+                await conn.execute(
+                    "DELETE FROM model_delegations WHERE id = $1", deleg_info["id"],
+                )
+        except Exception:
+            pass
+        logger.error("delegation_token_shape_invalid", body=resp.text, error=str(e))
+        raise HTTPException(status_code=502, detail="Failed to sign delegation token")
 
     # Update child_jti on the delegation record
     async with get_db_conn() as conn:
         await update_child_jti(
-            conn, delegation_id=deleg_info["id"], child_jti=token_result["jti"],
+            conn, delegation_id=deleg_info["id"], child_jti=child_jti,
         )
 
     logger.info(
@@ -1055,7 +1082,7 @@ async def create_delegation_endpoint(
     )
 
     return {
-        "token": token_result["token"],
+        "token": child_token,
         "delegation_id": deleg_info["id"],
         "expires_at": deleg_info["expires_at"],
     }
