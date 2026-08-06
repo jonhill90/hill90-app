@@ -7,10 +7,13 @@ Events contain metadata-only summaries — no raw stdout, file contents, or secr
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import uuid
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 class EventEmitter:
@@ -65,10 +68,50 @@ class EventEmitter:
 
         line = json.dumps(event, separators=(",", ":")) + "\n"
 
-        with self._lock:
-            with open(self._log_path, "a") as f:
-                f.write(line)
-                f.flush()
+        try:
+            with self._lock:
+                with open(self._log_path, "a") as f:
+                    f.write(line)
+                    f.flush()
+        except Exception:
+            # This is the sole notification channel for runtime.py's
+            # fire-and-forget background-thread pattern (the Starlette
+            # analogue of FastAPI BackgroundTasks): the HTTP response
+            # already went out before the real work ran, and the caller's
+            # only way to learn the outcome is this file. If the write
+            # itself fails — disk full, permission, a removed path — and
+            # this re-raised, it would escape the caller's own except
+            # block (e.g. _run_chat/_run_shell's failure-report emit()
+            # call), crashing the background thread and compounding the
+            # original failure into TOTAL silence: neither work_completed
+            # nor work_failed ever recorded anywhere.
+            #
+            # Fallback is the container's stderr, not another file write —
+            # a second disk/permission failure can't repeat this one.
+            # Verified reaching somewhere a human or query can actually
+            # see it, not assumed: server.py's logging.basicConfig() has
+            # no handlers= kwarg, so Python attaches its default
+            # StreamHandler to stderr; services/api/src/services/docker.ts
+            # creates agentbox containers against the host's real
+            # /var/run/docker.sock with no LogConfig override, so the
+            # Docker daemon's default log driver captures that stream;
+            # Hill90's docker-compose.observability.yml mounts that same
+            # host docker.sock (not a filtered proxy) into promtail, whose
+            # docker_sd_configs scrapes every container on that daemon
+            # with no include/exclude filter and ships it to Loki.
+            #
+            # EVENT_WRITE_FAILED is a stable, queryable marker — not a
+            # bare error — so an operator can tell "work failed and we
+            # told you" (the event is in events.jsonl) apart from "the
+            # telling itself failed" (absent from events.jsonl, present in
+            # Loki tagged this way, carrying the same work_id).
+            logger.error(
+                "EVENT_WRITE_FAILED: could not append to %s — event lost "
+                "from the file, only recorded here: %s",
+                self._log_path,
+                line.rstrip("\n"),
+                exc_info=True,
+            )
 
     @staticmethod
     def _truncate(text: str | None, max_len: int) -> str | None:

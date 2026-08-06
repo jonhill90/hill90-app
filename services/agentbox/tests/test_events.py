@@ -1,6 +1,8 @@
 """Tests for app.events — structured event emitter for agent observability."""
 
 import json
+import logging
+import os
 import threading
 
 from app.events import EventEmitter
@@ -158,6 +160,57 @@ class TestEventEmitter:
         event = json.loads(log_path.read_text().strip())
         assert event["correlation_id"] == "msg-uuid-123"
         assert event["metadata"]["work_id"] == "w1"
+
+    def test_emit_write_failure_falls_back_to_a_readable_log_line(self, tmp_path, caplog):
+        """THE ASSERTION THAT MATTERS. emit() is the sole notification channel
+        for runtime.py's fire-and-forget background threads: the HTTP
+        response already went out, and the caller's only way to learn the
+        outcome is this file. This forces a REAL write failure (a real
+        chmod'd-read-only file, not a mocked `open`) and asserts the caller
+        can observe SOMETHING about the failed event's content — not merely
+        that emit() returned without raising.
+
+        A version of emit() that swallows the write failure into the void
+        (bare `except Exception: pass`) would also make this method return
+        normally, which is exactly what almost passed as the fix before
+        this constraint was added — asserting only "no exception escaped"
+        cannot tell the two apart. So this asserts on the log record's
+        actual content: the original event's type and, critically, its
+        work_id (metadata) survive into the fallback, which is what lets
+        an operator later distinguish "work failed and we were told" from
+        "the telling itself failed" for a SPECIFIC work item.
+        """
+        log_path = tmp_path / "events.jsonl"
+        emitter = EventEmitter(str(log_path))
+        os.chmod(log_path, 0o444)
+        try:
+            with caplog.at_level(logging.ERROR, logger="app.events"):
+                # Must not raise — the whole point is the background
+                # thread that calls this survives a failed write.
+                emitter.emit(
+                    type="work_failed",
+                    tool="runtime",
+                    input_summary="type=chat",
+                    output_summary="error=disk pressure",
+                    duration_ms=None,
+                    success=False,
+                    metadata={"work_id": "w-caller-must-learn-this"},
+                )
+        finally:
+            os.chmod(log_path, 0o644)  # restore so tmp_path cleanup can delete it
+
+        assert len(caplog.records) == 1
+        record = caplog.records[0]
+        assert record.levelname == "ERROR"
+        # The stable marker an operator (or a Loki query) can find this by.
+        assert "EVENT_WRITE_FAILED" in record.message
+        # The original event's content actually survived into the fallback
+        # — not just "a write failed", but WHICH event and WHICH work item.
+        assert "work_failed" in record.message
+        assert "w-caller-must-learn-this" in record.message
+        # The file itself must still be empty/unwritten — this proves the
+        # test forced a real failure, not a no-op success.
+        assert log_path.read_text() == ""
 
     def test_emit_no_correlation_id_when_none(self, tmp_path):
         """correlation_id field is omitted (not null) when not provided."""
