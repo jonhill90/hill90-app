@@ -335,6 +335,130 @@ describe('POST /workflows/webhook/:token — a failed run labels itself (the pub
   });
 });
 
+describe('POST /workflows/:id/run — thread_id survives a later failure (app#542)', () => {
+  /**
+   * Everything through the thread create succeeds, but the message insert —
+   * a statement that sits BETWEEN thread creation and where thread_id used
+   * to be written (right before the trailing last_run_at update, after
+   * dispatch fires) — throws. Before the fix this failure point meant
+   * thread_id was never reached: the write hadn't happened yet. After the
+   * fix, thread_id is written immediately once the thread exists, so it
+   * survives even though the request still fails and the run is labelled
+   * error. Picking a LATER failure point (e.g. last_run_at) would not
+   * discriminate old code from new — both wrote thread_id before that
+   * statement — so the failure has to land inside the old gap specifically.
+   */
+  function failAtMessageInsert() {
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/FROM workflows w/.test(s)) {
+        return Promise.resolve({
+          rows: [{
+            id: 'wf-1', agent_id: 'a-1', agent_slug: 'scout', agent_status: 'running',
+            work_token: 'wt', prompt: 'go', created_by: 'user-1', model_policy_id: null,
+          }],
+        });
+      }
+      if (/INSERT INTO workflow_runs/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'run-1', workflow_id: 'wf-1', status: 'running' }] });
+      }
+      if (/INSERT INTO chat_threads/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'thread-1' }] });
+      }
+      if (/UPDATE workflow_runs SET thread_id/.test(s)) {
+        return Promise.resolve({ rows: [], rowCount: 1 });
+      }
+      if (/INSERT INTO chat_participants/.test(s)) return Promise.resolve({ rows: [] });
+      if (/INSERT INTO chat_messages/.test(s)) {
+        return Promise.reject(new Error('message insert failed'));
+      }
+      // The error-labelling UPDATE the outer catch issues.
+      if (/UPDATE workflow_runs/.test(s)) return Promise.resolve({ rows: [], rowCount: 1 });
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it('POSITIVE CONTROL: thread_id is set on the run even though a later statement fails and the run ends up labelled error', async () => {
+    failAtMessageInsert();
+
+    const res = await request(app)
+      .post('/workflows/wf-1/run')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({});
+
+    expect(res.status).toBe(500);
+
+    // The run IS labelled error — the already-fixed half-write guard.
+    const marking = mockQuery.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => /UPDATE workflow_runs/.test(s) && /status = 'error'/.test(s));
+    expect(marking.length).toBeGreaterThan(0);
+
+    // The load-bearing assertion for app#542: thread_id was set on run-1
+    // BEFORE the message insert threw, so an errored run still points at
+    // the thread that genuinely got created, instead of leaving thread_id
+    // NULL forever on a row already labelled error.
+    const threadLink = mockQuery.mock.calls.find(
+      (c) => /UPDATE workflow_runs SET thread_id/.test(String(c[0])),
+    );
+    expect(threadLink).toBeDefined();
+    expect(threadLink![1]).toEqual(['thread-1', 'run-1']);
+  });
+});
+
+describe('POST /workflows/webhook/:token — thread_id survives a later failure (app#542, the same twin)', () => {
+  function failAtMessageInsert() {
+    mockQuery.mockImplementation((sql: string) => {
+      const s = String(sql);
+      if (/FROM workflows w/.test(s)) {
+        return Promise.resolve({
+          rows: [{
+            id: 'wf-1', agent_id: 'a-1', agent_slug: 'scout', agent_status: 'running',
+            work_token: 'wt', prompt: 'go', created_by: 'user-1', name: 'Nightly Scout',
+            allowed_models: ['m'],
+          }],
+        });
+      }
+      if (/INSERT INTO workflow_runs/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'run-1', workflow_id: 'wf-1', status: 'running' }] });
+      }
+      if (/INSERT INTO chat_threads/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'thread-1' }] });
+      }
+      if (/UPDATE workflow_runs SET thread_id/.test(s)) {
+        return Promise.resolve({ rows: [], rowCount: 1 });
+      }
+      if (/INSERT INTO chat_participants/.test(s)) return Promise.resolve({ rows: [] });
+      if (/INSERT INTO chat_messages/.test(s)) {
+        return Promise.reject(new Error('message insert failed'));
+      }
+      if (/UPDATE workflow_runs/.test(s)) return Promise.resolve({ rows: [], rowCount: 1 });
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it('POSITIVE CONTROL: thread_id is set on the run even though a later statement fails and the run ends up labelled error', async () => {
+    failAtMessageInsert();
+
+    const res = await request(app)
+      .post('/workflows/webhook/some-token')
+      .send({});
+
+    expect(res.status).toBe(500);
+
+    const marking = mockQuery.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => /UPDATE workflow_runs/.test(s) && /status = 'error'/.test(s));
+    expect(marking.length).toBeGreaterThan(0);
+
+    const threadLink = mockQuery.mock.calls.find(
+      (c) => /UPDATE workflow_runs SET thread_id/.test(String(c[0])),
+    );
+    expect(threadLink).toBeDefined();
+    expect(threadLink![1]).toEqual(['thread-1', 'run-1']);
+  });
+});
+
 describe('POST /chat/threads — the three inserts are one transaction', () => {
   it('rolls back and does not commit when a later insert fails', async () => {
     mockQuery.mockImplementation((sql: string) => {
