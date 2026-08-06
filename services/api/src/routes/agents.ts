@@ -26,6 +26,30 @@ import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
 import { isValidCronExpression } from '../helpers/cron';
 
+// Write-side twin of parseCpus's read-side check in services/docker.ts —
+// same rule (a positive, finite decimal), deliberately NOT imported from
+// there. Every route handler in this file that touches Docker is exercised
+// through dozens of test files that `jest.mock('../services/docker', ...)`
+// with their own hand-built replacement object; importing parseCpus would
+// make this validator silently start rejecting valid input the moment any
+// of those mocks omitted it (the try/catch below would swallow the
+// resulting "parseCpus is not a function" and report it as a validation
+// failure, not a wiring bug). Validating only at container-start left every
+// existing row — including anything written before this check existed —
+// trusted forever until an agent happened to start; validating only here
+// would let a bad value sit in the database and fail (or, before this fix,
+// silently not fail at all) the next time it's read. Both sides need to
+// reject the same inputs; they don't need to share one function to do it.
+function cpusValidationError(cpus: unknown): string | null {
+  if (typeof cpus !== 'string') return 'cpus must be a string';
+  const match = cpus.match(/^(\d+(?:\.\d+)?)$/);
+  const value = match ? parseFloat(match[1]) : NaN;
+  if (!Number.isFinite(value) || value <= 0) {
+    return 'cpus must be a positive number (e.g. "1.0")';
+  }
+  return null;
+}
+
 // app#374: agents.env_vars stored operator-supplied environment variables —
 // including, per the UI's own AgentClaudeConfig.tsx form, a raw Anthropic
 // API key — in plain JSONB, at rest and on every read. Same class of secret
@@ -408,6 +432,17 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       }
     }
 
+    // Validate cpus if provided — falsy values fall through to the '1.0'
+    // default a few lines below, so only a truthy-but-malformed value is
+    // rejected here.
+    if (cpus) {
+      const cpusError = cpusValidationError(cpus);
+      if (cpusError) {
+        res.status(400).json({ error: cpusError });
+        return;
+      }
+    }
+
     // Reject legacy field
     if (req.body.tool_preset_id !== undefined) {
       res.status(400).json({ error: 'tool_preset_id is deprecated. Use skill_ids instead.' });
@@ -750,6 +785,14 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
       return;
     }
 
+    if (config.cpus) {
+      const cpusError = cpusValidationError(config.cpus);
+      if (cpusError) {
+        res.status(400).json({ error: cpusError });
+        return;
+      }
+    }
+
     const validLevels = ['ask_before_acting', 'act_within_scope', 'full_autonomy'];
     const autonomyLevel = config.autonomy_level && validLevels.includes(config.autonomy_level)
       ? config.autonomy_level
@@ -943,6 +986,17 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
       const validLevels = ['ask_before_acting', 'act_within_scope', 'full_autonomy'];
       if (!validLevels.includes(autonomy_level)) {
         res.status(400).json({ error: `autonomy_level must be one of: ${validLevels.join(', ')}` });
+        return;
+      }
+    }
+
+    // Validate cpus if provided — a falsy value below becomes `null`, which
+    // COALESCE treats as "leave the existing value unchanged", so only a
+    // truthy-but-malformed value needs rejecting here.
+    if (cpus) {
+      const cpusError = cpusValidationError(cpus);
+      if (cpusError) {
+        res.status(400).json({ error: cpusError });
         return;
       }
     }

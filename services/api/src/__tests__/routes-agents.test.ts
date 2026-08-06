@@ -155,6 +155,42 @@ describe('Agent CRUD routes', () => {
     expect(res.status).toBe(400);
   });
 
+  // Write-side twin of the docker-service.test.ts NaN-to-null CPU fix:
+  // a malformed cpus value must be refused at profile-write time, not
+  // stored and only fail (or, before that fix, not fail at all) when an
+  // agent using it eventually starts.
+  it('POST /agents rejects a malformed cpus value', async () => {
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', cpus: 'garbage' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cpus must be a positive number/);
+  });
+
+  it('POST /agents accepts a valid cpus value', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', name: 'Test', status: 'stopped', created_by: 'regular-user', cpus: '2.0' }],
+      })
+      .mockResolvedValueOnce({ rows: [] }); // SELECT skills for response
+
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', cpus: '2.0' });
+    expect(res.status).toBe(201);
+  });
+
+  it('POST /agents/import rejects a malformed cpus value', async () => {
+    const res = await request(app)
+      .post('/agents/import')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'imported-agent', name: 'Imported', cpus: 'lots' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cpus must be a positive number/);
+  });
+
   it('POST /agents rejects missing fields', async () => {
     const res = await request(app)
       .post('/agents')
@@ -787,6 +823,20 @@ describe('Agent container profile wiring', () => {
     );
     expect(updateCall).toBeTruthy();
     expect(updateCall![0]).toContain('container_profile_id');
+  });
+
+  it('PUT /agents/:id rejects a malformed cpus value', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'uuid-1', agent_id: 'test', status: 'stopped', created_by: 'regular-user', model_policy_id: null }],
+    }); // SELECT existing agent
+
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ cpus: 'unlimited' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cpus must be a positive number/);
   });
 
   // THE ASSERTION THAT MATTERS (app#212 family — sibling drift sweep).
