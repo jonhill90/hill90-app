@@ -1341,7 +1341,20 @@ async def internal_embeddings(request: Request, authorization: str = Header(...)
     except Exception as e:
         logger.warning("usage_log_failed", error=str(e))
 
-    return JSONResponse(content=result)
+    # app#454. Its twin /v1/embeddings passes status_code=result["status_code"];
+    # this endpoint didn't, so FastAPI defaulted to 200 regardless of what
+    # LiteLLM actually returned. The caller (knowledge's _via_model_router)
+    # has a correct, specific error path for this — `if resp.status_code !=
+    # 200: log the real upstream status; return None` — and it was
+    # unreachable: with a defaulted 200, execution fell through to
+    # `body["data"]`, KeyError'd on an error payload, and a broad except
+    # returned the same None the intended path would have. Same outcome
+    # for the caller either way, useless log line either way — this is a
+    # diagnostic fix, not a functional one. `content=result` (the whole
+    # envelope, not result["body"]) is unchanged and deliberate: the
+    # caller's own `data.get("body", data)` names that contract, and
+    # nothing here should touch it.
+    return JSONResponse(content=result, status_code=result["status_code"])
 
 
 class LogUsageRequest(BaseModel):
