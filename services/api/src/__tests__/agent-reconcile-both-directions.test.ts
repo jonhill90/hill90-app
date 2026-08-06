@@ -172,8 +172,11 @@ describe('the direction that did not exist', () => {
     expect(history![1]).toEqual(['uuid-1', 'stopped', 'running', 'reconciler']);
   });
 
-  it('the old direction still works: a running row with an exited container is demoted', async () => {
-    selectAgents([agentRow({ status: 'running', container_id: 'container-id-123', container_state: 'running' })]);
+  it('the old direction still works: a running row with an exited container is demoted, once confirmed (app#534)', async () => {
+    // container_state: 'exited', not 'running' — this row already survived one
+    // pass's grace period (app534-reconciler-race.test.ts covers that pass on
+    // its own); this asserts demotion still fires once it has.
+    selectAgents([agentRow({ status: 'running', container_id: 'container-id-123', container_state: 'exited' })]);
     mockContainerInspect.mockResolvedValue(container('exited'));
 
     const result = await runReconcilePass();
@@ -199,13 +202,17 @@ describe('absence and ill-health stay distinguishable after the fact', () => {
   it('POSITIVE CONTROL: a vanished container records absent, an exited one records exited', async () => {
     // Same recorded status, same demotion, two different observations — the
     // difference that used to survive only in prose in `error_message`.
+    // Absence still demotes on the first sighting (no restart policy exists to
+    // race against a container that is truly gone); the exited case's fixture
+    // starts from container_state: 'exited', i.e. already confirmed once,
+    // matching app#534's grace period on the "still exists" side.
     selectAgents([agentRow({ status: 'running', container_state: 'running' })]);
     mockContainerInspect.mockRejectedValue(absent());
     await runReconcilePass();
     const vanished = statusUpdate();
 
     mockQuery.mockReset();
-    selectAgents([agentRow({ status: 'running', container_state: 'running' })]);
+    selectAgents([agentRow({ status: 'running', container_state: 'exited' })]);
     mockContainerInspect.mockReset();
     mockContainerInspect.mockResolvedValue(container('exited'));
     await runReconcilePass();

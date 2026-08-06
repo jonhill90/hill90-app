@@ -88,7 +88,12 @@ afterEach(() => {
 
 describe('the reconciler closes a demoted session with an exact time when Docker still has one', () => {
   it('POSITIVE CONTROL: a container still present in an exited state supplies the real FinishedAt', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [agentRow()] });
+    // container_state: 'exited', not the fixture default 'running' — app#534
+    // made a first sighting of "exited" record-only rather than an immediate
+    // demotion (unless-stopped gets one pass to revive it), so this row
+    // represents the SECOND pass, the one where a demotion — and the
+    // FinishedAt this test is actually about — happens at all.
+    mockQuery.mockResolvedValueOnce({ rows: [agentRow({ container_state: 'exited' })] });
     mockContainerInspect.mockResolvedValue({
       Id: 'c1',
       State: { Status: 'exited', FinishedAt: '2026-08-01T03:04:05.000Z' },
@@ -119,7 +124,13 @@ describe('the reconciler closes a demoted session with an exact time when Docker
     // this trusting would stamp every open agent's eventual close a few
     // thousand years in the past the moment it ever WAS demoted for any
     // other transient reason.
-    mockQuery.mockResolvedValueOnce({ rows: [agentRow()] });
+    // Same app#534 reasoning as the POSITIVE CONTROL above: container_state
+    // starts 'exited' so this pass is the confirmed one, where a demotion —
+    // and the zero-value handling this test exists to check — actually
+    // happens. On a first-sighting fixture this assertion would still pass,
+    // but vacuously: a record-only write never carries containerFinishedAt
+    // at all, matching "no Date" regardless of what FinishedAt said.
+    mockQuery.mockResolvedValueOnce({ rows: [agentRow({ container_state: 'exited' })] });
     mockContainerInspect.mockResolvedValue({
       Id: 'c1',
       State: { Status: 'exited', FinishedAt: '0001-01-01T00:00:00Z' },
@@ -130,6 +141,11 @@ describe('the reconciler closes a demoted session with an exact time when Docker
     await runReconcilePass();
 
     const patch = agentsPatchUpdate();
+    expect(patch).toBeDefined();
+    // agentsPatchUpdate()'s SQL-shape finder matches a record-only write too
+    // (it also sets `status = $1`, just to the unchanged value) — the actual
+    // status VALUE is what proves this was a real demotion and not that.
+    expect((patch![1] as unknown[])[0]).toBe('stopped');
     const patchParams = (patch?.[1] as unknown[]) || [];
     expect(patchParams.some((p) => p instanceof Date)).toBe(false);
 
