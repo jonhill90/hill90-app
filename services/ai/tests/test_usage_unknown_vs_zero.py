@@ -257,10 +257,26 @@ class TestInternalEmbeddingsUnknownOnProxyRaise:
         request = _FakeRequest({"model": "text-embedding-3-small", "input": "hi", "owner": None})
         mock_log_usage = AsyncMock()
 
+        # app#548: internal_embeddings now checks check_rate_limit/check_token_budget
+        # before proxy_embeddings ever runs. Both mocked as allowed here — this test
+        # is about the proxy-raises shape, not enforcement, which has its own tests
+        # in test_internal_embeddings_usage.py.
+        from app.limits import BudgetResult, RateLimitResult
+
         with (
             patch.object(app_main, "get_settings", MagicMock(return_value=fake_settings)),
             patch.object(app_main, "_http_client", object()),
             patch.object(app_main, "get_db_conn"),
+            patch.object(
+                app_main, "check_rate_limit",
+                AsyncMock(return_value=RateLimitResult(allowed=True, count=1, limit=300, retry_after=0)),
+            ),
+            patch.object(
+                app_main, "check_token_budget",
+                AsyncMock(return_value=BudgetResult(
+                    allowed=True, tokens_used=100, limit=5_000_000, resets_at="2026-01-01T00:00:00+00:00"
+                )),
+            ),
             patch.object(
                 app_main, "proxy_embeddings",
                 AsyncMock(side_effect=RuntimeError("connection reset")),

@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app import main as app_main
+from app.limits import BudgetResult, RateLimitResult
 
 
 class FakeRequest:
@@ -45,6 +46,14 @@ class _Settings:
     model_router_internal_service_token = "svc-token"
     litellm_url = "http://litellm:4000"
     litellm_master_key = "master-key"
+    internal_embeddings_max_rpm = 300
+    internal_embeddings_max_tokens_per_day = 5_000_000
+
+
+_ALLOWED_RATE = AsyncMock(return_value=RateLimitResult(allowed=True, count=1, limit=300, retry_after=0))
+_ALLOWED_BUDGET = AsyncMock(
+    return_value=BudgetResult(allowed=True, tokens_used=100, limit=5_000_000, resets_at="2026-01-01T00:00:00+00:00")
+)
 
 
 @pytest.mark.asyncio
@@ -63,6 +72,8 @@ async def test_internal_embeddings_records_usage_with_real_token_counts(monkeypa
     with patch.object(app_main, "get_db_conn", conn_ctx(conn)), \
          patch.object(app_main, "log_usage", mock_log_usage), \
          patch.object(app_main, "proxy_embeddings", mock_proxy), \
+         patch.object(app_main, "check_rate_limit", _ALLOWED_RATE), \
+         patch.object(app_main, "check_token_budget", _ALLOWED_BUDGET), \
          patch.object(app_main, "get_settings", lambda: _Settings()), \
          patch.object(app_main, "_http_client", MagicMock()):
         req = FakeRequest({"model": "text-embedding-3-small", "input": ["hello world"]})
@@ -95,6 +106,8 @@ async def test_internal_embeddings_records_usage_on_upstream_error(monkeypatch):
     with patch.object(app_main, "get_db_conn", conn_ctx(conn)), \
          patch.object(app_main, "log_usage", mock_log_usage), \
          patch.object(app_main, "proxy_embeddings", AsyncMock(side_effect=RuntimeError("litellm unreachable"))), \
+         patch.object(app_main, "check_rate_limit", _ALLOWED_RATE), \
+         patch.object(app_main, "check_token_budget", _ALLOWED_BUDGET), \
          patch.object(app_main, "get_settings", lambda: _Settings()), \
          patch.object(app_main, "_http_client", MagicMock()):
         req = FakeRequest({"model": "text-embedding-3-small", "input": ["hello"]})
@@ -104,3 +117,69 @@ async def test_internal_embeddings_records_usage_on_upstream_error(monkeypatch):
     mock_log_usage.assert_called_once()
     _, kwargs = mock_log_usage.call_args
     assert kwargs["status"] == "error"
+
+
+# app#548 — THE ENFORCEMENT GAP ITSELF. Before this fix, nothing here ever
+# called check_rate_limit or check_token_budget at all, so no value of
+# either could ever block a call. THE ASSERTION THAT MATTERS is that
+# proxy_embeddings — the thing that actually spends money — is never
+# reached when either check denies, not just that a 429 comes back.
+@pytest.mark.asyncio
+async def test_internal_embeddings_blocks_when_rate_limited(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@fake-host:5432/db")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    conn = AsyncMock()
+    mock_log_usage = AsyncMock()
+    mock_proxy = AsyncMock()
+    denied_rate = AsyncMock(return_value=RateLimitResult(allowed=False, count=300, limit=300, retry_after=42))
+
+    with patch.object(app_main, "get_db_conn", conn_ctx(conn)), \
+         patch.object(app_main, "log_usage", mock_log_usage), \
+         patch.object(app_main, "proxy_embeddings", mock_proxy), \
+         patch.object(app_main, "check_rate_limit", denied_rate), \
+         patch.object(app_main, "check_token_budget", _ALLOWED_BUDGET), \
+         patch.object(app_main, "get_settings", lambda: _Settings()), \
+         patch.object(app_main, "_http_client", MagicMock()):
+        req = FakeRequest({"model": "text-embedding-3-small", "input": ["hello"]})
+        res = await app_main.internal_embeddings(req, authorization="Bearer svc-token")
+
+    assert res.status_code == 429
+    mock_proxy.assert_not_called()
+    mock_log_usage.assert_called_once()
+    _, kwargs = mock_log_usage.call_args
+    assert kwargs["status"] == "rate_limited"
+    assert kwargs["agent_id"] == app_main.INTERNAL_EMBEDDINGS_AGENT_ID
+
+
+@pytest.mark.asyncio
+async def test_internal_embeddings_blocks_when_budget_exhausted(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@fake-host:5432/db")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    conn = AsyncMock()
+    mock_log_usage = AsyncMock()
+    mock_proxy = AsyncMock()
+    denied_budget = AsyncMock(
+        return_value=BudgetResult(
+            allowed=False, tokens_used=5_000_000, limit=5_000_000, resets_at="2026-01-01T00:00:00+00:00"
+        )
+    )
+
+    with patch.object(app_main, "get_db_conn", conn_ctx(conn)), \
+         patch.object(app_main, "log_usage", mock_log_usage), \
+         patch.object(app_main, "proxy_embeddings", mock_proxy), \
+         patch.object(app_main, "check_rate_limit", _ALLOWED_RATE), \
+         patch.object(app_main, "check_token_budget", denied_budget), \
+         patch.object(app_main, "get_settings", lambda: _Settings()), \
+         patch.object(app_main, "_http_client", MagicMock()):
+        req = FakeRequest({"model": "text-embedding-3-small", "input": ["hello"]})
+        res = await app_main.internal_embeddings(req, authorization="Bearer svc-token")
+
+    assert res.status_code == 429
+    mock_proxy.assert_not_called()
+    mock_log_usage.assert_called_once()
+    _, kwargs = mock_log_usage.call_args
+    assert kwargs["status"] == "budget_exceeded"
