@@ -191,8 +191,15 @@ services:
   api:
     networks: [default, edge, agent_internal, agent_sandbox, app_internal]
     environment:
-      KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
-      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      # realms/platform, not realms/hill90: this overlays compose/local.yml's
+      # own app-keycloak, whose ./local/keycloak/realm-local.json declares
+      # "realm": "platform" — verified live (bring the keycloak service up in
+      # isolation and /realms/hill90 404s while /realms/platform 200s). Same
+      # fact as compose/local.yml's KEYCLOAK_ISSUER, unaffected by this
+      # overlay's own STATUS-superseded note above — the realm segment is
+      # wrong regardless of whether anything currently drives this file.
+      KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/platform
+      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/platform/protocol/openid-connect/certs
       # services/api attaches agent containers to <prefix>_agent_{internal,sandbox}
       # by name. Under this overlay the prefix is infra's, not the default.
       AGENT_NETWORK_PREFIX: ${NETWORK_PREFIX:-hill90}
@@ -218,7 +225,8 @@ services:
     networks: [default, edge, app_internal]
     environment:
       # Base file uses the ambiguous `keycloak`; see the keycloak note above.
-      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      # realms/platform: see the api service's KEYCLOAK_ISSUER comment above.
+      KEYCLOAK_JWKS_URI: http://app-keycloak:8080/realms/platform/protocol/openid-connect/certs
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=${NETWORK_PREFIX:-hill90}_edge"
@@ -238,11 +246,12 @@ services:
   ui:
     networks: [default, edge, app_internal]
     environment:
-      AUTH_KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/hill90
+      # realms/platform: see the api service's KEYCLOAK_ISSUER comment above.
+      AUTH_KEYCLOAK_ISSUER: http://${APP_AUTH_HOST:-app-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/platform
       # Still required: the browser resolves the Traefik hostname, but this
       # container cannot, so the back-channel keeps using the service name.
       KEYCLOAK_INTERNAL_URL: http://app-keycloak:8080
-      KEYCLOAK_INTERNAL_ISSUER: http://app-keycloak:8080/realms/hill90
+      KEYCLOAK_INTERNAL_ISSUER: http://app-keycloak:8080/realms/platform
       AUTH_URL: http://${UI_HOST:-app}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
       API_WS_URL: ws://${API_HOST:-api}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}
     labels:

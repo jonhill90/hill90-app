@@ -205,8 +205,15 @@ services:
       # Must match the UI's AUTH_KEYCLOAK_ISSUER exactly or the `iss` claim
       # fails. This is the browser-facing URL because that is what Keycloak
       # stamps into tokens.
-      KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/hill90
-      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      #
+      # realms/platform, not realms/hill90: ./local/keycloak/realm-local.json
+      # (imported by the keycloak service below) declares "realm": "platform" —
+      # verified live by bringing the keycloak service up in isolation and
+      # confirming /realms/hill90 404s while /realms/platform 200s. A realm
+      # segment of hill90 here would point this container's own Keycloak
+      # client at a realm its own Keycloak never imports.
+      KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/platform
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/platform/protocol/openid-connect/certs
       AI_SERVICE_URL: http://ai:8000
       MODEL_ROUTER_URL: http://ai:8000
       AKM_SERVICE_URL: http://knowledge:8002
@@ -341,8 +348,10 @@ services:
     container_name: hill90-mcp
     environment:
       ENVIRONMENT: local
-      KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/hill90
-      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/hill90/protocol/openid-connect/certs
+      # realms/platform: see the api service's KEYCLOAK_ISSUER comment above —
+      # the same realm-local.json-imports-"platform" fact applies here.
+      KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/platform
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/platform/protocol/openid-connect/certs
       # All three exporters must be "none": OTEL_SDK_DISABLED alone still lets
       # opentelemetry-instrument resolve metric/log exporters and throw.
       OTEL_SDK_DISABLED: "true"
@@ -371,11 +380,12 @@ services:
       MCP_URL: http://mcp:8001
       KEYCLOAK_INTERNAL_URL: http://keycloak:8080
       # Browser-facing, and must match the API's KEYCLOAK_ISSUER exactly.
-      AUTH_KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/hill90
+      # realms/platform: see the api service's KEYCLOAK_ISSUER comment above.
+      AUTH_KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/platform
       # Back-channel URL: the browser reaches Keycloak on a published port,
       # this container reaches it by service name. Setting this pins the token,
       # userinfo and JWKS endpoints and skips discovery.
-      KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/hill90
+      KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/platform
       AUTH_KEYCLOAK_ID: ${AUTH_KEYCLOAK_ID:-hill90-ui}
       AUTH_KEYCLOAK_SECRET: ${AUTH_KEYCLOAK_SECRET:-local-dev-secret}
       AUTH_SECRET: ${AUTH_SECRET}
