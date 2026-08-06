@@ -76,13 +76,17 @@ export default function ProfilesClient() {
               setFormError('')
               const url = editingId ? `/api/container-profiles/${editingId}` : '/api/container-profiles'
               const method = editingId ? 'PUT' : 'POST'
-              const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...form, default_pids_limit: parseInt(form.default_pids_limit) }) })
-              if (res.ok) {
-                setShowForm(false)
-                fetchProfiles()
-              } else {
-                const body = await res.json().catch(() => ({}))
-                setFormError(body.error || (editingId ? 'Failed to update profile' : 'Failed to create profile'))
+              try {
+                const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...form, default_pids_limit: parseInt(form.default_pids_limit) }) })
+                if (res.ok) {
+                  setShowForm(false)
+                  fetchProfiles()
+                } else {
+                  const body = await res.json().catch(() => ({}))
+                  setFormError(body.error || (editingId ? 'Failed to update profile' : 'Failed to create profile'))
+                }
+              } catch {
+                setFormError(editingId ? 'Failed to update profile' : 'Failed to create profile')
               }
             }} disabled={!form.name} className="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm font-medium disabled:opacity-50 cursor-pointer">
               {editingId ? 'Save' : 'Create'}
@@ -158,12 +162,16 @@ export default function ProfilesClient() {
                       {!profile.is_platform && (
                         <button onClick={async () => {
                           if (!confirm('Delete?')) return
-                          const res = await fetch(`/api/container-profiles/${profile.id}`, { method: 'DELETE' })
-                          if (res.ok) {
-                            fetchProfiles()
-                          } else {
-                            const body = await res.json().catch(() => ({}))
-                            alert(body.error || 'Failed to delete profile')
+                          try {
+                            const res = await fetch(`/api/container-profiles/${profile.id}`, { method: 'DELETE' })
+                            if (res.ok) {
+                              fetchProfiles()
+                            } else {
+                              const body = await res.json().catch(() => ({}))
+                              alert(body.error || 'Failed to delete profile')
+                            }
+                          } catch {
+                            alert('Failed to delete profile')
                           }
                         }}
                           className="text-xs text-red-400 hover:text-red-300 cursor-pointer ml-2">Delete</button>
