@@ -59,7 +59,27 @@ test.describe("TopBar Features", () => {
     await search.fill("test query");
     await search.press("Enter");
 
-    await page.waitForURL(/shared-knowledge.*q=test\+query/, { timeout: 10_000 });
+    // TopBar.tsx navigates via
+    // `?q=${encodeURIComponent(searchQuery.trim())}`, which percent-encodes
+    // a space as %20 — never as a literal `+`. This asserted on the raw URL
+    // containing `test+query`, which encodeURIComponent was never going to
+    // produce; investigated whether the app or the test was wrong before
+    // touching either (per review): the consumer,
+    // shared-knowledge/page.tsx's `searchParams.get('q')`, is Next.js's
+    // useSearchParams(), backed by the standard URLSearchParams — verified
+    // empirically that URLSearchParams treats `+` and `%20` as identical,
+    // both decoding to a literal space (`new URLSearchParams("q=test+query")
+    // .get("q")` and `new URLSearchParams("q=test%20query").get("q")` both
+    // return "test query"). So the app's encoding is correct and the
+    // consumer reads it correctly either way — this was the test asserting
+    // a raw-URL encoding detail unrelated to whether search actually works,
+    // not an app bug. Fixed to check the DECODED query value via the URL
+    // object, which is correct regardless of which valid encoding the app
+    // chooses to produce.
+    await page.waitForURL(
+      (url) => url.pathname.includes("shared-knowledge") && url.searchParams.get("q") === "test query",
+      { timeout: 10_000 }
+    );
   });
 
   test("search bar is hidden on mobile", async ({ page }) => {

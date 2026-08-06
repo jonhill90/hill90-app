@@ -45,7 +45,11 @@ test.describe("Library & Knowledge", () => {
 
     await expect(page.getByText("Library")).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText("Hill90 Platform")).toBeVisible();
-    await expect(page.getByText(/\d+ sources/)).toBeVisible();
+    // SharedKnowledgeClient.tsx renders `{n} source{n!==1?'s':''}` — the
+    // count is genuinely singular when it's exactly 1. The plural-only
+    // regex was the test being lazy about the component's own correct
+    // grammar, not a stale selector; fixed to match either.
+    await expect(page.getByText(/\d+ sources?/)).toBeVisible();
   });
 
   test("library search returns results", async ({ page }) => {
@@ -58,7 +62,9 @@ test.describe("Library & Knowledge", () => {
     await page.getByPlaceholder("Search shared knowledge...").fill("deployment");
     await page.getByRole("button", { name: "Search" }).nth(1).click();
 
-    await expect(page.getByText(/\d+ results/)).toBeVisible({ timeout: 15_000 });
+    // Same singular/plural grammar as the source count above —
+    // `{n} result{n!==1?'s':''}` in SharedKnowledgeClient.tsx.
+    await expect(page.getByText(/\d+ results?/)).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText("Deployment Runbook")).toBeVisible();
   });
 

@@ -54,8 +54,20 @@ async function ensureRunningAgent(page: Page): Promise<string> {
     return name?.trim() || "Agent";
   }
 
-  // No running agents — start the first stopped one
-  const startBtn = page.getByRole("button", { name: "Start" }).first();
+  // No running agents — start the first stopped one.
+  //
+  // exact: true is load-bearing, not stylistic. AgentsClient.tsx also
+  // renders a page-level bulk action, `Start All (${stoppedCount})`, ahead
+  // of the per-agent cards in DOM order. Playwright's getByRole name match
+  // is a substring match by default, so a bare {name: "Start"} matches
+  // BOTH buttons, and .first() would silently resolve to the bulk one
+  // whenever the test account is admin with any stopped agents — starting
+  // every stopped agent instead of just one, with no error, since .first()
+  // suppresses Playwright's own strict-mode ambiguity check. The per-agent
+  // button's accessible name is exactly "Start" (AgentsClient.tsx: `{...
+  // ? 'Starting...' : 'Start'}`); the bulk button's is never exactly that
+  // string, so exact: true is what actually disambiguates them.
+  const startBtn = page.getByRole("button", { name: "Start", exact: true }).first();
   await expect(startBtn).toBeVisible({ timeout: 5_000 });
   await startBtn.click();
 
@@ -125,9 +137,18 @@ test.describe("Agent Chat Flow", () => {
       .first().textContent().catch(() => "");
     expect(responseText).not.toMatch(/unauthorized|login|403|401/i);
 
-    // ── Step 5: Toggle Live Session and verify terminal ──
-    const sessionToggle = page.getByTestId("session-toggle");
-    await sessionToggle.click();
+    // ── Step 5: Open Live Session (Terminal tab) and verify terminal ──
+    // ChatView.tsx no longer has a single generic toggle — it was replaced
+    // by three explicit tab buttons (session-tab-terminal/browser/events)
+    // that both select the tab and open the pane in one click. Confirmed
+    // this reaches the identical end state the old toggle produced, not
+    // just a plausible-looking substitute: activeSessionTab already
+    // defaults to 'terminal', and clicking session-tab-terminal sets
+    // sessionPaneOpen=true with activeSessionTab='terminal', which is what
+    // <SessionPane initialTab={activeSessionTab} /> renders from
+    // (ChatView.tsx ~61-62, ~289-291, ~396-411).
+    const sessionTerminalTab = page.getByTestId("session-tab-terminal");
+    await sessionTerminalTab.click();
 
     // Session pane should appear with Terminal tab active
     const sessionPane = page.getByTestId("session-pane");
