@@ -1,5 +1,6 @@
 import Docker from 'dockerode';
 import { Readable, Transform } from 'stream';
+import { MAX_AGENT_CPUS, MAX_AGENT_MEM_BYTES, MAX_AGENT_PIDS_LIMIT } from '../helpers/agent-resource-limits';
 
 function createDockerClient(): Docker {
   const dockerHost = process.env.DOCKER_HOST;
@@ -122,14 +123,17 @@ export async function createAndStartContainer(opts: CreateAgentContainerOpts): P
   const configMount = `${hostPath}/${opts.agentId}`;
   const nanoCpus = Math.round(parseCpus(opts.cpus) * 1e9);
   const memoryBytes = parseMemLimit(opts.memLimit);
-  // MAX_PIDS_LIMIT mirrors routes/agents.ts's MAX_AGENT_PIDS_LIMIT (the
-  // highest default_pids_limit among current container_profiles rows) —
-  // same duplication reasoning as MAX_CPUS/MAX_MEM_BYTES above. Docker's
-  // PidsLimit field accepts any integer, including negative values as its
-  // own "-1 = unlimited" sentinel, so this is not redundant with anything
-  // Docker itself enforces the way the cpus range check is.
-  if (!Number.isInteger(opts.pidsLimit) || opts.pidsLimit <= 0 || opts.pidsLimit > 300) {
-    throw new Error(`Invalid pidsLimit: ${opts.pidsLimit} (must be a positive integer, max 300)`);
+  // MAX_AGENT_PIDS_LIMIT imported from helpers/agent-resource-limits.ts —
+  // the same constant routes/agents.ts enforces, not a bare literal (app#596
+  // REVIEW: this used to be an uncommented `300` typed directly into both
+  // the condition and the error message here, naming a "MAX_PIDS_LIMIT"
+  // constant in its own comment that did not exist anywhere — someone
+  // grepping for it would have found nothing). Docker's PidsLimit field
+  // accepts any integer, including negative values as its own "-1 =
+  // unlimited" sentinel, so this is not redundant with anything Docker
+  // itself enforces the way the cpus range check is.
+  if (!Number.isInteger(opts.pidsLimit) || opts.pidsLimit <= 0 || opts.pidsLimit > MAX_AGENT_PIDS_LIMIT) {
+    throw new Error(`Invalid pidsLimit: ${opts.pidsLimit} (must be a positive integer, max ${MAX_AGENT_PIDS_LIMIT})`);
   }
 
   // Build env array with optional profile extra_env
@@ -860,25 +864,25 @@ export async function reconcileAgentStatuses(
  * itself produce `NaN` from that. `parseMemLimit` already followed this
  * shape; this field just hadn't, until now.
  */
-// Same two numbers routes/agents.ts's write-side validators enforce
-// (MAX_AGENT_CPUS / MAX_AGENT_MEM_BYTES there) — measured against the real
-// VPS (`nproc`, `docker info --format '{{.MemTotal}}'`), Verified
-// 2026-08-06. Deliberately duplicated rather than imported: agents.ts
-// already imports createAndStartContainer etc. FROM this module, so an
-// import the other way round would be circular, and this module's own
-// callers (the reconciler, tests) do not go through agents.ts's request
-// validation at all — a row written before these checks existed, or by any
-// future path that isn't the three HTTP routes, still needs to fail HERE
-// rather than starting a container with an unenforceable limit.
-const MAX_CPUS = 4;
-const MAX_MEM_BYTES = 16761118720;
-
+// MAX_AGENT_CPUS/MAX_AGENT_MEM_BYTES imported from helpers/agent-resource-limits.ts
+// — the SAME constants routes/agents.ts's write-side validators enforce, not
+// a second copy. app#596 REVIEW: this module used to declare its own
+// MAX_CPUS/MAX_MEM_BYTES locally (a differently-named, independently
+// literal duplicate of agents.ts's MAX_AGENT_*), which is exactly the
+// two-files-apart drift agents.ts's own containerProfileCeilingViolations()
+// invariant exists to catch elsewhere — that check reads agents.ts's
+// constants only, so it would have passed green while this file silently
+// enforced a different number. The constants module has no behavior and no
+// dependencies, so importing it here creates no cycle with agents.ts's own
+// import of createAndStartContainer etc. FROM this module — only a
+// behavior-bearing import back into agents.ts would have that problem, and
+// this isn't one.
 export function parseCpus(cpus: string): number {
   const match = typeof cpus === 'string' ? cpus.match(/^(\d+(?:\.\d+)?)$/) : null;
   if (!match) throw new Error(`Invalid cpus: ${cpus}`);
   const value = parseFloat(match[1]);
   if (value <= 0) throw new Error(`Invalid cpus: ${cpus}`);
-  if (value > MAX_CPUS) throw new Error(`Invalid cpus: ${cpus} (exceeds VPS capacity of ${MAX_CPUS})`);
+  if (value > MAX_AGENT_CPUS) throw new Error(`Invalid cpus: ${cpus} (exceeds VPS capacity of ${MAX_AGENT_CPUS})`);
   return value;
 }
 
@@ -891,7 +895,7 @@ function parseMemLimit(limit: string): number {
     : unit === 'm' ? value * 1024 * 1024
     : unit === 'g' ? value * 1024 * 1024 * 1024
     : value;
-  if (bytes > MAX_MEM_BYTES) throw new Error(`Invalid mem_limit: ${limit} (exceeds VPS total RAM of ${MAX_MEM_BYTES} bytes)`);
+  if (bytes > MAX_AGENT_MEM_BYTES) throw new Error(`Invalid mem_limit: ${limit} (exceeds VPS total RAM of ${MAX_AGENT_MEM_BYTES} bytes)`);
   switch (unit) {
     case 'k': return value * 1024;
     case 'm': return value * 1024 * 1024;

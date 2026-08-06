@@ -24,37 +24,25 @@ import {
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
+import { MAX_AGENT_CPUS, MAX_AGENT_MEM_BYTES, MAX_AGENT_PIDS_LIMIT } from '../helpers/agent-resource-limits';
 
 // Container resource ceilings for POST /, POST /import and PUT /:id.
 //
-// TWO DIFFERENT DERIVATIONS, STATED EXPLICITLY so neither reads as
-// coincidental or as the other one's reasoning:
+// MAX_AGENT_CPUS/MAX_AGENT_MEM_BYTES/MAX_AGENT_PIDS_LIMIT live in
+// helpers/agent-resource-limits.ts — a constants-only module with no
+// behavior and no dependencies, imported from HERE and from
+// services/docker.ts (the point these values actually reach Docker). Full
+// derivation (why cpus/mem are host-capacity-derived and pids_limit is
+// profile-derived instead, and why those are different rules) is in that
+// module's own comment, not repeated here. app#596 REVIEW: this was
+// previously two separate copies — MAX_AGENT_* here and a differently-named
+// MAX_CPUS/MAX_MEM_BYTES (plus a bare pids_limit literal) in docker.ts —
+// exactly the two-files-apart drift this file's own
+// containerProfileCeilingViolations() invariant exists to catch elsewhere.
+// Consolidated so there is one number per bound, not two that could
+// silently disagree.
 //
-//   MAX_AGENT_CPUS and MAX_AGENT_MEM_BYTES are HOST CAPACITY. `nproc` /
-//   `docker info --format '{{.NCPU}}'` / `{{.MemTotal}}'` on the VPS,
-//   Verified 2026-08-06: 4 CPUs, 16761118720 bytes RAM (used as the literal
-//   byte ceiling, not rounded up — rounding up would license a value the
-//   host cannot actually back). This is a hard physical bound: nothing can
-//   ever legitimately need more than the entire machine, and for cpus
-//   specifically Docker already enforces it structurally. It is NOT derived
-//   from container_profiles — the `browser` profile's own default_cpus/
-//   default_mem_limit (2.0 / 2g) are HALF this ceiling, and that is
-//   incidental, not the reason for the number. If the VPS is ever resized,
-//   THESE TWO need a deliberate update to match the new hardware.
-//
-//   MAX_AGENT_PIDS_LIMIT is PROFILE-DERIVED, not host-derived, because
-//   there is no host-capacity number that plays the same role: the kernel's
-//   own ceiling (`/proc/sys/kernel/pid_max`, 4194304 on this host) is a
-//   system-wide figure four orders of magnitude too loose to serve as a
-//   per-container fork-bomb bound — capping at it would accept anything a
-//   real attack would use. 300 is the largest `default_pids_limit` among
-//   the live `container_profiles` rows (`browser` — Playwright/Chromium,
-//   the heaviest process footprint any current platform-defined use case
-//   needs), Verified 2026-08-06 against production Postgres. If a profile
-//   needing more than 300 processes is added, THIS ONE needs a deliberate
-//   update.
-//
-// INVARIANT THIS FILE NOW ENFORCES, not just states: every MAX_AGENT_* must
+// INVARIANT THIS FILE ENFORCES, not just states: every MAX_AGENT_* must
 // stay >= the corresponding default_* across every container_profiles row,
 // always — see containerProfileCeilingViolations below and its startup
 // wiring in index.ts. Without that check, an admin adding a profile whose
@@ -113,9 +101,6 @@ import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } fr
 // for an unvalidated per-agent override to defeat — that gap is real and
 // worth its own fix (wire the defaults in, or remove the unused columns),
 // filed separately (app#593) — not folded in here.
-export const MAX_AGENT_CPUS = 4;
-export const MAX_AGENT_MEM_BYTES = 16761118720;
-export const MAX_AGENT_PIDS_LIMIT = 300;
 
 // Write-side twin of parseCpus's read-side check in services/docker.ts —
 // same rule (a positive, finite decimal, now also capped at MAX_AGENT_CPUS),
