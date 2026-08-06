@@ -249,6 +249,12 @@ export default function WorkflowsClient() {
 
   const handleDeleteStep = async (stepId: string) => {
     if (!selectedId) return
+    // app#452: this used to skip the confirm() its sibling handleDelete has,
+    // right above it in this file. A step carries a written prompt and an
+    // agent assignment — reconstructing a deleted one costs the same as
+    // recreating the workflow itself, which already gets a confirm. There is
+    // no undo and no version history on either side.
+    if (!confirm('Delete this step?')) return
     try {
       const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, { method: 'DELETE' })
       if (res.ok) {
