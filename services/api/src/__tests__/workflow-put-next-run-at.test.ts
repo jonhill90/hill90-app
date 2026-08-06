@@ -273,3 +273,78 @@ describe('PUT /workflows/:id and next_run_at (app#580)', () => {
     expect(bound[8]).toBeNull();
   });
 });
+
+// app#599 (Type B half of #597's COALESCE-falsy sweep). POST requires
+// name/prompt non-empty and rejects an unrecognized output_type; PUT had
+// no validator for any of the three, and each is passed raw into COALESCE
+// below (no `|| null` conversion) — an explicit '' would have been
+// WRITTEN, unlike every falsy-becomes-null field in this same UPDATE.
+describe('PUT /workflows/:id required-field and output_type parity (app#599)', () => {
+  it("rejects name: '' — matching POST — and writes nothing", async () => {
+    const { createApp } = await import('../app');
+    const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
+    await startAlreadyRunningScheduler();
+
+    const res = await request(app)
+      .put('/workflows/wf-9')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ name: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('name');
+    // THE ASSERTION THAT MATTERS: a 400 that still reaches the workflow
+    // lookup/UPDATE is the same defect one query later.
+    expect(mockQuery.mock.calls.length).toBe(0);
+  });
+
+  it("rejects prompt: '' — matching POST — and writes nothing", async () => {
+    const { createApp } = await import('../app');
+    const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
+    await startAlreadyRunningScheduler();
+
+    const res = await request(app)
+      .put('/workflows/wf-9')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ prompt: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('prompt');
+    expect(mockQuery.mock.calls.length).toBe(0);
+  });
+
+  it('rejects an unrecognized output_type — and writes nothing', async () => {
+    const { createApp } = await import('../app');
+    const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
+    await startAlreadyRunningScheduler();
+
+    const res = await request(app)
+      .put('/workflows/wf-9')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ output_type: 'webhook_callback' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('output_type');
+    expect(mockQuery.mock.calls.length).toBe(0);
+  });
+
+  it('accepts a real name/prompt/output_type change and updates normally', async () => {
+    const { createApp } = await import('../app');
+    const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
+    await startAlreadyRunningScheduler();
+
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ enabled: true, schedule_cron: '0 9 * * *', trigger_type: 'cron' }],
+    });
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'wf-10', name: 'Renamed', prompt: 'New prompt', output_type: 'none' }],
+    });
+
+    const res = await request(app)
+      .put('/workflows/wf-10')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ name: 'Renamed', prompt: 'New prompt', output_type: 'none' });
+
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls.length).toBe(2);
+  });
+});

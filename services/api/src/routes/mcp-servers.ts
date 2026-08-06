@@ -15,6 +15,7 @@ import { requireRole } from '../middleware/role';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isAdmin } from '../helpers/elevated-scope';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
+import { requiredNonEmptyError } from '../helpers/required-field';
 
 const router = Router();
 
@@ -88,8 +89,9 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const { name, description, transport, connection_config, is_platform } = req.body;
 
-    if (!name) {
-      res.status(400).json({ error: 'name is required' });
+    const nameError = requiredNonEmptyError(name, 'name');
+    if (nameError) {
+      res.status(400).json({ error: nameError });
       return;
     }
 
@@ -191,6 +193,19 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const admin = isAdmin(req);
     const { name, description, transport, connection_config } = req.body;
+
+    // app#599: POST requires name non-empty; PUT had no validator for it,
+    // and it's passed raw into COALESCE below (no `|| null` conversion), so
+    // an explicit '' would have been WRITTEN — the exact input POST already
+    // refuses. Only validated when actually provided, matching every other
+    // optional PUT field here's "omitted means unchanged" contract.
+    if (name !== undefined) {
+      const nameError = requiredNonEmptyError(name, 'name');
+      if (nameError) {
+        res.status(400).json({ error: nameError });
+        return;
+      }
+    }
 
     // Only re-encrypt when a new config was actually sent — COALESCE keeps
     // the existing ciphertext otherwise, the same "not provided means

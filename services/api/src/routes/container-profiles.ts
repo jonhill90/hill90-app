@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { auditLog } from '../helpers/audit';
+import { requiredNonEmptyError } from '../helpers/required-field';
 
 const router = Router();
 
@@ -56,12 +57,14 @@ router.post('/', requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const { name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata } = req.body;
 
-    if (!name) {
-      res.status(400).json({ error: 'name is required' });
+    const nameError = requiredNonEmptyError(name, 'name');
+    if (nameError) {
+      res.status(400).json({ error: nameError });
       return;
     }
-    if (!docker_image) {
-      res.status(400).json({ error: 'docker_image is required' });
+    const dockerImageError = requiredNonEmptyError(docker_image, 'docker_image');
+    if (dockerImageError) {
+      res.status(400).json({ error: dockerImageError });
       return;
     }
 
@@ -100,6 +103,29 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
     }
 
     const { name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata } = req.body;
+
+    // app#599: POST requires name/docker_image non-empty; PUT had no
+    // validator for either field, and both are passed raw into COALESCE
+    // below (no `|| null` conversion), so an explicit '' would have been
+    // WRITTEN. `docker_image` is the consequential one — an empty value on
+    // an existing profile breaks every future container start for every
+    // agent assigned to it, not merely a blank list entry. Only validated
+    // when actually provided, matching every other optional PUT field
+    // here's "omitted means unchanged" contract.
+    if (name !== undefined) {
+      const nameError = requiredNonEmptyError(name, 'name');
+      if (nameError) {
+        res.status(400).json({ error: nameError });
+        return;
+      }
+    }
+    if (docker_image !== undefined) {
+      const dockerImageError = requiredNonEmptyError(docker_image, 'docker_image');
+      if (dockerImageError) {
+        res.status(400).json({ error: dockerImageError });
+        return;
+      }
+    }
 
     const { rows } = await getPool().query(
       `UPDATE container_profiles SET

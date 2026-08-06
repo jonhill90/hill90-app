@@ -198,6 +198,21 @@ describe('MCP Servers routes', () => {
 
       expect(res.status).toBe(404);
     });
+
+    // app#599: POST requires name non-empty; PUT had no validator for it,
+    // and it's passed raw into COALESCE (no `|| null` conversion), so an
+    // explicit '' would have been WRITTEN — the exact input POST already
+    // refuses.
+    it("rejects name: '' — matching POST — and writes nothing", async () => {
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('name');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
   });
 
   describe('DELETE /mcp-servers/:id', () => {

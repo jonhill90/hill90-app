@@ -257,6 +257,41 @@ describe('Container Profiles routes', () => {
     expect(res.body.error).toMatch(/not found/i);
   });
 
+  // app#599: POST requires name/docker_image non-empty; PUT had no
+  // validator for either, and both are passed raw into COALESCE (no
+  // `|| null` conversion), so an explicit '' would have been WRITTEN —
+  // docker_image is the consequential one, since an empty value on an
+  // existing profile breaks every future container start for every agent
+  // assigned to it.
+  it("app#599: PUT rejects docker_image: '' — matching POST — and writes nothing", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [customProfile] }); // SELECT existing
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ docker_image: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('docker_image');
+    // THE ASSERTION THAT MATTERS: a 400 that still reaches the UPDATE is
+    // the same defect one query later — only the existence SELECT above
+    // should have run.
+    expect(mockQuery.mock.calls.length).toBe(1);
+  });
+
+  it("app#599: PUT rejects name: '' — matching POST — and writes nothing beyond the existence check", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [customProfile] }); // SELECT existing
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('name');
+    expect(mockQuery.mock.calls.length).toBe(1);
+  });
+
   // CP-16: PUT /container-profiles/:id non-admin returns 403
   it('PUT /container-profiles/:id non-admin returns 403', async () => {
     const res = await request(app)
