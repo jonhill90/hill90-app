@@ -119,7 +119,9 @@ async def ingest_source(
         from app.services.embeddings import generate_embeddings
 
         chunk_texts = [c.content for c in chunks]
-        embeddings = await generate_embeddings(chunk_texts)
+        # created_by is the real human this spend belongs to — attributed
+        # rather than landing under a generic internal sentinel (app#548).
+        embeddings = await generate_embeddings(chunk_texts, owner=created_by)
 
         # Store chunks (with embeddings if available)
         chunk_tuples = [
