@@ -164,7 +164,6 @@ const EXPECTED_PATHS = [
   '/agents/{id}/workspace',
   '/agents/{id}/events/export',
   '/agents/{id}/journal',
-  '/agents/{id}/schedule',
   '/model-policies',
   '/model-policies/{id}',
   '/provider-connections',

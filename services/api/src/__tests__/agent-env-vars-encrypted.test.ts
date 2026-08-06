@@ -162,8 +162,8 @@ describe('agents.env_vars encryption (#374/#386)', () => {
     );
     expect(updateCall).toBeDefined();
     const params = updateCall![1] as unknown[];
-    const encryptedParam = params[14] as Buffer; // env_vars_encrypted is the 15th bound param
-    const nonceParam = params[15] as Buffer; // env_vars_nonce is the 16th
+    const encryptedParam = params[13] as Buffer; // env_vars_encrypted is the 14th bound param
+    const nonceParam = params[14] as Buffer; // env_vars_nonce is the 15th
     const stored = decryptStored(encryptedParam, nonceParam);
     expect(stored).toEqual({ ANTHROPIC_API_KEY: 'sk-ant-existing-secret', LOG_LEVEL: 'debug' });
   });
@@ -191,7 +191,7 @@ describe('agents.env_vars encryption (#374/#386)', () => {
       (c: any[]) => typeof c[0] === 'string' && c[0].includes('UPDATE agents SET')
     );
     const params = updateCall![1] as unknown[];
-    const stored = decryptStored(params[14] as Buffer, params[15] as Buffer);
+    const stored = decryptStored(params[13] as Buffer, params[14] as Buffer);
     expect(stored).toEqual({ ANTHROPIC_API_KEY: 'sk-ant-keep-me' });
   });
 
@@ -217,7 +217,7 @@ describe('agents.env_vars encryption (#374/#386)', () => {
       (c: any[]) => typeof c[0] === 'string' && c[0].includes('UPDATE agents SET')
     );
     const params = updateCall![1] as unknown[];
-    const stored = decryptStored(params[14] as Buffer, params[15] as Buffer);
+    const stored = decryptStored(params[13] as Buffer, params[14] as Buffer);
     expect(stored).toEqual({ ANTHROPIC_API_KEY: 'sk-ant-new' });
   });
 
@@ -246,8 +246,8 @@ describe('agents.env_vars encryption (#374/#386)', () => {
     const params = updateCall![1] as unknown[];
     // Both bound null — COALESCE in the SQL is what preserves the column,
     // not the app re-sending the existing ciphertext.
+    expect(params[13]).toBeNull();
     expect(params[14]).toBeNull();
-    expect(params[15]).toBeNull();
   });
 
   it('rejects a non-string value in env_vars_set', async () => {

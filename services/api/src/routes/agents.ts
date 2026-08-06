@@ -24,7 +24,6 @@ import {
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
-import { isValidCronExpression } from '../helpers/cron';
 
 // Write-side twin of parseCpus's read-side check in services/docker.ts —
 // same rule (a positive, finite decimal), deliberately NOT imported from
@@ -367,7 +366,7 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
     const scope = scopeToOwner(req);
     const { rows } = await getPool().query(
       `SELECT a.id, a.agent_id, a.name, a.description, a.status, a.container_state, a.tools_config,
-              a.cpus, a.mem_limit, a.pids_limit, a.model_policy_id, a.autonomy_level,
+              a.cpus, a.mem_limit, a.pids_limit, a.model_policy_id,
               a.avatar_key, a.tags,
               COALESCE(mp.allowed_models, '[]'::jsonb) AS models,
               a.created_at, a.updated_at, a.created_by,
@@ -421,16 +420,7 @@ router.get('/', requireRole('user'), async (req: Request, res: Response) => {
 router.post('/', requireRole('user'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id, autonomy_level } = req.body;
-
-    // Validate autonomy_level if provided
-    if (autonomy_level !== undefined) {
-      const validLevels = ['ask_before_acting', 'act_within_scope', 'full_autonomy'];
-      if (!validLevels.includes(autonomy_level)) {
-        res.status(400).json({ error: `autonomy_level must be one of: ${validLevels.join(', ')}` });
-        return;
-      }
-    }
+    const { agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id } = req.body;
 
     // Validate cpus if provided — falsy values fall through to the '1.0'
     // default a few lines below, so only a truthy-but-malformed value is
@@ -561,13 +551,13 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     // before anything is written.
     const createdAgent = await withTransaction(async (tx) => {
     const { rows } = await tx.query(
-      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, autonomy_level, created_by)
+      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                COALESCE($10::uuid, (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1)),
-               $11, $12, $13)
+               $11, $12)
        RETURNING id, agent_id, name, description, status, tools_config,
                  cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, autonomy_level, error_message, created_at, updated_at, created_by`,
+                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by`,
       [
         agent_id,
         name,
@@ -580,7 +570,6 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
         rules_md || '',
         validatedPolicyId,
         container_profile_id || null,
-        autonomy_level || 'act_within_scope',
         user.sub,
       ]
     );
@@ -648,9 +637,8 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const { rows } = await getPool().query(
       `SELECT a.id, a.agent_id, a.name, a.description, a.status, a.container_state, a.tools_config,
               cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-              model_policy_id, a.autonomy_level, a.avatar_key, a.tags,
+              model_policy_id, a.avatar_key, a.tags,
               a.env_vars_encrypted, a.env_vars_nonce, a.container_profile_id,
-              a.schedule_cron, a.schedule_enabled,
               cp.name AS cp_name, cp.docker_image AS cp_docker_image,
               COALESCE(mp.allowed_models, '[]'::jsonb) AS models,
               mp.name AS model_policy_name,
@@ -722,7 +710,7 @@ router.get('/:id/export', requireRole('user'), async (req: Request, res: Respons
     const { rows } = await getPool().query(
       `SELECT a.id, a.agent_id, a.name, a.description, a.tools_config,
               a.cpus, a.mem_limit, a.pids_limit, a.soul_md, a.rules_md,
-              a.autonomy_level, a.container_profile_id,
+              a.container_profile_id,
               COALESCE(mp.allowed_models, '[]'::jsonb) AS models
        FROM agents a
        LEFT JOIN model_policies mp ON mp.id = a.model_policy_id
@@ -755,7 +743,6 @@ router.get('/:id/export', requireRole('user'), async (req: Request, res: Respons
       pids_limit: agent.pids_limit,
       soul_md: agent.soul_md,
       rules_md: agent.rules_md,
-      autonomy_level: agent.autonomy_level,
       model_names: agent.models || [],
       skill_names: skillRows.map((s: any) => s.name),
       container_profile_id: agent.container_profile_id,
@@ -792,11 +779,6 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
         return;
       }
     }
-
-    const validLevels = ['ask_before_acting', 'act_within_scope', 'full_autonomy'];
-    const autonomyLevel = config.autonomy_level && validLevels.includes(config.autonomy_level)
-      ? config.autonomy_level
-      : 'act_within_scope';
 
     // Resolve skill_ids from skill_names
     let validatedSkillIds: string[] = [];
@@ -843,13 +825,13 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
     // drift behind #141, #153 and #182.
     const createdAgent = await withTransaction(async (tx) => {
     const { rows } = await tx.query(
-      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, autonomy_level, created_by)
+      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1),
-               $10, $11, $12)
+               $10, $11)
        RETURNING id, agent_id, name, description, status, tools_config,
                  cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, autonomy_level, error_message, created_at, updated_at, created_by`,
+                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by`,
       [
         config.agent_id,
         config.name,
@@ -861,7 +843,6 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
         config.soul_md || '',
         config.rules_md || '',
         profileId,
-        autonomyLevel,
         user.sub,
       ]
     );
@@ -942,7 +923,7 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     }
 
     const user = (req as any).user;
-    const { name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id, autonomy_level, tags, env_vars_set, env_vars_unset } = req.body;
+    const { name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id, tags, env_vars_set, env_vars_unset } = req.body;
 
     // app#374/#386 review: env_vars is a DELTA contract, not a whole-map
     // replace — env_vars_set (keys to add/update) and env_vars_unset (keys
@@ -977,15 +958,6 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     if (tags !== undefined) {
       if (!Array.isArray(tags) || !tags.every((t: unknown) => typeof t === 'string')) {
         res.status(400).json({ error: 'tags must be an array of strings' });
-        return;
-      }
-    }
-
-    // Validate autonomy_level if provided
-    if (autonomy_level !== undefined) {
-      const validLevels = ['ask_before_acting', 'act_within_scope', 'full_autonomy'];
-      if (!validLevels.includes(autonomy_level)) {
-        res.status(400).json({ error: `autonomy_level must be one of: ${validLevels.join(', ')}` });
         return;
       }
     }
@@ -1218,15 +1190,14 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
           rules_md = COALESCE($8, rules_md),
           model_policy_id = CASE WHEN $9::boolean THEN $10::uuid ELSE model_policy_id END,
           container_profile_id = CASE WHEN $11::boolean THEN $12::uuid ELSE container_profile_id END,
-          autonomy_level = COALESCE($13, autonomy_level),
-          tags = COALESCE($14, tags),
-          env_vars_encrypted = COALESCE($15, env_vars_encrypted),
-          env_vars_nonce = COALESCE($16, env_vars_nonce),
+          tags = COALESCE($13, tags),
+          env_vars_encrypted = COALESCE($14, env_vars_encrypted),
+          env_vars_nonce = COALESCE($15, env_vars_nonce),
           updated_at = NOW()
-         WHERE id = $17
+         WHERE id = $16
          RETURNING id, agent_id, name, description, status, tools_config,
                    cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                   model_policy_id, container_profile_id, autonomy_level, tags, error_message, created_at, updated_at, created_by`,
+                   model_policy_id, container_profile_id, tags, error_message, created_at, updated_at, created_by`,
         [
           name || null,
           description ?? null,
@@ -1240,7 +1211,6 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
           modelPolicyProvided ? (effectiveModelPolicyId ?? null) : null,
           containerProfileProvided,
           containerProfileProvided ? (container_profile_id ?? null) : null,
-          autonomy_level || null,
           tags !== undefined ? JSON.stringify(tags) : null,
           envVarsEncrypted,
           envVarsNonce,
@@ -3379,7 +3349,7 @@ router.post('/:id/clone', requireRole('user'), async (req: Request, res: Respons
     // Fetch the source agent
     const { rows: srcRows } = await pool.query(
       `SELECT agent_id, name, description, tools_config, cpus, mem_limit, pids_limit,
-              soul_md, rules_md, model_policy_id, container_profile_id, autonomy_level
+              soul_md, rules_md, model_policy_id, container_profile_id
        FROM agents WHERE id = $1`,
       [req.params.id]
     );
@@ -3429,13 +3399,13 @@ router.post('/:id/clone', requireRole('user'), async (req: Request, res: Respons
     // Insert the cloned agent
     const { rows: cloneRows } = await pool.query(
       `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit,
-                           soul_md, rules_md, model_policy_id, container_profile_id, autonomy_level, created_by)
+                           soul_md, rules_md, model_policy_id, container_profile_id, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                COALESCE($10::uuid, (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1)),
-               $11, $12, $13)
+               $11, $12)
        RETURNING id, agent_id, name, description, status, tools_config,
                  cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, autonomy_level, error_message, created_at, updated_at, created_by`,
+                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by`,
       [
         cloneSlug,
         cloneName,
@@ -3448,7 +3418,6 @@ router.post('/:id/clone', requireRole('user'), async (req: Request, res: Respons
         src.rules_md || '',
         policyId,
         src.container_profile_id || null,
-        src.autonomy_level || 'act_within_scope',
         user.sub,
       ]
     );
@@ -3610,64 +3579,18 @@ router.delete('/:id/webhooks/:webhookId', requireRole('admin'), async (req: Requ
 });
 
 
-// ───────────────────────────────────────────────────────────────────
-// PUT /agents/:id/schedule — update agent auto-start schedule
-// ───────────────────────────────────────────────────────────────────
-
-router.put('/:id/schedule', requireRole('user'), async (req: Request, res: Response) => {
-  try {
-    const scope = scopeToOwner(req);
-    const paramOffset = scope.params.length + 1;
-
-    const { rows: existing } = await getPool().query(
-      `SELECT id FROM agents WHERE id = $${paramOffset} AND ${scope.where}`,
-      [...scope.params, req.params.id]
-    );
-    if (existing.length === 0) {
-      res.status(404).json({ error: 'Agent not found' });
-      return;
-    }
-
-    const { schedule_cron, schedule_enabled } = req.body;
-
-    if (schedule_cron !== undefined && schedule_cron !== null && schedule_cron !== '') {
-      // app#487: the field-count-plus-regex check this replaced accepted
-      // out-of-range values (e.g. "60" in the minute field, which this
-      // route's own regex `[0-9,\-\/]+` matched but no cron implementation
-      // treats as valid) and, unlike routes/workflows.ts's validator, never
-      // accepted a 6-field (with-seconds) expression at all. Shared with
-      // that route's validator now, backed by the same library the
-      // scheduler parses with — see helpers/cron.ts.
-      if (typeof schedule_cron !== 'string' || !isValidCronExpression(schedule_cron)) {
-        res.status(400).json({ error: 'Invalid cron expression' });
-        return;
-      }
-    }
-
-    const cronValue = (schedule_cron === '' || schedule_cron === null) ? null : schedule_cron;
-    const enabledValue = schedule_enabled === true;
-
-    if (enabledValue && !cronValue) {
-      res.status(400).json({ error: 'Cannot enable schedule without a cron expression' });
-      return;
-    }
-
-    const { rows } = await getPool().query(
-      `UPDATE agents
-       SET schedule_cron = COALESCE($1, schedule_cron),
-           schedule_enabled = $2,
-           updated_at = NOW()
-       WHERE id = $3
-       RETURNING id, agent_id, schedule_cron, schedule_enabled`,
-      [cronValue, enabledValue, req.params.id]
-    );
-
-    res.json(rows[0]);
-  } catch (err) {
-    console.error('[agents] Schedule update error:', err);
-    res.status(500).json({ error: 'Failed to update schedule' });
-  }
-});
+// PUT /agents/:id/schedule was removed (app#586): it persisted
+// schedule_cron/schedule_enabled and returned success, but nothing in the
+// estate ever read those columns to actually run anything — verified
+// across services/api, services/agentbox, and the rest of the repo
+// (zero references outside this route and its own display read). Four
+// months since migration 054 added the columns, no consumer, no branch or
+// stub suggesting a scheduler was ever started, no user complaint about
+// schedules not firing. Removed the whole promise — this route, the UI
+// control, and the openapi entry — rather than leave an operation that
+// reports success and does nothing. The schedule_cron/schedule_enabled
+// columns themselves are left alone; dropping them is a migration and a
+// separate decision.
 
 // ---------------------------------------------------------------
 // GET /agents/:id/status-history

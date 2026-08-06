@@ -38,21 +38,12 @@ interface Agent {
   // app#374/#386: the api encrypts env var values at rest and never returns
   // them — only the key names that are set. Values are never held here.
   env_var_keys: string[]
-  autonomy_level: string | null
-  schedule_cron: string | null
-  schedule_enabled: boolean
   hasAvatar: boolean
   error_message: string | null
   created_at: string
   updated_at: string
   created_by: string
 }
-
-const AUTONOMY_LEVELS = [
-  { value: 'ask', label: 'Ask before acting', description: 'Agent requests approval before taking any action' },
-  { value: 'scoped', label: 'Act within scope', description: 'Agent acts freely within assigned skills and permissions' },
-  { value: 'full', label: 'Full autonomy', description: 'Agent can take any action without approval' },
-] as const
 
 interface SkillRecord {
   id: string
@@ -167,12 +158,6 @@ export default function AgentDetailClient({
   const [soulDraft, setSoulDraft] = useState('')
   const [rulesDraft, setRulesDraft] = useState('')
   const [identitySaving, setIdentitySaving] = useState(false)
-  const [autonomySaving, setAutonomySaving] = useState(false)
-
-  // Schedule
-  const [scheduleCron, setScheduleCron] = useState('')
-  const [scheduleEnabled, setScheduleEnabled] = useState(false)
-  const [scheduleSaving, setScheduleSaving] = useState(false)
 
   // Tags
   const [tagInput, setTagInput] = useState('')
@@ -193,7 +178,7 @@ export default function AgentDetailClient({
   // outer `catch` only `console.error`'d — so a non-JSON error body (a 502/504
   // from a proxy timeout, not a hypothetical) made the action fail completely
   // silently: the button stopped loading and nothing told the user. Every SAVE
-  // handler below this point (identity, autonomy, tags, env vars, schedule)
+  // handler below this point (identity, tags, env vars)
   // already alerts unconditionally in its catch — only these action buttons
   // were missed. Routed through the same Toast/failureMessage pair
   // AgentClaudeConfig.tsx and AgentWebhooks.tsx already use (#217), rather than
@@ -207,9 +192,9 @@ export default function AgentDetailClient({
   // page.tsx renders <AgentDetailClient agentId={id}/> with no `key`, so
   // navigating /agents/A -> /agents/B changes the prop WITHOUT remounting: state
   // survives and so do in-flight requests. A response for A could land after B's
-  // and overwrite it — and because handleScheduleSave PUTs to
-  // /api/agents/${agentId}/schedule carrying `scheduleCron` from state, that put
-  // A's schedule on B's page and would have written it to B on save.
+  // and overwrite it — and because handleSaveIdentity PUTs to
+  // /api/agents/${agentId} carrying closed-over field/value state, that would
+  // put A's edit on B's page and would have written it to B on save.
   //
   // A ref rather than the closed-over prop: a stale invocation closes over the
   // OLD agentId, which is exactly what has to be compared against the current
@@ -228,8 +213,6 @@ export default function AgentDetailClient({
         const data = await res.json()
         if (currentAgentId.current !== requestedId) return
         setAgent(data)
-        setScheduleCron(data.schedule_cron || '')
-        setScheduleEnabled(data.schedule_enabled || false)
         setLoadError(false)
       } else if (res.status === 404) {
         router.push('/agents')
@@ -563,27 +546,6 @@ export default function AgentDetailClient({
     : allSkills.filter(s => !ELEVATED_SCOPES.includes(s.scope))
   ).filter(s => !assignedIds.has(s.id))
 
-  const handleAutonomyChange = async (level: string) => {
-    setAutonomySaving(true)
-    try {
-      const res = await fetch(`/api/agents/${agentId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autonomy_level: level }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        alert(data.error || 'Failed to save autonomy level')
-        return
-      }
-      await fetchAgent()
-    } catch {
-      alert('Failed to save autonomy level')
-    } finally {
-      setAutonomySaving(false)
-    }
-  }
-
   const handleAddTag = async () => {
     const tag = tagInput.trim().toLowerCase()
     if (!tag || !agent) return
@@ -697,27 +659,6 @@ export default function AgentDetailClient({
       alert('Failed to remove environment variable')
     } finally {
       setEnvSaving(false)
-    }
-  }
-
-  const handleScheduleSave = async () => {
-    setScheduleSaving(true)
-    try {
-      const res = await fetch(`/api/agents/${agentId}/schedule`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schedule_cron: scheduleCron || null, schedule_enabled: scheduleEnabled }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        alert(data.error || 'Failed to save schedule')
-        return
-      }
-      await fetchAgent()
-    } catch {
-      alert('Failed to save schedule')
-    } finally {
-      setScheduleSaving(false)
     }
   }
 
@@ -1164,44 +1105,6 @@ export default function AgentDetailClient({
             </dl>
           </div>
 
-          {/* Autonomy Level */}
-          <div className="rounded-lg border border-navy-700 bg-navy-800 p-5">
-            <h2 className="text-lg font-semibold text-white mb-1">Autonomy Level</h2>
-            <p className="text-sm text-mountain-400 mb-4">Controls how much freedom this agent has to act without human approval.</p>
-            <div className="space-y-2">
-              {AUTONOMY_LEVELS.map((level) => {
-                const isSelected = (agent.autonomy_level || 'scoped') === level.value
-                return (
-                  <label
-                    key={level.value}
-                    className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
-                      isSelected
-                        ? 'border-brand-600 bg-brand-900/20'
-                        : 'border-navy-700 bg-navy-900 hover:border-navy-500'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="autonomy_level"
-                      value={level.value}
-                      checked={isSelected}
-                      onChange={() => handleAutonomyChange(level.value)}
-                      disabled={autonomySaving || agent.status === 'running'}
-                      className="mt-0.5 accent-brand-500"
-                    />
-                    <div>
-                      <span className="text-sm font-medium text-white">{level.label}</span>
-                      <p className="text-xs text-mountain-500 mt-0.5">{level.description}</p>
-                    </div>
-                  </label>
-                )
-              })}
-            </div>
-            {agent.status === 'running' && (
-              <p className="text-xs text-mountain-600 mt-2">Stop the agent to change autonomy level.</p>
-            )}
-          </div>
-
           {/* Tags */}
           <div className="rounded-lg border border-navy-700 bg-navy-800 p-5">
             <h2 className="text-lg font-semibold text-white mb-1">Tags</h2>
@@ -1314,42 +1217,6 @@ export default function AgentDetailClient({
                 </button>
               </div>
             )}
-          </div>
-
-          {/* Schedule */}
-          <div className="rounded-lg border border-navy-700 bg-navy-800 p-5">
-            <h2 className="text-lg font-semibold text-white mb-1">Schedule</h2>
-            <p className="text-sm text-mountain-400 mb-4">Auto-start this agent on a cron schedule.</p>
-            <div className="flex items-center gap-3 mb-3">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={scheduleEnabled}
-                  onChange={(e) => setScheduleEnabled(e.target.checked)}
-                  className="accent-brand-500"
-                />
-                <span className="text-sm text-white">Enabled</span>
-              </label>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={scheduleCron}
-                onChange={(e) => setScheduleCron(e.target.value)}
-                placeholder="*/30 * * * *"
-                className="flex-1 rounded-md border border-navy-600 bg-navy-900 px-3 py-2 text-sm text-white font-mono placeholder-mountain-500 focus:border-brand-500 focus:outline-none"
-              />
-              <button
-                onClick={handleScheduleSave}
-                disabled={scheduleSaving}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-brand-600 hover:bg-brand-500 text-white transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
-              >
-                {scheduleSaving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
-            <p className="text-xs text-mountain-500 mt-2">
-              Standard 5-field cron: minute hour day month weekday. Example: <code className="text-mountain-400">0 9 * * 1-5</code> (weekdays at 9am).
-            </p>
           </div>
 
           {/* Identity — SOUL.md */}
