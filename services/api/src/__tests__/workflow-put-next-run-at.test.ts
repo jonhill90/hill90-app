@@ -273,3 +273,59 @@ describe('PUT /workflows/:id and next_run_at (app#580)', () => {
     expect(bound[8]).toBeNull();
   });
 });
+
+// app#450: POST verifies the referenced agent exists before insert and
+// returns a clean 404; PUT fed agent_id straight into COALESCE with no
+// check at all. workflows.agent_id has a real FK to agents(id), so a
+// nonexistent value never corrupted a row silently — it threw a raw
+// FK-violation, caught by the generic catch as an undifferentiated 500
+// instead of the 404 the identical bad input gets on create.
+describe('PUT /workflows/:id and agent_id existence (app#450)', () => {
+  it('rejects a nonexistent agent_id with 404, matching POST — and writes nothing', async () => {
+    const { createApp } = await import('../app');
+    const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
+    await startAlreadyRunningScheduler();
+
+    // Agent-exists check: no matching row.
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .put('/workflows/wf-7')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'nonexistent-agent' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('Agent not found');
+    // THE ASSERTION THAT MATTERS: a clean 404 that still reaches the
+    // workflow lookup/UPDATE is the same defect one query later — before
+    // this fix there was no agent-exists query at all, so the workflow's
+    // own SELECT ran next and (absent an FK violation) the UPDATE could
+    // still fire. Exactly one query — the agent-exists check — must run.
+    expect(mockQuery.mock.calls.length).toBe(1);
+  });
+
+  it('accepts an existing agent_id and updates normally', async () => {
+    const { createApp } = await import('../app');
+    const app = createApp({ issuer: TEST_ISSUER, getSigningKey: async () => publicKey });
+    await startAlreadyRunningScheduler();
+
+    // Agent-exists check: found.
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'agent-uuid-2' }] });
+    // Workflow existing-row read.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ enabled: true, schedule_cron: '0 9 * * *', trigger_type: 'cron' }],
+    });
+    // UPDATE.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'wf-8', agent_id: 'agent-uuid-2', enabled: true }],
+    });
+
+    const res = await request(app)
+      .put('/workflows/wf-8')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'agent-uuid-2' });
+
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls.length).toBe(3);
+  });
+});

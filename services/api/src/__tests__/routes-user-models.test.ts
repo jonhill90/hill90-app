@@ -47,6 +47,7 @@ function makeToken(sub: string, roles: string[]) {
 
 const userToken = makeToken('regular-user', ['user']);
 const userBToken = makeToken('user-b', ['user']);
+const adminToken = makeToken('admin-user', ['admin', 'user']);
 
 describe('User Models CRUD', () => {
   beforeEach(() => {
@@ -219,6 +220,82 @@ describe('User Models CRUD', () => {
       .put('/user-models/model-1')
       .set('Authorization', `Bearer ${userToken}`)
       .send({ connection_id: 'other-users-conn' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('not owned by you');
+  });
+
+  // app#451. Issue text characterised this as fail-closed (over-restrictive,
+  // not a security hole) rather than asserted it — proved here with two
+  // DISTINCT real authenticated owners (A owns the model being edited, B is
+  // the caller), not by inspecting the branch or naming a param. B's PUT
+  // must never succeed against A's connection, and the mocked ownership
+  // query itself is asserted to be scoped to B's own sub, not merely "some
+  // 400 came back" (which a broken query could also produce for the wrong
+  // reason).
+  it('app#451 SECURITY CONTROL: a user editing their own single model cannot attach another user\'s connection, proven with two distinct authenticated owners', async () => {
+    // Model ownership OK — model-b belongs to user-b (B), not platform.
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'model-b', model_type: 'single', created_by: 'user-b' }] });
+    // Connection ownership query: A's connection is not found under B's sub.
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .put('/user-models/model-b')
+      .set('Authorization', `Bearer ${userBToken}`) // caller is B, editing B's own model
+      .send({ connection_id: 'regular-users-conn' }); // but this connection belongs to A
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('not owned by you');
+
+    // THE ASSERTION THAT MATTERS: the query scoped ownership to the
+    // CALLER's own sub (B), never to A's — this is what makes the check
+    // fail-closed rather than merely "returned 400 somehow".
+    const connCall = mockQuery.mock.calls[1];
+    expect(connCall[0]).toContain('created_by = $2');
+    expect(connCall[1]).toEqual(['regular-users-conn', 'user-b']);
+  });
+
+  // app#451, the fix. POST's connection-ownership check branches on
+  // whether the model being written is a platform model (created_by IS
+  // NULL) — PUT's did not, so an admin editing an EXISTING platform
+  // model's connection_id could never satisfy a check unconditionally
+  // scoped to their own sub. A platform connection's created_by is NULL,
+  // never equal to any caller's sub, admin included.
+  it('app#451 FIX: admin editing a platform model\'s connection_id to a platform connection now succeeds', async () => {
+    // Model ownership: admin, editing a PLATFORM model (created_by IS NULL).
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'platform-model-1', model_type: 'single', created_by: null }] });
+    // Platform-branch connection query finds the platform connection.
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'platform-conn-1' }] });
+    // UPDATE.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'platform-model-1', connection_id: 'platform-conn-1', created_by: null }],
+    });
+
+    const res = await request(app)
+      .put('/user-models/platform-model-1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ connection_id: 'platform-conn-1' });
+
+    expect(res.status).toBe(200);
+
+    // THE ASSERTION THAT MATTERS: the connection query took the platform
+    // branch (created_by IS NULL, no owner param) — not a query still
+    // scoped to the admin's own sub, which is exactly what made this 400
+    // before the fix.
+    const connCall = mockQuery.mock.calls[1];
+    expect(connCall[0]).toContain('created_by IS NULL');
+    expect(connCall[1]).toEqual(['platform-conn-1']);
+  });
+
+  it('app#451: admin editing a platform model\'s connection_id to a NON-platform connection is still rejected', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'platform-model-1', model_type: 'single', created_by: null }] });
+    // Platform-branch query: this connection is not platform-owned, so no row.
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .put('/user-models/platform-model-1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ connection_id: 'someones-user-conn' });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('not owned by you');

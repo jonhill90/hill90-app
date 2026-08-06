@@ -18,6 +18,23 @@ import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } fr
 
 const router = Router();
 
+// app#449: POST validated this and PUT did not — a transport value that
+// could never be created could still be reached by editing an existing
+// row, silently corrupting a field this same file guards on create. One
+// shared check, used by both routes, so they cannot diverge again.
+// Falsy (undefined/null/'') means "not provided" for both callers — POST's
+// own `transport || 'stdio'` default and PUT's COALESCE both already treat
+// a falsy value as "no change", so this validator does too, rather than
+// inventing stricter behaviour neither route asked for.
+const VALID_TRANSPORTS = ['stdio', 'sse', 'http'];
+function invalidTransportError(transport: unknown): string | null {
+  if (!transport) return null;
+  if (!VALID_TRANSPORTS.includes(transport as string)) {
+    return `transport must be one of: ${VALID_TRANSPORTS.join(', ')}`;
+  }
+  return null;
+}
+
 // app#369: connection_config can carry a credential — a command's --token
 // arg, an env block — and used to be stored as plain JSONB, returned
 // verbatim on every read. Same class of secret provider_connections already
@@ -93,9 +110,9 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
       return;
     }
 
-    const validTransports = ['stdio', 'sse', 'http'];
-    if (transport && !validTransports.includes(transport)) {
-      res.status(400).json({ error: `transport must be one of: ${validTransports.join(', ')}` });
+    const transportError = invalidTransportError(transport);
+    if (transportError) {
+      res.status(400).json({ error: transportError });
       return;
     }
 
@@ -191,6 +208,12 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const admin = isAdmin(req);
     const { name, description, transport, connection_config } = req.body;
+
+    const transportError = invalidTransportError(transport);
+    if (transportError) {
+      res.status(400).json({ error: transportError });
+      return;
+    }
 
     // Only re-encrypt when a new config was actually sent — COALESCE keeps
     // the existing ciphertext otherwise, the same "not provided means

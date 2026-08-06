@@ -28,6 +28,17 @@ import { isValidCronExpression, computeNextRun } from '../helpers/cron';
 
 const router = Router();
 
+// app#450: POST verified the referenced agent exists before insert and PUT
+// did not — a caller updating agent_id to a nonexistent id got no 404, only
+// whichever the DB's FK constraint happened to produce (a raw violation,
+// caught by the generic catch below as an undifferentiated 500). One
+// shared check, used by both routes, so the create and update paths cannot
+// give a different answer to the identical bad input again.
+async function agentExists(pool: ReturnType<typeof getPool>, agentId: string): Promise<boolean> {
+  const { rows } = await pool.query('SELECT id FROM agents WHERE id = $1', [agentId]);
+  return rows.length > 0;
+}
+
 // app#374: webhook_token_hash must never reach a response — it's a SHA-256
 // digest of the real trigger secret (see migration 068), and while a hash
 // can't be reversed into the token, there's no reason to return it either.
@@ -108,11 +119,7 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     }
 
     // Verify agent exists and user has access
-    const { rows: agentRows } = await getPool().query(
-      'SELECT id FROM agents WHERE id = $1',
-      [agent_id]
-    );
-    if (agentRows.length === 0) {
+    if (!(await agentExists(getPool(), agent_id))) {
       res.status(404).json({ error: 'Agent not found' });
       return;
     }
@@ -230,6 +237,16 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     // used to return true.
     if (schedule_cron !== undefined && schedule_cron !== null && !isValidCronExpression(schedule_cron)) {
       res.status(400).json({ error: 'Invalid cron expression' });
+      return;
+    }
+
+    // app#450: was fed straight into COALESCE($3, agent_id) with no check.
+    // workflows.agent_id has a real FK to agents(id), so a nonexistent
+    // value never corrupted the row — it threw a raw FK-violation, caught
+    // by the generic catch below as an undifferentiated 500 instead of the
+    // clean 404 POST already gives for the identical input. Same check.
+    if (agent_id !== undefined && agent_id !== null && !(await agentExists(getPool(), agent_id))) {
+      res.status(404).json({ error: 'Agent not found' });
       return;
     }
 

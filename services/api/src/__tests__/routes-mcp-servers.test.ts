@@ -198,6 +198,36 @@ describe('MCP Servers routes', () => {
 
       expect(res.status).toBe(404);
     });
+
+    // app#449: POST validates transport against an enum; PUT wrote it
+    // straight into COALESCE with no check at all. A garbage transport
+    // could never be CREATED but could always be reached by editing an
+    // existing row — the create path's own guard meant nothing once a row
+    // existed.
+    it('rejects invalid transport, matching POST — and writes nothing', async () => {
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ transport: 'grpc' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('transport');
+      // THE ASSERTION THAT MATTERS: a 400 that still reaches the UPDATE
+      // query is the same defect wearing a different status code.
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    it('accepts a valid transport change', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ ...MOCK_SERVER, transport: 'sse' }] });
+
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ transport: 'sse' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.transport).toBe('sse');
+    });
   });
 
   describe('DELETE /mcp-servers/:id', () => {
