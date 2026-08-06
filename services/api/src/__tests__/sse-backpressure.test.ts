@@ -161,6 +161,11 @@ describe('SSE backpressure', () => {
     mockExecInContainer.mockResolvedValue(container);
 
     await new Promise<void>((resolve, reject) => {
+      // Cleared as soon as the promise settles by any path — left armed for
+      // its full 8s otherwise, holding the event loop open well past this
+      // test's own end (caught by --detectOpenHandles: a Timeout rooted
+      // here, not in the route).
+      const noHeadersTimer = setTimeout(() => reject(new Error('no response headers')), 8000);
       const req = http.request(
         {
           host: '127.0.0.1',
@@ -172,6 +177,7 @@ describe('SSE backpressure', () => {
           // Headers received, then deliberately stop reading: no 'data' handler
           // and the socket paused, so the kernel and the server's write buffer
           // fill exactly as they would for a stalled browser.
+          clearTimeout(noHeadersTimer);
           res.pause();
           setTimeout(() => {
             req.destroy();
@@ -179,9 +185,8 @@ describe('SSE backpressure', () => {
           }, 2500);
         },
       );
-      req.on('error', () => resolve());
+      req.on('error', () => { clearTimeout(noHeadersTimer); resolve(); });
       req.end();
-      setTimeout(() => reject(new Error('no response headers')), 8000);
     });
 
     // The claim: the producer was told to wait. Before this change nothing
@@ -205,6 +210,10 @@ describe('SSE backpressure', () => {
     mockGetContainerLogs.mockResolvedValue(container);
 
     await new Promise<void>((resolve, reject) => {
+      // Same leak-guard cleanup as the /:id/events test above — see its
+      // comment for why the timer has to be cleared rather than left to
+      // fire out its full 8s on the happy path.
+      const noHeadersTimer = setTimeout(() => reject(new Error('no response headers')), 8000);
       const req = http.request(
         {
           host: '127.0.0.1',
@@ -215,6 +224,7 @@ describe('SSE backpressure', () => {
         (res) => {
           // Headers received, then deliberately stop reading — same stalled-
           // client shape as the /:id/events test above, applied to /:id/logs.
+          clearTimeout(noHeadersTimer);
           res.pause();
           setTimeout(() => {
             req.destroy();
@@ -222,9 +232,8 @@ describe('SSE backpressure', () => {
           }, 2500);
         },
       );
-      req.on('error', () => resolve());
+      req.on('error', () => { clearTimeout(noHeadersTimer); resolve(); });
       req.end();
-      setTimeout(() => reject(new Error('no response headers')), 8000);
     });
 
     // THE ASSERTION THAT MATTERS: the producer was told to wait, not that
