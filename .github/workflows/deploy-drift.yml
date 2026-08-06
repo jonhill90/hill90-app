@@ -50,6 +50,10 @@ on:
 
 permissions:
   contents: read
+  # app#511: the alarm's verdict has to land somewhere a human is notified.
+  # Five consecutive scheduled runs reported real drift into the Actions tab
+  # and reached nobody.
+  issues: write
 
 concurrency:
   group: deploy-drift
@@ -232,6 +236,7 @@ jobs:
           exit 0
 
       - name: Compare deployed against main
+        id: compare
         env:
           DEPLOYED_SHA: ${{ inputs.deployed_sha_override != '' && inputs.deployed_sha_override || steps.host.outputs.sha }}
           GRACE_HOURS: ${{ inputs.grace_hours || '4' }}
@@ -247,7 +252,13 @@ jobs:
           # and the case below never runs — the exit code would be right and the
           # explanation absent. Same shape as the swallowed hook in Hill90 #671.
           rc=0
-          bash scripts/checks/check_deploy_drift.sh || rc=$?
+          # Captured to a file rather than through `| tee`, deliberately. A
+          # pipeline would make `$?` the status of tee and hand this step the
+          # wrong verdict — the same last-command-wins trap the `|| rc=$?`
+          # above already exists to avoid. Redirect, then cat: no pipeline,
+          # exit status preserved, output still visible in the log.
+          bash scripts/checks/check_deploy_drift.sh > "$RUNNER_TEMP/drift.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/drift.txt"
           case "$rc" in
             0) echo "::notice::No actionable deploy drift." ;;
             1) echo "Deploy the affected stacks, or record why not." ;;
@@ -255,4 +266,38 @@ jobs:
             3) echo "A container carries no usable revision stamp, so the alarm CANNOT SAY whether it is current. This is an absence of evidence, not a finding of drift — redeploy the affected stacks to stamp them." ;;
             *) echo "::error::Unrecognised exit code $rc from check_deploy_drift.sh — a new state was added without a branch here. Treat as unverified." ;;
           esac
+          # Written before `exit`, and only the notifier reads it. A step that
+          # exits non-zero still publishes outputs, but only if they were
+          # written first — emitting after the exit would leave the notifier
+          # reading an empty string and silently choosing the wrong branch.
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
+
+      # app#511. Without this the alarm's only output is a red run in the
+      # Actions tab, which is where it sat correct and unread for five
+      # consecutive scheduled runs while four services ran stale code.
+      #
+      # `always()` so this runs whichever way the comparison went — the clear
+      # path has to close the issue, not just the drift path open it.
+      #
+      # Skipped under deployed_sha_override, because that input exists to make
+      # the alarm fire on purpose. A self-test must not open a real incident,
+      # and an operator watching the alarm go red would otherwise be punished
+      # for checking it.
+      #
+      # 2 (could not determine) and 3 (unstamped) deliberately do NOT notify:
+      # both are an absence of evidence rather than a finding of drift, and
+      # raising an incident for "I could not tell" is how a channel gets muted.
+      # They still fail the run.
+      - name: Tell a human
+        if: always() && inputs.deployed_sha_override == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ steps.compare.outcome }}" = "success" ]; then
+            bash scripts/checks/drift_notify.sh clear
+          elif [ -f "$RUNNER_TEMP/drift.txt" ] && [ "${{ steps.compare.outputs.rc }}" = "1" ]; then
+            bash scripts/checks/drift_notify.sh drifted "$RUNNER_TEMP/drift.txt"
+          else
+            echo "Not notifying: the alarm did not return a clean drift verdict, so there is nothing honest to report as an incident."
+          fi
