@@ -27,6 +27,14 @@ services:
       # app-keycloak, which the tenant path no longer starts. A local login now
       # exercises the tenancy, not just the realm design.
       KEYCLOAK_ISSUER: http://${AUTH_HOST:-auth}.${BASE_DOMAIN:-localtest.me}:${HTTP_PORT:-8080}/realms/${KC_REALM:-platform}
+      # DIVERGENCE-INTENTIONAL: same reason local.api.yml sets this. mcp cannot
+      # resolve the browser-facing Traefik hostname from inside its own
+      # container, so JWKS fetches must go over the internal network directly
+      # to keycloak. The issuer above stays the PUBLIC URL, because that is
+      # what lands in `iss`. Without this override every token mcp validates
+      # locally fails with a connection error, not a 401 — this was missing
+      # here even though api already carries it for the identical reason.
+      KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/${KC_REALM:-platform}/protocol/openid-connect/certs
     labels:
       - "traefik.http.routers.app-mcp.entrypoints=${APP_ENTRYPOINT:-web}"
       - "traefik.http.routers.app-mcp.tls=false"
