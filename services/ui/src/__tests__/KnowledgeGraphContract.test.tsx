@@ -259,6 +259,31 @@ describe('KnowledgeGraph — a producer-added node type (#380)', () => {
     expect(labelFor(LIVE.nodes[0] as GraphNode, 'anything')).toBe(LIVE.nodes[0].label)
   })
 
+  // app#499: "we don't want that strange guid to represent users... we want
+  // the names." The server now resolves a `user` node's `label` to the
+  // requester's own Keycloak name at write time when it can (see
+  // shared-knowledge.ts / knowledge_graph()) — this is the UI half: a
+  // resolved name must render in full, not get truncated to a fragment the
+  // way the raw-sub fallback above still correctly does.
+  const NAMED_USER_NODE: GraphNode = {
+    id: 'user-95f7362e-8918-485f-aba2-0e7684270003',
+    type: 'user',
+    label: 'Dev Local',
+    meta: { retrieval_count: 4 },
+  }
+
+  it('renders a resolved display name in full — the whole point of app#499', () => {
+    expect(labelFor(NAMED_USER_NODE, 'some-other-users-sub')).toBe('Dev Local')
+  })
+
+  it('still says "You" for a resolved-name node when it is the current session', () => {
+    // "You" must win over the resolved name for your OWN node — comparing by
+    // id (which always carries the sub) rather than label (which no longer
+    // always does) is exactly the fix that keeps this working once label
+    // stops being the sub.
+    expect(labelFor(NAMED_USER_NODE, '95f7362e-8918-485f-aba2-0e7684270003')).toBe('You')
+  })
+
   it('includes `user` in the legend once it is actually present in the data', () => {
     expect(legendTypes(LIVE_WITH_USER.nodes as GraphNode[])).toContain('user')
   })

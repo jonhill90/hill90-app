@@ -137,6 +137,10 @@ export async function searchShared(params: {
   owner?: string;
   requester_id: string;
   requester_type?: string;
+  // app#499: the caller's OWN Keycloak name, forwarded to be recorded
+  // alongside their own requester_id — see shared-knowledge.ts's own
+  // comment at the call site for where this comes from.
+  requester_display_name?: string;
   limit?: string;
 }): Promise<ProxyResponse> {
   return proxyRequest('GET', '/internal/admin/shared/search', params as Record<string, string>);
