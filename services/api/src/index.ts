@@ -11,6 +11,7 @@ import { getS3Client, ensureBucket, AVATAR_BUCKET } from './services/s3';
 import { attachTerminalProxyFromConfig } from './services/terminal-wiring';
 import { startStaleSweeper, stopStaleSweeper } from './routes/chat';
 import { dieOnStartupFailure, shutdownSafely, installUnhandledRejectionBackstop } from './boot/fatal';
+import { containerProfileCeilingViolations } from './routes/agents';
 
 const PORT = process.env.PORT || 3000;
 
@@ -115,6 +116,31 @@ async function start() {
     console.log('[startup] Avatar buckets ready');
   } catch (err) {
     console.error('[startup] Avatar bucket init failed, avatar routes may error:', err);
+  }
+
+  // app#593: MAX_AGENT_CPUS/MAX_AGENT_MEM_BYTES/MAX_AGENT_PIDS_LIMIT
+  // (routes/agents.ts) must stay >= every container_profiles row's own
+  // default_cpus/default_mem_limit/default_pids_limit. POST
+  // /container-profiles (admin-only) validates none of those three columns
+  // today, so an admin CAN create a profile that already violates this —
+  // safe-fail, same severity as the avatar-bucket check above, because a
+  // violation here means one specific profile is unusable once its
+  // defaults are wired into agent creation, not that this whole service is
+  // unverified the way a failed migration or a bad encryption key would be.
+  try {
+    const { rows: profiles } = await getPool().query(
+      'SELECT name, default_cpus, default_mem_limit, default_pids_limit FROM container_profiles'
+    );
+    const violations = containerProfileCeilingViolations(profiles);
+    if (violations.length === 0) {
+      console.log(`[startup] Container-profile resource ceilings: ${profiles.length} profile(s) checked, all within MAX_AGENT_* bounds`);
+    } else {
+      for (const v of violations) {
+        console.error(`[startup] Container-profile resource ceiling violated: profile "${v.profile}".${v.field} — ${v.error}`);
+      }
+    }
+  } catch (err) {
+    console.error('[startup] Container-profile resource ceiling check failed to run:', err);
   }
 
   // Keep reconciling. A docker-proxy fault used to persist until the next
