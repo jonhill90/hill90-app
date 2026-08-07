@@ -322,12 +322,28 @@ router.get('/search', requireRole('user'), async (req: Request, res: Response) =
     const scope = scopeToOwner(req);
     const owner = scope.where === '1=1' ? undefined : user.sub;
 
+    // app#499: "we don't want that strange guid to represent users... we
+    // want the names." The knowledge service has no Keycloak access and
+    // deliberately shouldn't gain one just to resolve a display string —
+    // but THIS request already carries the caller's own Keycloak token,
+    // which the api verified moments ago in requireAuth, and that token's
+    // payload IS this user's own name. Forwarded once, here, at the one
+    // point this codebase can ever legitimately know it — nothing downstream
+    // ever looks up anyone ELSE's identity. `name` (Keycloak's standard
+    // first+last claim) is preferred over `preferred_username` (the login
+    // handle) because a graph node is meant to read as a person, not an
+    // account name; falls back to preferred_username when a directory entry
+    // has no first/last name set, and to nothing (the pre-#499 raw-sub
+    // rendering) when the token carries neither.
+    const requesterDisplayName: string | undefined = user.name || user.preferred_username || undefined;
+
     const result = await skProxy.searchShared({
       q,
       collection_id: req.query.collection_id as string | undefined,
       owner,
       requester_id: user.sub,
       requester_type: 'user',
+      requester_display_name: requesterDisplayName,
       limit: req.query.limit as string | undefined,
     });
     res.status(result.status).json(result.data);

@@ -198,16 +198,31 @@ export function legendTypes(nodes: GraphNode[]): string[] {
   return [...known, ...unknown]
 }
 
-// A `user` node's label is a raw Keycloak sub (#379: `"label": requester_id`,
-// unmodified). Rendering that verbatim is a UUID nobody reads. The knowledge
-// service has no access to Keycloak's user table and deliberately shouldn't
-// gain one for a label — so only the CURRENT session's own sub can ever be
-// resolved to something human ("You"); every other user node gets a short,
-// honestly-still-a-fragment prefix rather than a fabricated name.
+// A `user` node's label USED to be a raw Keycloak sub, always (#379:
+// `"label": requester_id`, unmodified) — a UUID nobody reads, "You" for
+// yourself and a truncated fragment like `95f7362e…` for everybody else
+// (app#499). The knowledge service still has no access to Keycloak's user
+// table and deliberately shouldn't gain one just for a label — but the api
+// does, on every request that can create one of these rows: the caller's
+// own Keycloak token carries their own `name`/`preferred_username`, and
+// that gets captured at write time and stored as the node's `label`
+// (services/api/src/routes/shared-knowledge.ts, services/knowledge's
+// `record_retrieval`/`knowledge_graph`). So a `user` node's `label` is now
+// either a real name or, for a row nothing could ever resolve one for
+// (recorded before this fix, or a token with neither claim), the same raw
+// sub it always was — there is no separate flag on the wire for which case
+// this is, so it's inferred here: a label that still equals the id's own
+// sub fragment never got a name, and is the ONLY case still truncated to a
+// fragment. "You" detection moved from comparing `label` (no longer always
+// the sub) to the node `id`, which always is: `user-{sub}`.
 export function labelFor(n: GraphNode, currentUserSub: string | undefined): string {
   if (n.type === 'user') {
-    if (currentUserSub && n.label === currentUserSub) return 'You'
-    return n.label.length > 8 ? `${n.label.slice(0, 8)}…` : n.label
+    if (currentUserSub && n.id === `${ID_PREFIX.user}${currentUserSub}`) return 'You'
+    const isUnresolvedSub = n.label === idWithoutPrefix(n)
+    if (isUnresolvedSub) {
+      return n.label.length > 8 ? `${n.label.slice(0, 8)}…` : n.label
+    }
+    return n.label
   }
   return n.label
 }
