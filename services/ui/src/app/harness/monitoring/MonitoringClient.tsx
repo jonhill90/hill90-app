@@ -165,15 +165,37 @@ export default function MonitoringClient() {
     }
   }, [])
 
+  // `refreshAll` is handed bare to `setInterval` below — the promise it
+  // returns is discarded by the caller, so an unguarded rejection here would
+  // become an unhandled rejection every 30s rather than a caught error. Today
+  // fetchHealth/fetchVault/fetchStorage/fetchAgents each carry their own
+  // try/catch and can never actually reject, so this could not fire in
+  // practice — but that safety was accidental (four separate call sites
+  // agreeing to guard themselves) rather than a property this function
+  // enforced itself, and NOTHING pinned it. A future fifth probe added to
+  // the Promise.all without matching that convention would silently
+  // reintroduce exactly the #133-family defect this file's own sweep went
+  // looking for — and unlike a plain unhandled rejection, this one would
+  // also leave `refreshing` stuck true forever (the two lines after the
+  // await never run), a real, visible stuck-spinner bug, not just a console
+  // warning. try/finally makes that guarantee this function's own, not a
+  // property borrowed from whichever helpers happen to exist today — see
+  // MonitoringClient.test.tsx's "refreshAll survives a rejecting dependency"
+  // for the regression this closes.
   const refreshAll = useCallback(async () => {
     setRefreshing(true)
     setHealthLoading(true)
     setVaultLoading(true)
     setStorageLoading(true)
     setAgentsLoading(true)
-    await Promise.all([fetchHealth(), fetchVault(), fetchStorage(), fetchAgents()])
-    setLastRefresh(new Date())
-    setRefreshing(false)
+    try {
+      await Promise.all([fetchHealth(), fetchVault(), fetchStorage(), fetchAgents()])
+    } catch (err) {
+      console.error('[monitoring] refreshAll: a probe rejected despite its own guard — this should not be reachable, logged rather than left to crash the interval loop silently:', err)
+    } finally {
+      setLastRefresh(new Date())
+      setRefreshing(false)
+    }
   }, [fetchHealth, fetchVault, fetchStorage, fetchAgents])
 
   useEffect(() => {
