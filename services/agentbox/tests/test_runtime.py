@@ -494,7 +494,13 @@ class TestWorkEvents:
         )
         await runtime.handle_work(request)
 
-        events = _read_events(log_path)
+        # identity_load_degraded events are emitted at AgentRuntime construction
+        # time (before any work item exists) whenever /etc/agentbox/SOUL.md or
+        # RULES.md aren't present on the machine running this test — real here,
+        # since dev/CI hosts don't bake those files in the way a real agentbox
+        # container image does. They carry no correlation_id by design and are
+        # excluded so this test stays about work-item events specifically.
+        events = [e for e in _read_events(log_path) if e["type"] != "identity_load_degraded"]
         assert len(events) == 2
         for event in events:
             assert "my-corr-id" in event["input_summary"]
@@ -533,7 +539,10 @@ class TestWorkEvents:
 
         time.sleep(1.0)
 
-        events = _read_events(log_path)
+        # See test_correlation_id_in_events above: identity_load_degraded is a
+        # construction-time event, carries no work_id, and is real noise on a
+        # host without /etc/agentbox/{SOUL,RULES}.md — excluded deliberately.
+        events = [e for e in _read_events(log_path) if e["type"] != "identity_load_degraded"]
         assert len(events) >= 3
         for event in events:
             assert event.get("metadata", {}).get("work_id") == work_id
@@ -942,7 +951,10 @@ class TestShellCommand:
 
         time.sleep(1.0)
 
-        events = _read_events(log_path)
+        # See test_correlation_id_in_events above: identity_load_degraded is a
+        # construction-time event, carries no work_id, and is real noise on a
+        # host without /etc/agentbox/{SOUL,RULES}.md — excluded deliberately.
+        events = [e for e in _read_events(log_path) if e["type"] != "identity_load_degraded"]
         assert len(events) >= 4
         for event in events:
             assert event.get("metadata", {}).get("work_id") == work_id

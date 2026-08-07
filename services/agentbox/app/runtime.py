@@ -46,16 +46,69 @@ class AgentRuntime:
         self._load_identity()
 
     def _load_identity(self) -> None:
-        soul_path = "/etc/agentbox/SOUL.md"
-        rules_path = "/etc/agentbox/RULES.md"
+        """Load SOUL.md and RULES.md, logging loudly on a degraded outcome.
 
-        if os.path.exists(soul_path):
-            with open(soul_path) as f:
-                self.soul = f.read()
+        Both files used to collapse MISSING and EMPTY into the same silent
+        `""` with no log line and no event — chat.py's handle_chat then
+        built a system prompt with a hole in it and looked completely
+        normal doing it, the house "silent success" defect family
+        (CLAUDE.md) in the one component where it is hardest to notice.
+        RULES.md carries the agent's operating constraints (chat.py's own
+        header), and losing it fails OPEN — the agent keeps answering, just
+        with no rules — which is why it is logged at ERROR and SOUL.md
+        (identity/voice, not a safety boundary) only at WARNING. Neither
+        state stops agentbox from starting: a missing or misconfigured
+        mount on one instance is an operational fault to surface, not
+        grounds to take the whole container down.
 
-        if os.path.exists(rules_path):
-            with open(rules_path) as f:
-                self.rules = f.read()
+        An unreadable file (permission denied) is NOT handled here and is
+        deliberately left to raise — that already crashes agentbox at
+        startup with a visible traceback (server.py's create_app has no
+        try/except around this constructor), which is loud, if crude.
+        """
+        self.soul, soul_state = self._read_identity_file("/etc/agentbox/SOUL.md")
+        if soul_state != "ok":
+            logger.warning(
+                "[identity] SOUL.md is %s — the agent's system prompt will have no identity section",
+                soul_state,
+            )
+            self._emit_identity_degraded("SOUL.md", soul_state)
+
+        self.rules, rules_state = self._read_identity_file("/etc/agentbox/RULES.md")
+        if rules_state != "ok":
+            logger.error(
+                "[identity] RULES.md is %s — the agent will operate with NO RULES until this is fixed",
+                rules_state,
+            )
+            self._emit_identity_degraded("RULES.md", rules_state)
+
+    @staticmethod
+    def _read_identity_file(path: str) -> tuple[str, str]:
+        """Returns (content, state) where state is 'ok', 'missing', or 'empty'.
+
+        A whitespace-only file counts as 'empty': it carries no usable
+        identity/rules content, and treating it as 'ok' just because it is
+        non-empty bytes would hide the same defect this function exists to
+        surface.
+        """
+        if not os.path.exists(path):
+            return "", "missing"
+        with open(path) as f:
+            content = f.read()
+        if not content.strip():
+            return "", "empty"
+        return content, "ok"
+
+    def _emit_identity_degraded(self, file_name: str, state: str) -> None:
+        self._emitter.emit(
+            type="identity_load_degraded",
+            tool="identity",
+            input_summary=file_name,
+            output_summary=f"state={state}",
+            duration_ms=None,
+            success=False,
+            metadata={"file": file_name, "state": state},
+        )
 
     async def handle_work(self, request: Request) -> JSONResponse:
         """Handle POST /work — validate, emit events, return ack.
