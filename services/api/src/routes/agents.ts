@@ -24,21 +24,99 @@ import {
 import { collectBounded, ReadTooLargeError, MAX_READ_BYTES } from '../helpers/bounded-read';
 import { MAX_EVENT_TAIL } from '../helpers/event-log-limits';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
+import { MAX_AGENT_CPUS, MAX_AGENT_MEM_BYTES, MAX_AGENT_PIDS_LIMIT } from '../helpers/agent-resource-limits';
+
+// Container resource ceilings for POST /, POST /import and PUT /:id.
+//
+// MAX_AGENT_CPUS/MAX_AGENT_MEM_BYTES/MAX_AGENT_PIDS_LIMIT live in
+// helpers/agent-resource-limits.ts — a constants-only module with no
+// behavior and no dependencies, imported from HERE and from
+// services/docker.ts (the point these values actually reach Docker). Full
+// derivation (why cpus/mem are host-capacity-derived and pids_limit is
+// profile-derived instead, and why those are different rules) is in that
+// module's own comment, not repeated here. app#596 REVIEW: this was
+// previously two separate copies — MAX_AGENT_* here and a differently-named
+// MAX_CPUS/MAX_MEM_BYTES (plus a bare pids_limit literal) in docker.ts —
+// exactly the two-files-apart drift this file's own
+// containerProfileCeilingViolations() invariant exists to catch elsewhere.
+// Consolidated so there is one number per bound, not two that could
+// silently disagree.
+//
+// INVARIANT THIS FILE ENFORCES, not just states: every MAX_AGENT_* must
+// stay >= the corresponding default_* across every container_profiles row,
+// always — see containerProfileCeilingViolations below and its startup
+// wiring in index.ts. Without that check, an admin adding a profile whose
+// own declared default exceeds one of these constants would create a
+// profile that can never actually be used once container_profile_id's
+// defaults are wired into agent creation (see the "not in this fix"
+// section of app#593) — the failure would surface as "agent creation
+// rejected" with the real cause sitting two tables away, in a profile row
+// nobody was looking at.
+//
+// WHAT THESE FIX, ESTABLISHED BEFORE CHOOSING BOUNDS RATHER THAN ASSUMED.
+// Tested empirically against the real production Docker daemon (29.5.3, not
+// a guess from documentation):
+//
+//   cpus exceeding host capacity (e.g. "9999"): the Docker Engine API
+//   itself REJECTS this at container-create time ("range of CPUs is from
+//   0.01 to 4.00, as there are only 4 CPUs available") — so this was never
+//   a live resource-exhaustion path. Before this fix it surfaced as a
+//   generic `500 Failed to start agent` from POST /:id/start's catch-all
+//   (agents.ts's admin-only start handler, the ONLY call site of
+//   createAndStartContainer) instead of a clean 400 at creation — a
+//   500-instead-of-400 bug, not a DoS. Bounding here turns that into an
+//   honest 400 at write time, before any admin ever starts the agent.
+//
+//   mem_limit exceeding host capacity (e.g. "9999g"): Docker ACCEPTS this
+//   without complaint and starts the container — confirmed live against the
+//   VPS's own daemon. A cgroup memory ceiling wildly exceeding physical RAM
+//   is, for practical purposes, no limit at all: this is the one of the
+//   three that was a genuine, unguarded DoS surface.
+//
+//   pids_limit: had NO validation of any kind — not even a type check.
+//   Docker enforces whatever is given, INCLUDING THE DOCUMENTED "-1 =
+//   unlimited" SENTINEL — confirmed live: `--pids-limit=-1` produced the
+//   identical cgroup pids.max as not specifying a limit at all (Docker's
+//   own unbounded default, ~100k processes on this host). An unvalidated
+//   pids_limit is a complete, one-field bypass of fork-bomb protection.
+//
+// REACHABILITY, so severity is not overstated either. All three of POST /,
+// POST /import and PUT /:id are requireRole('user') — any signed-in
+// non-admin can write a poisoned value into the agents row. But
+// createAndStartContainer (services/docker.ts) — the only place these
+// values ever reach Docker — has exactly one caller: POST /:id/start,
+// requireRole('admin'). So a non-admin can plant the value; an admin's
+// ordinary "start this agent" action is what detonates it. Confused-deputy,
+// not a direct one-call DoS — narrowed the same way #141's "any signed-in
+// user" was narrowed to "needs an admin to have started the agent", not
+// re-derived from scratch.
+//
+// container_profile_id was never a cap on these three fields, checked
+// directly rather than assumed. The accurate statement is "we never had a
+// cap", not "our cap leaked": container_profiles HAS default_cpus/
+// default_mem_limit/default_pids_limit columns (migration 032) — DEFAULTS
+// by their own name, not caps, and createAndStartContainer's caller
+// (POST /:id/start) only ever reads a linked profile's docker_image and
+// metadata, never those three columns. So there was no existing authority
+// for an unvalidated per-agent override to defeat — that gap is real and
+// worth its own fix (wire the defaults in, or remove the unused columns),
+// filed separately (app#593) — not folded in here.
 
 // Write-side twin of parseCpus's read-side check in services/docker.ts —
-// same rule (a positive, finite decimal), deliberately NOT imported from
-// there. Every route handler in this file that touches Docker is exercised
-// through dozens of test files that `jest.mock('../services/docker', ...)`
-// with their own hand-built replacement object; importing parseCpus would
-// make this validator silently start rejecting valid input the moment any
-// of those mocks omitted it (the try/catch below would swallow the
-// resulting "parseCpus is not a function" and report it as a validation
-// failure, not a wiring bug). Validating only at container-start left every
-// existing row — including anything written before this check existed —
-// trusted forever until an agent happened to start; validating only here
-// would let a bad value sit in the database and fail (or, before this fix,
-// silently not fail at all) the next time it's read. Both sides need to
-// reject the same inputs; they don't need to share one function to do it.
+// same rule (a positive, finite decimal, now also capped at MAX_AGENT_CPUS),
+// deliberately NOT imported from there. Every route handler in this file
+// that touches Docker is exercised through dozens of test files that
+// `jest.mock('../services/docker', ...)` with their own hand-built
+// replacement object; importing parseCpus would make this validator
+// silently start rejecting valid input the moment any of those mocks
+// omitted it (the try/catch below would swallow the resulting "parseCpus is
+// not a function" and report it as a validation failure, not a wiring bug).
+// Validating only at container-start left every existing row — including
+// anything written before this check existed — trusted forever until an
+// agent happened to start; validating only here would let a bad value sit
+// in the database and fail (or, before this fix, silently not fail at all)
+// the next time it's read. Both sides need to reject the same inputs; they
+// don't need to share one function to do it.
 function cpusValidationError(cpus: unknown): string | null {
   if (typeof cpus !== 'string') return 'cpus must be a string';
   const match = cpus.match(/^(\d+(?:\.\d+)?)$/);
@@ -46,7 +124,103 @@ function cpusValidationError(cpus: unknown): string | null {
   if (!Number.isFinite(value) || value <= 0) {
     return 'cpus must be a positive number (e.g. "1.0")';
   }
+  if (value > MAX_AGENT_CPUS) {
+    return `cpus must not exceed ${MAX_AGENT_CPUS} (the VPS has ${MAX_AGENT_CPUS} CPUs — Docker itself refuses more at container-start)`;
+  }
   return null;
+}
+
+// Same shape as parseMemLimit in services/docker.ts, deliberately
+// reimplemented rather than imported — see cpusValidationError's comment
+// above for why (the docker.ts module is mocked wholesale in this file's
+// own test suite). Accepts the same units Docker/parseMemLimit accept
+// (bare bytes, k/m/g, case-insensitive, optional trailing "b") so a value
+// this function passes is guaranteed parseable the same way at
+// container-start.
+function memLimitValidationError(memLimit: unknown): string | null {
+  if (typeof memLimit !== 'string') return 'mem_limit must be a string';
+  const match = memLimit.match(/^(\d+(?:\.\d+)?)\s*([kmg]?)b?$/i);
+  if (!match) return 'mem_limit must be a number with an optional k/m/g unit (e.g. "1g")';
+  const value = parseFloat(match[1]);
+  const unit = (match[2] || '').toLowerCase();
+  const multiplier = unit === 'k' ? 1024 : unit === 'm' ? 1024 * 1024 : unit === 'g' ? 1024 * 1024 * 1024 : 1;
+  const bytes = value * multiplier;
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return 'mem_limit must be a positive amount of memory';
+  }
+  if (bytes > MAX_AGENT_MEM_BYTES) {
+    return `mem_limit must not exceed ${MAX_AGENT_MEM_BYTES} bytes (the VPS's total RAM — Docker accepts a larger value and enforces nothing)`;
+  }
+  return null;
+}
+
+// pids_limit had no validation of any kind before this — not even a type
+// check. The Docker HostConfig field it becomes accepts ANY integer,
+// including the documented "-1 = unlimited" sentinel, which this function
+// exists specifically to close: a negative pids_limit is not "an
+// out-of-range number", it is a complete, one-field bypass of fork-bomb
+// protection, confirmed live against the production Docker daemon (see the
+// block comment above MAX_AGENT_CPUS).
+function pidsLimitValidationError(pidsLimit: unknown): string | null {
+  if (typeof pidsLimit !== 'number' || !Number.isInteger(pidsLimit)) {
+    return 'pids_limit must be an integer';
+  }
+  if (pidsLimit <= 0) {
+    return 'pids_limit must be a positive integer (negative values, including -1, mean "unlimited" to Docker)';
+  }
+  if (pidsLimit > MAX_AGENT_PIDS_LIMIT) {
+    return `pids_limit must not exceed ${MAX_AGENT_PIDS_LIMIT} (the highest default_pids_limit among current container_profiles rows)`;
+  }
+  return null;
+}
+
+export interface ContainerProfileResourceRow {
+  name: string;
+  default_cpus: unknown;
+  default_mem_limit: unknown;
+  default_pids_limit: unknown;
+}
+
+export interface ContainerProfileCeilingViolation {
+  profile: string;
+  field: 'default_cpus' | 'default_mem_limit' | 'default_pids_limit';
+  error: string;
+}
+
+// The invariant MAX_AGENT_PIDS_LIMIT's own derivation depends on: every
+// MAX_AGENT_* must stay >= the corresponding default_* across every
+// container_profiles row, always. Without this checked SOMEWHERE, an admin
+// could add a profile (via POST /container-profiles, requireRole('admin'),
+// which validates none of default_cpus/default_mem_limit/default_pids_limit
+// today) whose own declared default exceeds one of these ceilings — and the
+// failure would not surface here. It would surface later, once
+// container_profile_id's defaults are wired into agent creation (the
+// separate fix filed as app#593), as "agent creation rejected" on a
+// perfectly reasonable-looking request, with the actual cause sitting in a
+// container_profiles row two tables away from the symptom.
+//
+// Reuses cpusValidationError/memLimitValidationError/pidsLimitValidationError
+// directly rather than a fourth comparison — a profile's default_cpus is
+// the same shape as an agent's own cpus (a string), default_mem_limit the
+// same as mem_limit, default_pids_limit an integer straight from the INT
+// column exactly like an agent's own pids_limit. If either set of rules
+// ever needs to diverge, this reuse will force that decision to be made
+// explicitly rather than let the two silently drift apart.
+export function containerProfileCeilingViolations(
+  profiles: ContainerProfileResourceRow[]
+): ContainerProfileCeilingViolation[] {
+  const violations: ContainerProfileCeilingViolation[] = [];
+  for (const profile of profiles) {
+    const cpusError = cpusValidationError(profile.default_cpus);
+    if (cpusError) violations.push({ profile: profile.name, field: 'default_cpus', error: cpusError });
+
+    const memLimitError = memLimitValidationError(profile.default_mem_limit);
+    if (memLimitError) violations.push({ profile: profile.name, field: 'default_mem_limit', error: memLimitError });
+
+    const pidsLimitError = pidsLimitValidationError(profile.default_pids_limit);
+    if (pidsLimitError) violations.push({ profile: profile.name, field: 'default_pids_limit', error: pidsLimitError });
+  }
+  return violations;
 }
 
 // app#374: agents.env_vars stored operator-supplied environment variables —
@@ -422,13 +596,34 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const { agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, model_names, skill_ids, container_profile_id } = req.body;
 
-    // Validate cpus if provided — falsy values fall through to the '1.0'
-    // default a few lines below, so only a truthy-but-malformed value is
-    // rejected here.
+    // Validate cpus/mem_limit/pids_limit if provided — falsy values fall
+    // through to the defaults a few lines below, so only a truthy-but-bad
+    // value is rejected here. See the MAX_AGENT_* block comment above for
+    // where these ceilings come from and what they close.
     if (cpus) {
       const cpusError = cpusValidationError(cpus);
       if (cpusError) {
         res.status(400).json({ error: cpusError });
+        return;
+      }
+    }
+    if (mem_limit) {
+      const memLimitError = memLimitValidationError(mem_limit);
+      if (memLimitError) {
+        res.status(400).json({ error: memLimitError });
+        return;
+      }
+    }
+    // Truthy check, matching cpus/mem_limit above: pids_limit: 0 is falsy
+    // and falls through to the `|| 200` default a few lines below just like
+    // an omitted field would, so validating it here would reject a value
+    // that was never going to reach Docker anyway. A genuinely dangerous
+    // value (negative, including Docker's -1 "unlimited" sentinel) is still
+    // truthy and still caught.
+    if (pids_limit) {
+      const pidsLimitError = pidsLimitValidationError(pids_limit);
+      if (pidsLimitError) {
+        res.status(400).json({ error: pidsLimitError });
         return;
       }
     }
@@ -779,6 +974,20 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
         return;
       }
     }
+    if (config.mem_limit) {
+      const memLimitError = memLimitValidationError(config.mem_limit);
+      if (memLimitError) {
+        res.status(400).json({ error: memLimitError });
+        return;
+      }
+    }
+    if (config.pids_limit) {
+      const pidsLimitError = pidsLimitValidationError(config.pids_limit);
+      if (pidsLimitError) {
+        res.status(400).json({ error: pidsLimitError });
+        return;
+      }
+    }
 
     // Resolve skill_ids from skill_names
     let validatedSkillIds: string[] = [];
@@ -962,13 +1171,27 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
       }
     }
 
-    // Validate cpus if provided — a falsy value below becomes `null`, which
-    // COALESCE treats as "leave the existing value unchanged", so only a
-    // truthy-but-malformed value needs rejecting here.
+    // Validate cpus/mem_limit/pids_limit if provided — a falsy value below
+    // becomes `null`, which COALESCE treats as "leave the existing value
+    // unchanged", so only a truthy-but-bad value needs rejecting here.
     if (cpus) {
       const cpusError = cpusValidationError(cpus);
       if (cpusError) {
         res.status(400).json({ error: cpusError });
+        return;
+      }
+    }
+    if (mem_limit) {
+      const memLimitError = memLimitValidationError(mem_limit);
+      if (memLimitError) {
+        res.status(400).json({ error: memLimitError });
+        return;
+      }
+    }
+    if (pids_limit) {
+      const pidsLimitError = pidsLimitValidationError(pids_limit);
+      if (pidsLimitError) {
+        res.status(400).json({ error: pidsLimitError });
         return;
       }
     }

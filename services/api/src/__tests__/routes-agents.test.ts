@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { createApp } from '../app';
 import { inspectContainer as mockedInspectContainer } from '../services/docker';
+import { containerProfileCeilingViolations } from '../routes/agents';
 
 // Generate a throwaway RSA keypair for test signing
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
@@ -189,6 +190,180 @@ describe('Agent CRUD routes', () => {
       .send({ agent_id: 'imported-agent', name: 'Imported', cpus: 'lots' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/cpus must be a positive number/);
+  });
+
+  // Unbounded container resource limits on POST /agents (and its siblings
+  // POST /agents/import, PUT /agents/:id). ESTABLISHED BEFORE FIXING, not
+  // assumed: any signed-in `user`-role caller reaches these three routes,
+  // and createAndStartContainer (services/docker.ts) — the only place these
+  // values ever reach Docker — has exactly one caller, POST /:id/start,
+  // requireRole('admin'). So a non-admin plants the value; an admin's
+  // ordinary "start this agent" is what detonates it — narrowed the same
+  // way as #141 ("any signed-in user" -> "needs an admin to have started
+  // the agent"), not assumed to be a direct one-call DoS.
+  //
+  // Bounds: MAX_AGENT_CPUS=4 (VPS `nproc`), MAX_AGENT_MEM_BYTES=16761118720
+  // (VPS `docker info` MemTotal), MAX_AGENT_PIDS_LIMIT=300 (the highest
+  // default_pids_limit among live container_profiles rows — the `browser`
+  // profile). See the block comment above cpusValidationError in
+  // routes/agents.ts for the full derivation and the live Docker-daemon
+  // measurements that separated "Docker already rejects this" (cpus) from
+  // "Docker accepts this and enforces nothing" (mem_limit, pids_limit).
+  it('POST /agents rejects cpus above the VPS ceiling', async () => {
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', cpus: '9999' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cpus must not exceed 4/);
+  });
+
+  it('POST /agents rejects mem_limit above the VPS RAM ceiling', async () => {
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', mem_limit: '9999g' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/mem_limit must not exceed/);
+  });
+
+  // THE POSITIVE CONTROL, per the repo's own rule: mutate ONE bound and
+  // confirm exactly the dependent assertion fails, so this test is proven
+  // to discriminate rather than pass regardless of the value sent.
+  it('POST /agents accepts mem_limit AT the VPS RAM ceiling, in bytes — the exact boundary', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', name: 'Test', status: 'stopped', created_by: 'regular-user', mem_limit: '16761118720' }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', mem_limit: '16761118720' });
+    expect(res.status).toBe(201);
+  });
+
+  it('POST /agents rejects pids_limit above the profile ceiling', async () => {
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', pids_limit: 9999 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/pids_limit must not exceed 300/);
+  });
+
+  // The specific defect: pids_limit had NO validation at all, not even a
+  // type check, and Docker's PidsLimit field treats a negative value as its
+  // own "-1 = unlimited" sentinel — confirmed live against the production
+  // Docker daemon (docker-service.test.ts). This is not "an out-of-range
+  // number", it is a complete bypass of fork-bomb protection in one field.
+  it('POST /agents rejects a negative pids_limit — Docker\'s own "unlimited" sentinel', async () => {
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', pids_limit: -1 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/pids_limit must be a positive integer/);
+  });
+
+  it('POST /agents rejects a non-integer pids_limit', async () => {
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', pids_limit: 'lots' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/pids_limit must be an integer/);
+  });
+
+  it('POST /agents/import rejects mem_limit above the VPS RAM ceiling', async () => {
+    const res = await request(app)
+      .post('/agents/import')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'imported-agent', name: 'Imported', mem_limit: '9999g' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/mem_limit must not exceed/);
+  });
+
+  it('POST /agents/import rejects a negative pids_limit', async () => {
+    const res = await request(app)
+      .post('/agents/import')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'imported-agent', name: 'Imported', pids_limit: -1 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/pids_limit must be a positive integer/);
+  });
+
+  // containerProfileCeilingViolations (app#593, follow-up): MAX_AGENT_* must
+  // stay >= every container_profiles row's own default_cpus/
+  // default_mem_limit/default_pids_limit, always — POST /container-profiles
+  // (admin-only) validates none of those three columns, so an admin CAN
+  // create a profile that already violates the platform's own ceiling. Left
+  // unchecked, that surfaces later as "agent creation rejected" once a
+  // profile's defaults are wired into agent creation, with the real cause
+  // sitting in a container_profiles row two tables from the symptom.
+  describe('containerProfileCeilingViolations', () => {
+    // The real, live rows (container_profiles migrations 032/039), Verified
+    // 2026-08-06 against production Postgres — not an invented fixture.
+    const LIVE_PROFILES = [
+      { name: 'standard', default_cpus: '1.0', default_mem_limit: '1g', default_pids_limit: 200 },
+      { name: 'browser', default_cpus: '2.0', default_mem_limit: '2g', default_pids_limit: 300 },
+      { name: 'monitor', default_cpus: '0.5', default_mem_limit: '256m', default_pids_limit: 100 },
+    ];
+
+    it('the real, current container_profiles rows violate nothing', () => {
+      expect(containerProfileCeilingViolations(LIVE_PROFILES)).toEqual([]);
+    });
+
+    // THE POSITIVE CONTROL the repo's own rules require: raise ONE bound in
+    // the fixture past the ceiling and confirm this specific assertion is
+    // what catches it — not "some validation fired somewhere".
+    it('POSITIVE CONTROL: a profile default_pids_limit raised past MAX_AGENT_PIDS_LIMIT is caught, named, and only that field', () => {
+      const mutated = LIVE_PROFILES.map(p =>
+        p.name === 'browser' ? { ...p, default_pids_limit: 301 } : p
+      );
+
+      const violations = containerProfileCeilingViolations(mutated);
+
+      expect(violations).toHaveLength(1);
+      expect(violations[0]).toEqual({
+        profile: 'browser',
+        field: 'default_pids_limit',
+        error: expect.stringMatching(/pids_limit must not exceed 300/),
+      });
+    });
+
+    it('TWIN: the same profile at exactly the ceiling (300) is still clean — the boundary itself is not a violation', () => {
+      const atBoundary = LIVE_PROFILES.map(p =>
+        p.name === 'browser' ? { ...p, default_pids_limit: 300 } : p
+      );
+      expect(containerProfileCeilingViolations(atBoundary)).toEqual([]);
+    });
+
+    it('a default_cpus raised past MAX_AGENT_CPUS is caught independently of the other two fields', () => {
+      const mutated = LIVE_PROFILES.map(p =>
+        p.name === 'browser' ? { ...p, default_cpus: '5.0' } : p
+      );
+      const violations = containerProfileCeilingViolations(mutated);
+      expect(violations).toHaveLength(1);
+      expect(violations[0].field).toBe('default_cpus');
+    });
+
+    it('a default_mem_limit raised past MAX_AGENT_MEM_BYTES is caught independently of the other two fields', () => {
+      const mutated = LIVE_PROFILES.map(p =>
+        p.name === 'browser' ? { ...p, default_mem_limit: '9999g' } : p
+      );
+      const violations = containerProfileCeilingViolations(mutated);
+      expect(violations).toHaveLength(1);
+      expect(violations[0].field).toBe('default_mem_limit');
+    });
+
+    it('multiple violated profiles are all reported, not just the first', () => {
+      const mutated = LIVE_PROFILES.map(p => ({ ...p, default_pids_limit: 9999 }));
+      const violations = containerProfileCeilingViolations(mutated);
+      expect(violations).toHaveLength(3);
+      expect(violations.map(v => v.profile).sort()).toEqual(['browser', 'monitor', 'standard']);
+    });
   });
 
   it('POST /agents rejects missing fields', async () => {
@@ -837,6 +1012,34 @@ describe('Agent container profile wiring', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/cpus must be a positive number/);
+  });
+
+  it('PUT /agents/:id rejects mem_limit above the VPS RAM ceiling', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'uuid-1', agent_id: 'test', status: 'stopped', created_by: 'regular-user', model_policy_id: null }],
+    });
+
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ mem_limit: '9999g' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/mem_limit must not exceed/);
+  });
+
+  it('PUT /agents/:id rejects a negative pids_limit', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'uuid-1', agent_id: 'test', status: 'stopped', created_by: 'regular-user', model_policy_id: null }],
+    });
+
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ pids_limit: -1 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/pids_limit must be a positive integer/);
   });
 
   // THE ASSERTION THAT MATTERS (app#212 family — sibling drift sweep).
