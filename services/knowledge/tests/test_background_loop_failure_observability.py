@@ -108,3 +108,179 @@ async def test_revocation_refresh_loop_survives_a_raising_cycle_but_nothing_obse
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class _BlankMessageError(Exception):
+    """An exception whose str() is '' — e.g. a bare `raise SomeError()` with
+    no message argument. Real, not contrived: this is exactly the case
+    app#600's bound exists to catch."""
+
+
+@pytest.mark.asyncio
+async def test_reconciler_loop_records_class_name_even_when_the_exception_message_is_blank(monkeypatch):
+    async def _raising_reconcile(pool, settings):
+        raise _BlankMessageError()
+
+    monkeypatch.setattr("app.main.reconcile", _raising_reconcile)
+
+    app = SimpleNamespace(state=SimpleNamespace(pool=_FakePool()))
+    settings = SimpleNamespace(reconciler_interval_seconds=0)
+
+    task = asyncio.create_task(_reconciler_loop(app, settings))
+    try:
+        await _run_a_few_cycles(task)
+
+        # str(exc) alone would record "" here — indistinguishable from the
+        # field never having been set, at exactly the moment an operator
+        # is reading /health to find out why the reconciler keeps failing.
+        assert app.state.reconciler_last_error == "_BlankMessageError: "
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_reconciler_loop_bounds_a_long_exception_message_to_200_chars(monkeypatch):
+    async def _raising_reconcile(pool, settings):
+        raise RuntimeError("x" * 500)
+
+    monkeypatch.setattr("app.main.reconcile", _raising_reconcile)
+
+    app = SimpleNamespace(state=SimpleNamespace(pool=_FakePool()))
+    settings = SimpleNamespace(reconciler_interval_seconds=0)
+
+    task = asyncio.create_task(_reconciler_loop(app, settings))
+    try:
+        await _run_a_few_cycles(task)
+
+        # /health has no size limit of its own on this field.
+        assert len(app.state.reconciler_last_error) == 200
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_reconciler_loop_recovery_clears_the_error_and_the_success_timestamp_advances(monkeypatch):
+    """The positive control this file was missing: a loop that fails and then
+    recovers must look different from one still failing, and different from
+    one that has never run at all — not just different from a loop that has
+    never failed.
+
+    Synchronized with events rather than counting sleep(0) yields — the
+    interval is patched to an instant sleep, so a fixed number of yields is
+    not a reliable way to land exactly between "call 1 failed" and "call 2
+    has not yet returned" otherwise.
+    """
+    calls = {"n": 0}
+    call2_started = asyncio.Event()
+    release_call2 = asyncio.Event()
+
+    async def _reconcile_fails_once_then_blocks(pool, settings):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated one-time failure")
+        if calls["n"] == 2:
+            call2_started.set()
+            await release_call2.wait()
+
+    monkeypatch.setattr("app.main.reconcile", _reconcile_fails_once_then_blocks)
+
+    # Pre-initialized to None, matching real app.state's own lifespan setup
+    # (main.py sets these before either loop ever starts) — the loop itself
+    # only ever WRITES these attributes, never initializes them, so a bare
+    # SimpleNamespace would raise AttributeError on the pre-first-success
+    # read below rather than genuinely prove the null-vs-timestamp
+    # distinction.
+    app = SimpleNamespace(state=SimpleNamespace(
+        pool=_FakePool(), reconciler_last_success=None, reconciler_last_error=None,
+    ))
+    settings = SimpleNamespace(reconciler_interval_seconds=0)
+
+    task = asyncio.create_task(_reconciler_loop(app, settings))
+    try:
+        # Call 1 (startup) has failed and call 2 (first periodic cycle) has
+        # started but not yet returned — the one window where "failed once"
+        # and "not yet succeeded" are both true at the same time.
+        await call2_started.wait()
+        assert app.state.reconciler_last_error is not None
+        assert app.state.reconciler_last_success is None, (
+            "a loop that has only ever failed must not report a success "
+            "timestamp — that would be indistinguishable from having "
+            "actually succeeded once"
+        )
+
+        # Let call 2 complete successfully.
+        release_call2.set()
+        await asyncio.sleep(0)
+
+        assert app.state.reconciler_last_error is None, (
+            "a recovered loop must clear the stale error, not leave a "
+            "prior failure looking current forever"
+        )
+        assert app.state.reconciler_last_success is not None
+        assert isinstance(app.state.reconciler_last_success, float)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_revocation_refresh_loop_recovery_clears_the_error_and_the_success_timestamp_advances():
+    call2_started = asyncio.Event()
+    release_call2 = asyncio.Event()
+
+    class _PoolFailsOnceThenBlocks:
+        def __init__(self):
+            self.calls = 0
+
+        async def fetch(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("simulated one-time failure")
+            if self.calls == 2:
+                call2_started.set()
+                await release_call2.wait()
+            return []
+
+        async def execute(self, *args, **kwargs):
+            return None
+
+    # Pre-initialized to None — same reasoning as the reconciler recovery
+    # test above.
+    app = SimpleNamespace(state=SimpleNamespace(
+        pool=_PoolFailsOnceThenBlocks(), revoked_jtis=set(),
+        revocation_last_success=None, revocation_last_error=None,
+    ))
+
+    task = asyncio.create_task(_revocation_refresh_loop(app))
+    try:
+        assert app.state.revocation_last_success is None, (
+            "must be distinguishable from a loop that has already run — "
+            "null, not a zero or epoch timestamp, before the first cycle"
+        )
+
+        await call2_started.wait()
+        assert app.state.revocation_last_error is not None
+        assert app.state.revocation_last_success is None, (
+            "a loop that has only ever failed must not report a success "
+            "timestamp — that would be indistinguishable from having "
+            "actually succeeded once"
+        )
+
+        release_call2.set()
+        await asyncio.sleep(0)
+
+        assert app.state.revocation_last_error is None, (
+            "a recovered loop must clear the stale error, not leave a "
+            "prior failure looking current forever"
+        )
+        assert app.state.revocation_last_success is not None
+        assert isinstance(app.state.revocation_last_success, float)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
