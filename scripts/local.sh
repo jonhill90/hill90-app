@@ -365,8 +365,15 @@ OPENAI_API_KEY=
 TAVILY_API_KEY=
 
 # --- agent containers ---
-# Absolute host path the API bind-mounts into each agentbox container. Must be
-# a host path, since the Docker daemon resolves it, not the API container.
+# Absolute path the API bind-mounts into each new agentbox container, resolved
+# by the DOCKER DAEMON, not by the API container. This placeholder is only
+# correct on native Linux, where the daemon's filesystem and the host's are
+# the same thing. On Docker Desktop for Mac the daemon runs inside its own
+# Linux VM, so this value would resolve to nothing there — app#619.
+# cmd_up (--standalone) overwrites this line after compose up with the
+# agentbox-configs named volume's actual Mountpoint, which the daemon always
+# resolves correctly on both platforms. The value below is only ever live
+# between init and the first up.
 AGENTBOX_CONFIG_HOST_PATH=$ROOT/.local/agentbox-configs
 
 # --- published ports (13000/18000 band, to avoid common conflicts) ---
@@ -575,6 +582,48 @@ seed_platform_users() {
   echo "  ✓ Seeded dev accounts in realm '$realm', each with email, firstName and lastName"
 }
 
+# app#619: AGENTBOX_CONFIG_HOST_PATH must be a path the DOCKER DAEMON can
+# resolve, not the macOS host path gen_env writes as a placeholder. On Docker
+# Desktop for Mac the daemon runs inside its own Linux VM, so that placeholder
+# resolves to nothing there — a NEW agent container's bind-mount of it silently
+# mounts an empty directory even though writeAgentFiles (agent-files.ts, which
+# writes through the SAME named volume via its OWN mount) reports success.
+# The failure then surfaces two layers away, inside the freshly-started agent
+# container, as `FileNotFoundError: agent.yml`.
+#
+# The named volume's actual Mountpoint, as the daemon itself reports it via
+# `docker volume inspect`, is the one path space that is always correct — on
+# native Linux it equals the host filesystem; on Docker Desktop for Mac it is
+# the VM path the daemon actually resolves `Binds` against. Only usable AFTER
+# `compose up` has created the volume, hence this runs after it and recreates
+# `api` if the value changed, rather than trying to precompute it.
+fix_standalone_agentbox_host_path() {
+  local vol
+  vol=$(docker volume ls --filter "label=com.docker.compose.volume=agentbox-configs" --format '{{.Name}}' | head -1)
+  if [ -z "$vol" ]; then
+    echo "  ! agentbox-configs volume not found after 'compose up' — AGENTBOX_CONFIG_HOST_PATH left as-is" >&2
+    return
+  fi
+  local mountpoint
+  mountpoint=$(docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null || true)
+  if [ -z "$mountpoint" ]; then
+    echo "  ! could not read $vol's Mountpoint — AGENTBOX_CONFIG_HOST_PATH left as-is" >&2
+    return
+  fi
+  local current; current=$(ev AGENTBOX_CONFIG_HOST_PATH)
+  [ "$current" = "$mountpoint" ] && return
+  echo "  fixing AGENTBOX_CONFIG_HOST_PATH -> $mountpoint (was: ${current:-<unset>})"
+  local tmp; tmp=$(mktemp)
+  grep -v '^AGENTBOX_CONFIG_HOST_PATH=' "$ENV_FILE" > "$tmp"
+  echo "AGENTBOX_CONFIG_HOST_PATH=$mountpoint" >> "$tmp"
+  mv "$tmp" "$ENV_FILE"
+  # api was already created above with the OLD value baked into its
+  # environment — that value could not be known before the volume existed.
+  # Recreate it now that .env.local carries the corrected one.
+  echo "  recreating api with the corrected value..."
+  compose up -d api
+}
+
 cmd_up() {
   [ -f "$ENV_FILE" ] || cmd_init
   topup_env
@@ -599,6 +648,7 @@ cmd_up() {
   require_interpolation || exit 1
   compose build
   compose up -d
+  [ "$INFRA" = "0" ] && fix_standalone_agentbox_host_path
   wait_healthy || true
   [ "$INFRA" = "1" ] && seed_platform_users
   echo
