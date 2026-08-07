@@ -98,6 +98,19 @@
       "bearerOnly": true,
       "description": "Resource server. Audience target only; never authenticates.",
       "fullScopeAllowed": true
+    },
+    {
+      "clientId": "hill90-realm-admin",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "bearerOnly": false,
+      "description": "app#500: service account for the api's own admin-user-management calls to Keycloak's admin API. Grants view-users + view-clients on realm-management only, never realm-admin. Not used by anything a browser touches.",
+      "secret": "local-dev-realm-admin-secret",
+      "fullScopeAllowed": true
     }
   ],
   "users": [
@@ -184,6 +197,17 @@
       "clientRoles": {
         "hill90-ui": [
           "user"
+        ]
+      }
+    },
+    {
+      "username": "service-account-hill90-realm-admin",
+      "enabled": true,
+      "serviceAccountClientId": "hill90-realm-admin",
+      "clientRoles": {
+        "realm-management": [
+          "view-users",
+          "view-clients"
         ]
       }
     }

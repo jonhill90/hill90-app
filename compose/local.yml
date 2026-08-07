@@ -214,6 +214,14 @@ services:
       # client at a realm its own Keycloak never imports.
       KEYCLOAK_ISSUER: http://localhost:${PORT_KEYCLOAK:-18080}/realms/platform
       KEYCLOAK_JWKS_URI: http://keycloak:8080/realms/platform/protocol/openid-connect/certs
+      # app#500: same reachability gap as KEYCLOAK_JWKS_URI above — the api
+      # container must reach keycloak internally, not through the
+      # browser-facing host KEYCLOAK_ISSUER carries. hill90-realm-admin is
+      # defined in ./local/keycloak/realm-local.json with a fixed local
+      # secret, matching hill90-ui's own local-dev-secret pattern.
+      KEYCLOAK_ADMIN_URL: http://keycloak:8080
+      KEYCLOAK_REALM_ADMIN_CLIENT_ID: ${KEYCLOAK_REALM_ADMIN_CLIENT_ID:-hill90-realm-admin}
+      KEYCLOAK_REALM_ADMIN_CLIENT_SECRET: ${KEYCLOAK_REALM_ADMIN_CLIENT_SECRET:-local-dev-realm-admin-secret}
       AI_SERVICE_URL: http://ai:8000
       MODEL_ROUTER_URL: http://ai:8000
       AKM_SERVICE_URL: http://knowledge:8002

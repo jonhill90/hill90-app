@@ -5020,6 +5020,54 @@ paths:
         "503":
           description: Failed to load secrets schema
 
+  /admin/users:
+    get:
+      summary: List realm users with their hill90-ui client roles
+      description: >
+        app#500 read-only slice. Every user in the realm alongside their
+        current hill90-ui client roles. Admin only. Calls Keycloak's admin
+        API as the hill90-realm-admin service account (view-users +
+        view-clients on realm-management only) — returns 503, not an empty
+        list, if KEYCLOAK_REALM_ADMIN_CLIENT_ID/SECRET are not configured.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every user with their hill90-ui client roles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        username:
+                          type: string
+                        email:
+                          type: string
+                        firstName:
+                          type: string
+                        lastName:
+                          type: string
+                        enabled:
+                          type: boolean
+                        hill90UiRoles:
+                          type: array
+                          items:
+                            type: string
+                          example: ["admin", "user"]
+        "401":
+          description: Not authenticated
+        "403":
+          description: Requires admin role
+        "503":
+          description: hill90-realm-admin service account not configured
+
   /admin/secrets/status:
     get:
       summary: Vault seal status
