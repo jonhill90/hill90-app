@@ -233,6 +233,7 @@ const EXPECTED_PATHS = [
   '/admin/secrets',
   '/admin/secrets/status',
   '/admin/secrets/kv',
+  '/admin/users',
   '/workflows',
   '/workflows/{id}',
   '/workflows/{id}/run',

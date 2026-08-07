@@ -22,6 +22,7 @@ import usageRouter from './routes/usage';
 import { requireRole } from './middleware/role';
 import { docsRouter, specRouter } from './routes/docs';
 import secretsRouter from './routes/secrets';
+import adminUsersRouter from './routes/admin-users';
 import { delegationTokenHandler } from './services/model-router-delegation';
 import chatRouter, { chatCallbackHandler, startStaleSweeper } from './routes/chat';
 import tasksRouter from './routes/tasks';
@@ -231,6 +232,9 @@ export function createApp(opts: AppOptions = {}): Application {
 
   // Secrets vault inventory (admin-only, AI-147)
   app.use('/admin/secrets', requireAuth, requireRole('admin'), secretsRouter);
+
+  // User management, read-only slice (admin-only, app#500)
+  app.use('/admin/users', requireAuth, requireRole('admin'), adminUsersRouter);
 
   // API documentation (admin-only)
   app.use('/docs', requireAuth, requireRole('admin'), docsRouter);

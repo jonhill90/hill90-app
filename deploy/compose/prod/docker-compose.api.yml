@@ -156,6 +156,18 @@ services:
       # Unset, both services derive it from KEYCLOAK_ISSUER
       # (services/api/src/index.ts, services/mcp/app/main.py), so APP_AUTH_HOST is
       # the single knob and front and back channels cannot diverge.
+      #
+      # app#500: the hill90-realm-admin service account for /admin/users.
+      # KEYCLOAK_ADMIN_URL is deliberately NOT set either, for the identical
+      # reason KEYCLOAK_JWKS_URI above is not — this app is a tenant with no
+      # internal shortcut to Hill90's Keycloak, so KEYCLOAK_ISSUER's own
+      # externally-reachable host is the correct address for admin API calls
+      # too. These two are unset in the SOPS store as of this PR — the
+      # hill90-realm-admin client does not exist on the live Keycloak yet, and
+      # creating one is a deliberate decision for Jon to make, not something
+      # this PR does. Until both are filled in, GET /admin/users returns 503.
+      - KEYCLOAK_REALM_ADMIN_CLIENT_ID=${KEYCLOAK_REALM_ADMIN_CLIENT_ID:-}
+      - KEYCLOAK_REALM_ADMIN_CLIENT_SECRET=${KEYCLOAK_REALM_ADMIN_CLIENT_SECRET:-}
       # The PLATFORM Postgres, via the tenant login the platform provisions.
       # DB_USER/DB_PASSWORD are app-postgres's superuser and are still deliberately
       # NOT reused here. Their consumers are now LOCAL ONLY — app-postgres was
