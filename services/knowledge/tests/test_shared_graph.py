@@ -189,7 +189,7 @@ async def test_agents_are_counted_with_COUNT_DISTINCT_because_the_list_is_groupe
 
     totals_sql = pool.conn.sql[4]
     assert "count(DISTINCT agent_id)" in totals_sql
-    assert "count(DISTINCT requester_id)" in totals_sql
+    assert "count(DISTINCT r.requester_id)" in totals_sql
 
 
 # ---------------------------------------------------------------------------

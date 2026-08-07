@@ -1139,12 +1139,33 @@ async def knowledge_graph(
     caller. This endpoint took no owner at all: a plain `user`-role caller
     could see every OTHER user's private collection and source names (and,
     via the retrieved-edge dangling rule below, could no longer reach
-    retrieval edges into collections/sources this filter now hides). Agent
-    knowledge_entries and retrieval-requester identity are DELIBERATELY NOT
-    scoped here — this service has no owner mapping for an agent_id, and
-    whether showing "who searched what" is a leak or an intended
-    transparency feature is a separate product/security judgment call, not
-    bundled into this fix — filed as app#460 rather than decided here.
+    retrieval edges into collections/sources this filter now hides).
+
+    RETRIEVER IDENTITY (app#460, resolved). Whether showing "who searched
+    what" is a leak or an intended transparency feature was left open by
+    the fix above and re-raised repeatedly against this docstring. Decided:
+    it is intended — the UI gives requester nodes dedicated hub styling and
+    a "You" label specifically to surface team activity (#379/#380), a
+    deliberately-built feature, not an accident. What was NOT intended, and
+    is fixed here, is that the requester NODE (and its accumulated
+    meta.retrieval_count) was built from EVERY row `retrieval_edges`
+    returned, before the same visibility a scoped caller gets for every
+    other node in this graph — only the EDGE was scoped, by checking
+    `source_id in source_ids` after the fact. Fixed at the query itself,
+    not by filtering rows in Python against `source_ids`: that set is
+    bounded by THIS PAGE's LIMIT, not by visibility, so a Python-side
+    filter would have hidden a requester's node just because their
+    retrieved source didn't fit on the current page, conflating "invisible
+    to this caller" with "on the next page" — see the retrieval_edges
+    query's own comment below. A requester whose retrievals are entirely
+    into collections this caller cannot see now produces no row at all and
+    no node; a requester with a mix is still shown, with a count reflecting
+    only what this caller could already see by other means. Agent
+    knowledge_entries (the separate agent_entries query above) stay
+    unscoped — this service has no owner mapping for an agent_id, agent
+    identities are already visible platform-wide via GET /agents, and nesting
+    scoping there is a different question with no chunk_ids/source_id
+    predicate to reuse anyway.
 
     MOVED HERE FROM THE API, which queried `shared_collections`,
     `shared_sources` and `knowledge_entries` through its own pool — tables that
@@ -1219,17 +1240,40 @@ async def knowledge_graph(
         # not an implicit comma-join with an explicit JOIN chained onto it — that
         # shape binds the JOIN to the unnest alone and either fails or silently
         # joins wrong, rather than to the (retrieval, chunk_id) pair intended.
+        #
+        # app#460, resolved: joined through to shared_collections and scoped
+        # by the SAME predicate as collections/sources above, at the SQL
+        # level rather than by filtering rows in Python against `source_ids`
+        # after the fact. That distinction matters: `source_ids` is bounded
+        # by THIS PAGE's LIMIT, not by visibility, so a Python-side filter
+        # against it would have hidden a requester's node just because their
+        # retrieved source didn't fit on the current page — conflating
+        # "invisible to this caller" with "on the next page", the exact
+        # confusion #215/#188 already ruled out elsewhere in this function.
+        # Scoping the SOURCE ROWS here, before GROUP BY, means a requester
+        # whose retrievals are entirely into invisible collections never
+        # produces a row at all — their node correctly never appears — while
+        # a requester with a mix of visible and invisible retrievals is
+        # still shown, with a count reflecting only what this caller could
+        # already see by other means.
+        retrieval_scope_where = (
+            "" if owner is None
+            else "WHERE (sc.created_by = $2 OR sc.visibility = 'shared')"
+        )
+        retrieval_edges_params = (limit,) if owner is None else (limit, owner)
         retrieval_edges = await conn.fetch(
-            """SELECT r.requester_id, r.requester_type, s.id AS source_id,
+            f"""SELECT r.requester_id, r.requester_type, s.id AS source_id,
                       count(*) AS chunk_hits
                  FROM shared_retrievals r
                  CROSS JOIN LATERAL unnest(r.chunk_ids) AS cid
-                 JOIN shared_chunks sc ON sc.id = cid
-                 JOIN shared_documents sd ON sd.id = sc.document_id
+                 JOIN shared_chunks sc2 ON sc2.id = cid
+                 JOIN shared_documents sd ON sd.id = sc2.document_id
                  JOIN shared_sources s ON s.id = sd.source_id
+                 JOIN shared_collections sc ON sc.id = s.collection_id
+                 {retrieval_scope_where}
              GROUP BY r.requester_id, r.requester_type, s.id
              ORDER BY r.requester_id, s.id LIMIT $1""",
-            limit,
+            *retrieval_edges_params,
         )
         # Scoped identically to collections/sources above — an unscoped total
         # next to a scoped page would always read as "truncated" for a
@@ -1243,13 +1287,31 @@ async def knowledge_graph(
             "WHERE status = 'active'" if owner is None
             else "WHERE status = 'active' AND collection_id IN (SELECT id FROM shared_collections WHERE created_by = $1 OR visibility = 'shared')"
         )
+        # Same predicate, same reason, as retrieval_edges above — joined
+        # through to shared_collections rather than filtered against a
+        # bounded page's source_ids. Missing until h#603's review: this
+        # count was the one total in the block still counting every
+        # requester in shared_retrievals unconditionally, three lines below
+        # its two scoped siblings, in the PR whose purpose is closing this
+        # exact class of leak.
+        totals_requesters_where = (
+            "" if owner is None
+            else "WHERE (sc.created_by = $1 OR sc.visibility = 'shared')"
+        )
         totals = await conn.fetchrow(
             f"""SELECT
                  (SELECT count(*) FROM shared_collections {totals_collections_where}) AS collections,
                  (SELECT count(*) FROM shared_sources {totals_sources_where}) AS sources,
                  (SELECT count(DISTINCT agent_id) FROM knowledge_entries WHERE status = 'active')
                    AS agents_with_knowledge,
-                 (SELECT count(DISTINCT requester_id) FROM shared_retrievals)
+                 (SELECT count(DISTINCT r.requester_id)
+                    FROM shared_retrievals r
+                    CROSS JOIN LATERAL unnest(r.chunk_ids) AS cid
+                    JOIN shared_chunks sc2 ON sc2.id = cid
+                    JOIN shared_documents sd ON sd.id = sc2.document_id
+                    JOIN shared_sources s ON s.id = sd.source_id
+                    JOIN shared_collections sc ON sc.id = s.collection_id
+                    {totals_requesters_where})
                    AS requesters_with_retrievals""",
             *(() if owner is None else (owner,)),
         )
@@ -1299,6 +1361,18 @@ async def knowledge_graph(
     # node for the same agent_id; 'user' is a genuinely new, self-describing
     # node type so the legend can tell human search activity from agent
     # activity apart, rather than lumping them under "agent".
+    # app#460, resolved. The requester ROWS returned by the retrieval_edges
+    # query below are now pre-scoped at the SQL level (same predicate as
+    # collections/sources, joined through to shared_collections) — a row
+    # for a source this caller cannot see never reaches this loop at all.
+    # Deliberately NOT filtered again here against `source_ids`: that set
+    # is bounded by THIS PAGE's LIMIT, not by visibility, and conflating
+    # the two would hide a requester's node just because their retrieved
+    # source didn't fit on this page — the same page-truncation case the
+    # source-node loop above already handles the OPPOSITE way (the node
+    # stays; only the edge to a truncated collection is dropped). See the
+    # query's own comment for why the visibility scoping had to move
+    # there instead of being reproduced as a second filter here.
     requesters_shown: set[str] = set()
     for r in retrieval_edges:
         requester_id = r["requester_id"]
