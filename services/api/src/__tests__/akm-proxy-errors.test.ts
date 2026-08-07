@@ -99,11 +99,33 @@ describe('akm-proxy error propagation', () => {
 
   it('applies to every AKM call, not just createEntry', async () => {
     // The same unconditional resp.json() existed at three sites.
+    //
+    // getEntriesGraph excluded from this generic probe (app#501): every
+    // OTHER exported function tolerates being called with three positional
+    // strings — extra/mistyped args are silently ignored or optional-
+    // chained away, so the probe still reaches the real fetch/readBody path
+    // this test exists to exercise. getEntriesGraph's first param is
+    // genuinely `string[] | null`, not a string, and calls `.join(',')` on
+    // it — `'a1'.join` throws before ever reaching readBody, which would
+    // make this loop assert something about a TypeError, not about error
+    // propagation. Given its own dedicated case directly below instead,
+    // called the way its real (and only) caller — routes/knowledge.ts —
+    // actually calls it.
     const mod = await import('../services/akm-proxy');
-    const fns = Object.keys(mod).filter((k) => typeof (mod as any)[k] === 'function');
+    const fns = Object.keys(mod)
+      .filter((k) => typeof (mod as any)[k] === 'function')
+      .filter((k) => k !== 'getEntriesGraph');
     for (const name of fns) {
       stubFetch(500, 'Internal Server Error');
       await expect((mod as any)[name]('a1', 'p.md', 'c')).resolves.toBeDefined();
     }
+  });
+
+  it('applies to getEntriesGraph too (app#501), called with its real signature', async () => {
+    stubFetch(500, 'Internal Server Error');
+    const { getEntriesGraph } = await import('../services/akm-proxy');
+    const r = await getEntriesGraph(['a1'], 100);
+    expect(r.status).toBe(500);
+    expect(JSON.stringify(r.data)).toMatch(/non-JSON/i);
   });
 });

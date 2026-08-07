@@ -103,6 +103,20 @@ export async function listAgents(): Promise<ProxyResponse> {
   return proxyGet('/internal/admin/agents');
 }
 
+/**
+ * app#501: the private-memory graph. `agentIds` IS the caller's already-
+ * decided visibility (routes/knowledge.ts's own getAllowedAgentIds) — null
+ * means no filter, reached only on the admin path. A non-null, EMPTY array
+ * is deliberately never sent here: see routes/knowledge.ts's own comment at
+ * the call site for why (proxyGet strips empty-string param values, which
+ * would silently turn an explicit "see nothing" into "see everything").
+ */
+export async function getEntriesGraph(agentIds: string[] | null, limit: number): Promise<ProxyResponse> {
+  const params: Record<string, string> = { limit: String(limit) };
+  if (agentIds !== null) params.agent_ids = agentIds.join(',');
+  return proxyGet('/internal/admin/entries/graph', params);
+}
+
 export interface PageOpts {
   limit?: number;
   offset?: number;

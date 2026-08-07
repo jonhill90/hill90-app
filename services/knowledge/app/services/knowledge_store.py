@@ -310,3 +310,170 @@ async def search_entries(
         query,
     )
     return [dict(r) for r in rows], int(total_matches or 0)
+
+
+# ---------------------------------------------------------------------------
+# Private-memory graph (app#501)
+# ---------------------------------------------------------------------------
+#
+# A SECOND producer into the node-type contract services/ui's KnowledgeGraph.tsx
+# already renders (docs/contracts/graph-node-types.json, app#380/#381) — that
+# renderer takes nodes/edges and does not care which service or which Postgres
+# database they came from. shared_store.py's GraphNodeType/GRAPH_NODE_TYPES
+# stays exactly as it was; it declares what THAT function can emit, not the
+# renderer's full vocabulary. This module declares its own, and the manifest
+# is the union of both — see test_graph_node_type_contract.py for the updated
+# assertion this split requires.
+class EntryGraphNodeType:
+    AGENT = "agent"
+    ENTRY = "entry"
+
+
+ENTRY_GRAPH_NODE_TYPES: frozenset[str] = frozenset({
+    EntryGraphNodeType.AGENT, EntryGraphNodeType.ENTRY,
+})
+
+
+async def entries_graph(
+    pool: asyncpg.Pool, limit: int, *, agent_ids: list[str] | None = None
+) -> dict[str, Any]:
+    """Nodes, edges and totals for the private-memory graph (app#501).
+
+    OWNER/AUTHORITY, decided rather than assumed (app#501's own text asks for
+    this explicitly): this table has no owner/created_by column at all —
+    unlike shared_store.py's tables, ownership here is entirely indirect,
+    via which Keycloak user's `agents` row a given `agent_id` belongs to.
+    This function does not resolve that itself, and is not supposed to:
+    `agent_ids`, when given, IS the caller's already-decided visibility —
+    computed by the api's own `getAllowedAgentIds` (routes/knowledge.ts),
+    the exact mechanism `routes/knowledge.ts`'s existing entries/search
+    endpoints already use to answer "which agents can this caller see". This
+    function trusts that list the same way `internal_admin.py`'s own header
+    already states policy for this file's sibling endpoints: "The knowledge
+    service trusts the API service to pass the correct agent_id filters."
+    `agent_ids=None` means no filter — the ADMIN path, reached only when the
+    api's own scoping resolved to "sees everything", never a default.
+
+    A dedicated app#499 note: this graph is single-owner (or admin-only) by
+    construction — no `user` node type, no requester identity anywhere in
+    this query, so the sub-vs-name rendering problem #499 fixed for shared
+    knowledge does not arise here at all.
+    """
+    agent_filter = "" if agent_ids is None else "AND agent_id = ANY($2::text[])"
+    agent_params: tuple = (limit,) if agent_ids is None else (limit, agent_ids)
+
+    agents = await pool.fetch(
+        f"""SELECT agent_id, COUNT(*) AS entry_count, MAX(updated_at) AS last_updated
+              FROM knowledge_entries
+             WHERE status = 'active' {agent_filter}
+          GROUP BY agent_id
+          ORDER BY last_updated DESC
+             LIMIT $1""",
+        *agent_params,
+    )
+    entries = await pool.fetch(
+        f"""SELECT id, agent_id, path, title, entry_type, tags, status,
+                   created_at, updated_at
+              FROM knowledge_entries
+             WHERE status = 'active' {agent_filter}
+          ORDER BY updated_at DESC, id DESC
+             LIMIT $1""",
+        *agent_params,
+    )
+
+    # knowledge_links (migration 002) exists for [[wikilink]] cross-referencing
+    # but, as of this function, NOTHING WRITES TO IT — create_entry/update_entry
+    # never populate it. This join is therefore correct and safe (it will
+    # simply return zero rows against every real deployment today) but is not
+    # yet provable against real production data, only against rows this PR's
+    # own tests insert directly. Written now so the graph is ready the moment
+    # a wikilink-parsing writer exists, rather than needing a second PR to
+    # wire up structure that is otherwise already in the schema.
+    #
+    # A link only resolves WITHIN the same agent — target_path is unique per
+    # agent_id (knowledge_entries' own UNIQUE (agent_id, path)), so matching
+    # cross-agent would be matching on a coincidence, not a real reference.
+    # Own filter/params rather than reusing agent_filter/agent_params: this
+    # query has no LIMIT param, so reusing the ($1=limit, $2=agent_ids) pair
+    # would pass an unused $1 while referencing a $2 the query never defines
+    # relative to itself — a real asyncpg parameter-count mismatch, not a
+    # style choice.
+    links_filter = "" if agent_ids is None else "AND ke_source.agent_id = ANY($1::text[])"
+    links_params: tuple = () if agent_ids is None else (agent_ids,)
+    links = await pool.fetch(
+        f"""SELECT kl.source_id, ke_target.id AS target_id
+              FROM knowledge_links kl
+              JOIN knowledge_entries ke_source ON ke_source.id = kl.source_id
+         LEFT JOIN knowledge_entries ke_target
+                ON ke_target.agent_id = ke_source.agent_id
+               AND ke_target.path = kl.target_path
+               AND ke_target.status = 'active'
+             WHERE ke_source.status = 'active' {links_filter}""",
+        *links_params,
+    )
+
+    totals_filter = "" if agent_ids is None else "AND agent_id = ANY($1::text[])"
+    totals_params: tuple = () if agent_ids is None else (agent_ids,)
+    totals = await pool.fetchrow(
+        f"""SELECT
+              (SELECT COUNT(DISTINCT agent_id) FROM knowledge_entries
+                WHERE status = 'active' {totals_filter}) AS agents_with_entries,
+              (SELECT COUNT(*) FROM knowledge_entries
+                WHERE status = 'active' {totals_filter}) AS entries""",
+        *totals_params,
+    )
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    dangling_edges = 0
+
+    agent_ids_shown = set()
+    for a in agents:
+        agent_ids_shown.add(a["agent_id"])
+        nodes.append({
+            "id": f"agent-{a['agent_id']}", "type": EntryGraphNodeType.AGENT,
+            "label": a["agent_id"], "meta": {"entry_count": int(a["entry_count"])},
+        })
+
+    entry_ids_shown = set()
+    for e in entries:
+        entry_ids_shown.add(str(e["id"]))
+        node_id = f"entry-{e['id']}"
+        nodes.append({
+            "id": node_id, "type": EntryGraphNodeType.ENTRY, "label": e["title"],
+            "meta": {"entry_type": e["entry_type"], "tags": e["tags"], "status": e["status"]},
+        })
+        # Same dangling-edge accounting as shared_store.knowledge_graph: an
+        # edge is only emitted when the OTHER end is actually on this page.
+        # An agent whose own row was cut by the agents-page LIMIT still owns
+        # this entry — the entry node stays, only the edge to the (missing)
+        # agent node is withheld and counted.
+        if e["agent_id"] in agent_ids_shown:
+            edges.append({"source": f"agent-{e['agent_id']}", "target": node_id, "label": "contains"})
+        else:
+            dangling_edges += 1
+
+    for link in links:
+        source_id = str(link["source_id"])
+        target_id = str(link["target_id"]) if link["target_id"] is not None else None
+        # Three ways this can fail to resolve, all counted as dangling rather
+        # than silently dropped: the source entry didn't make this page, the
+        # link's target_path doesn't match any active entry at all (a
+        # genuinely broken wikilink), or the target entry exists but didn't
+        # make this page.
+        if source_id in entry_ids_shown and target_id is not None and target_id in entry_ids_shown:
+            edges.append({"source": f"entry-{source_id}", "target": f"entry-{target_id}", "label": "links"})
+        else:
+            dangling_edges += 1
+
+    total = {"agents": int(totals["agents_with_entries"]), "entries": int(totals["entries"])}
+    shown = {"agents": len(agents), "entries": len(entries)}
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "total": total,
+        "shown": shown,
+        "dangling_edges": dangling_edges,
+        "truncated": any(shown[k] < total[k] for k in total),
+    }
