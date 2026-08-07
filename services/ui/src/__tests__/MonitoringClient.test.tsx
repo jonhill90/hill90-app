@@ -15,7 +15,20 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/harness/monitoring',
 }))
 
+// app#{async-callback-sweep}: refreshAll is handed bare to setInterval, so the
+// promise it returns is discarded by the caller — an unguarded rejection
+// inside it would be an unhandled rejection, not a caught error. Every real
+// probeService call today is internally guarded and cannot reject, so this
+// can't be reached through the real implementation; mocking the module is
+// how a test proves refreshAll's OWN resilience rather than re-proving
+// probeService's already-separately-tested guarantee (service-probe.test.ts).
+vi.mock('@/utils/service-probe', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/utils/service-probe')>()
+  return { ...actual, probeService: vi.fn(actual.probeService) }
+})
+
 import MonitoringClient from '@/app/harness/monitoring/MonitoringClient'
+import { probeService } from '@/utils/service-probe'
 
 function mockFetch(overrides: Record<string, unknown> = {}) {
   return vi.fn((url: string) => {
@@ -179,6 +192,50 @@ describe('MonitoringClient', () => {
       })
       expect(screen.getByText('Unable to fetch knowledge stats.')).toBeInTheDocument()
       expect(screen.queryByText('Loading knowledge stats...')).not.toBeInTheDocument()
+    })
+  })
+
+  // Async-callback sweep: refreshAll is `setInterval(refreshAll, 30_000)` — the
+  // returned promise is discarded, so an unguarded rejection inside it becomes
+  // an unhandled rejection, not a caught error. Every real probeService call is
+  // internally guarded today and can't reject, which is exactly why this can
+  // only be proven by forcing the dependency to violate its own contract, not
+  // by finding a real input that breaks it.
+  describe("refreshAll survives a rejecting dependency (it shouldn't be reachable today, but nothing enforced that)", () => {
+    it('does not leave the refresh button stuck disabled/spinning when a probe rejects', async () => {
+      vi.stubGlobal('fetch', mockFetch())
+      vi.mocked(probeService).mockRejectedValueOnce(new Error('simulated: a probe violated its own never-rejects contract'))
+
+      render(<MonitoringClient />)
+
+      const button = await screen.findByRole('button', { name: /refresh/i })
+      // The property under test: refreshAll's mount-time call must reach its
+      // `finally` and re-enable the button even though one dependency
+      // rejected — not stay stuck disabled/spinning forever, which is what
+      // an unhandled rejection inside refreshAll (pre-fix: no try/finally)
+      // would have left it as, since the two lines after the bare `await`
+      // never run once the awaited promise rejects.
+      await waitFor(() => {
+        expect(button).not.toBeDisabled()
+      })
+      expect(button.querySelector('svg')).not.toHaveClass('animate-spin')
+    })
+
+    it('still updates "Last refresh" even when a probe rejects', async () => {
+      vi.stubGlobal('fetch', mockFetch())
+      vi.mocked(probeService).mockRejectedValueOnce(new Error('simulated probe rejection'))
+
+      render(<MonitoringClient />)
+
+      await waitFor(() => {
+        expect(screen.getByText(/Last refresh:/)).toBeInTheDocument()
+      })
+      // Distinguishing "ran and updated" from "was always there": the initial
+      // state is also a real Date, so this asserts the button re-enabling
+      // (proven above) and this coexist — refreshAll actually completed its
+      // finally block, not just left old state on screen untouched.
+      const button = await screen.findByRole('button', { name: /refresh/i })
+      await waitFor(() => expect(button).not.toBeDisabled())
     })
   })
 })
