@@ -59,16 +59,15 @@ All agent tokens conform to the `WorkloadClaims` interface (defined in `services
 - Elevated scope assignment (`host_docker`, `vps_system`) requires admin role.
 - Scope is computed at token issuance (start time). Mid-flight changes require agent restart.
 
-## Migration Window (V1 → V2)
+## `WORKLOAD_PRINCIPAL_V2` — not an active migration. Verified 2026-08-07.
 
-When `WORKLOAD_PRINCIPAL_V2=true` on the API service:
-- `sub` changes from agent slug to agent UUID.
-- `agent_slug` claim is added for backward-compatible log correlation.
-- `principal_type` and `scopes` are always present regardless of flag.
+This section previously described a "Migration Window (V1 → V2)" as if underway, with downstream services accepting both `sub` formats during a rolling deadline. **That was false, and worse than no claim at all: a reader concluded the boundary below held when it did not.** Corrected here rather than softened, per app#614.
 
-**Downstream verification services** should accept both slug and UUID formats for `sub` during the migration window (default: 7 days from first V2 deploy, configurable via `WORKLOAD_PRINCIPAL_MIGRATION_DEADLINE` env var).
+**The flag is unset in the environment of all five production containers (`app-api`, `app-ai`, `app-knowledge`, `app-mcp`, `app-ui`) and unset in both `deploy/compose/prod/docker-compose.api.yml` and `compose/local.yml`.** It has never been turned on anywhere this app runs. There is no migration in progress, rolling or otherwise, and no deadline mechanism has ever fired — `WORKLOAD_PRINCIPAL_MIGRATION_DEADLINE` is dead configuration for a state that has never existed.
 
-After the migration window, downstream services should enforce UUID-only `sub`.
+**Unset selects the pre-V2 branch, not the safer one.** `services/api/src/services/akm-token.ts:37,83` and `services/api/src/services/model-router-token.ts:37,90` both read `process.env.WORKLOAD_PRINCIPAL_V2 === 'true'` and use a ternary that defaults to `agentSlug` — the caller-chosen, hard-deletable, globally-reusable agent slug — whenever the flag is absent. `sub` in every agent JWT issued in production today is that slug, never the immutable, database-generated agent UUID `WORKLOAD_PRINCIPAL_V2=true` would select instead.
+
+**This is a real, currently-unenforced trust boundary, not a wording problem to fix and move on from.** `services/knowledge` (AKM) trusts `sub` as a durable, private per-agent namespace — every memory, task and file is scoped by it — with no live check against `services/api`'s own agents table for current existence or ownership. Because agent slugs are caller-supplied and freely reusable after a hard delete, a new agent that happens to claim a previously-used slug inherits full read/write access to whatever the earlier agent stored under that name, regardless of who owns either agent. Traced in full, including a concrete scenario and a real-Postgres reproduction that fails today on purpose, in **app#614** — read that issue before changing this flag's default or writing code that assumes this boundary is enforced. The executable reproduction exists as `test_slug_reuse_leaks_deleted_agent_memories.py`, open in **app#618** — deliberately *not* on `main`, because it fails by design until one of app#614's fixes actually lands, and merging it while it fails would turn CI red for every other change in the meantime. It stays open, pointing at app#614, until a fix does land; merging it then, once it passes, is the last step of that fix.
 
 ## Keycloak Strategy Decision
 
