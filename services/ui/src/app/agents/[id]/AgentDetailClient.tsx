@@ -43,6 +43,10 @@ interface Agent {
   created_at: string
   updated_at: string
   created_by: string
+  // app#499: the creator's own Keycloak name, captured at write time
+  // (POST /agents) — null for a row created before this existed, or by a
+  // caller whose token carried neither `name` nor `preferred_username`.
+  created_by_name: string | null
 }
 
 interface SkillRecord {
@@ -1062,7 +1066,17 @@ export default function AgentDetailClient({
 
           {/* Meta */}
           <div className="text-xs text-mountain-500">
-            Created {new Date(agent.created_at).toLocaleString()} by {session.user?.sub === agent.created_by ? (session.user?.name || 'you') : agent.created_by?.slice(0, 8) + '…'}
+            {/* app#499: the same raw-GUID rendering fixed in the knowledge
+                graph. "you" for yourself; otherwise the creator's own
+                resolved name (created_by_name, captured at write time —
+                see POST /agents) when this row has one, falling back to
+                the pre-#499 truncated sub only for a row nothing could
+                ever resolve one for. */}
+            Created {new Date(agent.created_at).toLocaleString()} by {
+              session.user?.sub === agent.created_by
+                ? (session.user?.name || 'you')
+                : (agent.created_by_name || agent.created_by?.slice(0, 8) + '…')
+            }
           </div>
         </div>
       )}

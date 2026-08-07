@@ -72,9 +72,9 @@ const app = createApp({
   getSigningKey: async () => publicKey,
 });
 
-function makeToken(sub: string, roles: string[]) {
+function makeToken(sub: string, roles: string[], extraClaims: Record<string, unknown> = {}) {
   return jwt.sign(
-    { sub, resource_access: { 'hill90-ui': { roles } } },
+    { sub, resource_access: { 'hill90-ui': { roles } }, ...extraClaims },
     privateKey,
     { algorithm: 'RS256', issuer: TEST_ISSUER, expiresIn: '5m' }
   );
@@ -401,7 +401,53 @@ describe('Shared Knowledge routes', () => {
       owner: 'regular-user',
       requester_id: 'regular-user',
       requester_type: 'user',
+      requester_display_name: undefined,
       limit: undefined,
     });
+  });
+
+  // app#499: "we don't want that strange guid to represent users... we want
+  // the names." This is the one write site that can ever resolve a `user`
+  // graph node's name — the caller's OWN Keycloak token, forwarded at the
+  // moment a retrieval is recorded. Never anyone else's identity.
+  it('GET /shared-knowledge/search forwards the caller\'s own name to record_retrieval, preferring `name` over `preferred_username`', async () => {
+    mockSearchShared.mockResolvedValue({ status: 200, data: { results: [] } });
+    const namedToken = makeToken('named-user', ['user'], {
+      name: 'Dev Local',
+      preferred_username: 'dev',
+    });
+
+    const res = await request(app)
+      .get('/shared-knowledge/search?q=hello')
+      .set('Authorization', `Bearer ${namedToken}`);
+    expect(res.status).toBe(200);
+    expect(mockSearchShared).toHaveBeenCalledWith(
+      expect.objectContaining({ requester_id: 'named-user', requester_display_name: 'Dev Local' })
+    );
+  });
+
+  it('GET /shared-knowledge/search falls back to `preferred_username` when the token has no `name`', async () => {
+    mockSearchShared.mockResolvedValue({ status: 200, data: { results: [] } });
+    const handleOnlyToken = makeToken('handle-user', ['user'], { preferred_username: 'testuser01' });
+
+    const res = await request(app)
+      .get('/shared-knowledge/search?q=hello')
+      .set('Authorization', `Bearer ${handleOnlyToken}`);
+    expect(res.status).toBe(200);
+    expect(mockSearchShared).toHaveBeenCalledWith(
+      expect.objectContaining({ requester_id: 'handle-user', requester_display_name: 'testuser01' })
+    );
+  });
+
+  it('GET /shared-knowledge/search leaves requester_display_name undefined when the token carries neither claim — the pre-#499 raw-sub rendering, not a fabricated name', async () => {
+    mockSearchShared.mockResolvedValue({ status: 200, data: { results: [] } });
+
+    const res = await request(app)
+      .get('/shared-knowledge/search?q=hello')
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(res.status).toBe(200);
+    expect(mockSearchShared).toHaveBeenCalledWith(
+      expect.objectContaining({ requester_id: 'regular-user', requester_display_name: undefined })
+    );
   });
 });

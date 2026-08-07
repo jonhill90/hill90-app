@@ -814,11 +814,19 @@ async def record_retrieval(
     chunk_ids: list[str],
     duration_ms: int | None = None,
     collection_id: str | None = None,
+    requester_display_name: str | None = None,
 ) -> dict[str, Any]:
+    """requester_display_name (app#499): the caller's own Keycloak name,
+    captured at write time by whoever is recording THEIR OWN retrieval --
+    never resolved for anyone else here or anywhere downstream. Agent
+    callers (routes/shared.py) never pass one; a human caller whose token
+    carried neither `name` nor `preferred_username` passes None too, and
+    that is the one case this column stays NULL for a user row on purpose.
+    """
     row = await pool.fetchrow(
         """INSERT INTO shared_retrievals
-           (query, requester_type, requester_id, agent_owner, result_count, chunk_ids, duration_ms, collection_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           (query, requester_type, requester_id, agent_owner, result_count, chunk_ids, duration_ms, collection_id, requester_display_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING *""",
         query,
         requester_type,
@@ -828,6 +836,7 @@ async def record_retrieval(
         [UUID(cid) for cid in chunk_ids],
         duration_ms,
         UUID(collection_id) if collection_id else None,
+        requester_display_name,
     )
     return _serialize(dict(row))
 
@@ -1261,9 +1270,31 @@ async def knowledge_graph(
             else "WHERE (sc.created_by = $2 OR sc.visibility = 'shared')"
         )
         retrieval_edges_params = (limit,) if owner is None else (limit, owner)
+        # app#499: requester_display_name is a WRITE-TIME capture, not a live
+        # Keycloak lookup -- see the migration and record_retrieval's own
+        # docstring for why a live per-request Admin API call was rejected
+        # (no service account exists on either client today, and adding one
+        # is a cross-repo Keycloak realm decision, not something this PR can
+        # make unilaterally). That means a rename in Keycloak goes stale
+        # here until the renamed person searches again -- so this picks the
+        # MOST RECENT non-NULL name across the group (ORDER BY created_at
+        # DESC, first non-NULL), not an arbitrary one: a plain MAX() would
+        # pick whichever string sorts alphabetically last, which could
+        # resurrect a name OLDER than one already captured after a rename.
+        # This does not eliminate staleness, only minimises its window to
+        # "since this requester's last search" -- and the requester's OWN
+        # view of themselves is unaffected regardless, since "You" is
+        # resolved live from the CURRENT session, never from this column.
+        # NULL when every contributing row is NULL -- an agent requester, or
+        # a human row recorded before this column existed / whose token
+        # carried no name. The node-building loop below only ever reads this
+        # for requester_type='user'; agent rows carry it through unused.
         retrieval_edges = await conn.fetch(
             f"""SELECT r.requester_id, r.requester_type, s.id AS source_id,
-                      count(*) AS chunk_hits
+                      count(*) AS chunk_hits,
+                      (array_agg(r.requester_display_name ORDER BY r.created_at DESC)
+                       FILTER (WHERE r.requester_display_name IS NOT NULL))[1]
+                        AS requester_display_name
                  FROM shared_retrievals r
                  CROSS JOIN LATERAL unnest(r.chunk_ids) AS cid
                  JOIN shared_chunks sc2 ON sc2.id = cid
@@ -1379,13 +1410,35 @@ async def knowledge_graph(
         requesters_shown.add(requester_id)
         node_type = GraphNodeType.AGENT if r["requester_type"] == "agent" else GraphNodeType.USER
         node_id = f"{node_type}-{requester_id}"
+        # app#499: a `user` node's label is the requester's own resolved
+        # name (captured at write time from THEIR OWN Keycloak token —
+        # see record_retrieval) when any contributing row has one, falling
+        # back to the raw sub otherwise — that fallback is the pre-#499
+        # behavior, kept for a row this fix cannot retroactively name.
+        # Deliberately NEVER for `agent` nodes: an agent has no Keycloak
+        # identity to name, and agent_id is already a slug, not a GUID —
+        # the problem this issue names is specifically about `user` nodes.
+        # .get, not r["..."]: asyncpg's real Record supports both, but this
+        # function's own test suite stubs rows as plain dicts fixture-by-
+        # fixture (test_shared_graph.py) and most of them predate this
+        # column — a bracket lookup would KeyError every one of them for a
+        # field they have no reason to know about.
+        display_name = r.get("requester_display_name") if node_type == GraphNodeType.USER else None
         # setdefault does not help meta specifically: a requester_type='agent'
         # row can hit an EXISTING node already inserted by the agent_entries
         # loop above, whose meta has entry_count but no retrieval_count yet —
         # so the increment itself must tolerate the key being absent.
         node = agent_or_user_nodes.setdefault(node_id, {
-            "id": node_id, "type": node_type, "label": requester_id, "meta": {},
+            "id": node_id, "type": node_type, "label": display_name or requester_id, "meta": {},
         })
+        if node_type == GraphNodeType.USER and display_name and node["label"] == requester_id:
+            # This page's retrieval_edges rows are grouped per (requester,
+            # source) — an earlier row for the SAME requester (a different
+            # source) may have had no name and set the raw-sub fallback
+            # first. A later row for the same requester on this page DOES
+            # have one: upgrade the label in place rather than leaving the
+            # node stuck on the fallback for the rest of this response.
+            node["label"] = display_name
         node["meta"]["retrieval_count"] = node["meta"].get("retrieval_count", 0) + int(r["chunk_hits"])
 
         if str(r["source_id"]) in source_ids:

@@ -746,13 +746,13 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     // before anything is written.
     const createdAgent = await withTransaction(async (tx) => {
     const { rows } = await tx.query(
-      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, created_by)
+      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, created_by, created_by_name)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                COALESCE($10::uuid, (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1)),
-               $11, $12)
+               $11, $12, $13)
        RETURNING id, agent_id, name, description, status, tools_config,
                  cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by`,
+                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by, created_by_name`,
       [
         agent_id,
         name,
@@ -766,6 +766,10 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
         validatedPolicyId,
         container_profile_id || null,
         user.sub,
+        // app#499: same write-time resolution as shared-knowledge.ts —
+        // the creator's own Keycloak name, captured now because this is
+        // the one place it's ever legitimately available for this row.
+        user.name || user.preferred_username || null,
       ]
     );
 
@@ -837,7 +841,7 @@ router.get('/:id', requireRole('user'), async (req: Request, res: Response) => {
               cp.name AS cp_name, cp.docker_image AS cp_docker_image,
               COALESCE(mp.allowed_models, '[]'::jsonb) AS models,
               mp.name AS model_policy_name,
-              error_message, a.created_at, a.updated_at, a.created_by
+              error_message, a.created_at, a.updated_at, a.created_by, a.created_by_name
        FROM agents a
        LEFT JOIN model_policies mp ON mp.id = a.model_policy_id
        LEFT JOIN container_profiles cp ON cp.id = a.container_profile_id
@@ -1034,13 +1038,13 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
     // drift behind #141, #153 and #182.
     const createdAgent = await withTransaction(async (tx) => {
     const { rows } = await tx.query(
-      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, created_by)
+      `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit, soul_md, rules_md, model_policy_id, container_profile_id, created_by, created_by_name)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1),
-               $10, $11)
+               $10, $11, $12)
        RETURNING id, agent_id, name, description, status, tools_config,
                  cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by`,
+                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by, created_by_name`,
       [
         config.agent_id,
         config.name,
@@ -1053,6 +1057,7 @@ router.post('/import', requireRole('user'), async (req: Request, res: Response) 
         config.rules_md || '',
         profileId,
         user.sub,
+        user.name || user.preferred_username || null,
       ]
     );
 
@@ -3622,13 +3627,13 @@ router.post('/:id/clone', requireRole('user'), async (req: Request, res: Respons
     // Insert the cloned agent
     const { rows: cloneRows } = await pool.query(
       `INSERT INTO agents (agent_id, name, description, tools_config, cpus, mem_limit, pids_limit,
-                           soul_md, rules_md, model_policy_id, container_profile_id, created_by)
+                           soul_md, rules_md, model_policy_id, container_profile_id, created_by, created_by_name)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                COALESCE($10::uuid, (SELECT id FROM model_policies WHERE name = 'default' AND created_by IS NULL LIMIT 1)),
-               $11, $12)
+               $11, $12, $13)
        RETURNING id, agent_id, name, description, status, tools_config,
                  cpus, mem_limit, pids_limit, soul_md, rules_md, container_id,
-                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by`,
+                 model_policy_id, container_profile_id, error_message, created_at, updated_at, created_by, created_by_name`,
       [
         cloneSlug,
         cloneName,
@@ -3642,6 +3647,7 @@ router.post('/:id/clone', requireRole('user'), async (req: Request, res: Respons
         policyId,
         src.container_profile_id || null,
         user.sub,
+        user.name || user.preferred_username || null,
       ]
     );
     const cloned = cloneRows[0];

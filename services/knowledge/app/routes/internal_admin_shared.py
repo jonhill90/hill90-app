@@ -371,6 +371,11 @@ async def search_shared(
     owner: str | None = Query(None, description="Owner sub for visibility scoping"),
     requester_id: str = Query(..., description="Requester ID for audit"),
     requester_type: str = Query("user", description="Requester type: user or agent"),
+    requester_display_name: str | None = Query(
+        None,
+        description="app#499: the requester's own Keycloak name, forwarded by the "
+        "api from the CALLER's own token — never resolved for anyone else.",
+    ),
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
     _verify_service_token(request)
@@ -422,6 +427,7 @@ async def search_shared(
         chunk_ids=chunk_ids,
         duration_ms=duration_ms,
         collection_id=resolved_collection_id,
+        requester_display_name=requester_display_name,
     )
 
     return {

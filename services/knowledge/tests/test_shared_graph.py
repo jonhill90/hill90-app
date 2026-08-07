@@ -253,6 +253,95 @@ async def test_a_hub_requester_merges_three_collections_into_one_component():
     assert {"col-c1", "col-c2", "col-c3"} <= seen, "all three collections must be in one component"
 
 
+# ---------------------------------------------------------------------------
+# app#499 — "we don't want that strange guid to represent users... we want
+# the names." A `user` node's label was always the raw requester_id (the
+# fixture above still exercises that — `label: "u1"`, no display name in
+# the row). These pin the write-time-resolved name taking over instead,
+# without breaking that old, still-correct fallback.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_user_node_uses_the_resolved_display_name_when_the_row_has_one():
+    out = await shared_store.knowledge_graph(_pool(
+        sources=[{"id": "s1", "title": "A", "source_type": "web", "collection_id": "c1", "chunk_count": 1}],
+        retrieval_edges=[
+            {"requester_id": "kc-sub-abcdef123", "requester_type": "user", "source_id": "s1",
+             "chunk_hits": 4, "requester_display_name": "Dev Local"},
+        ],
+    ), limit=100)
+
+    user_nodes = [n for n in out["nodes"] if n["type"] == "user"]
+    assert user_nodes == [{
+        "id": "user-kc-sub-abcdef123", "type": "user", "label": "Dev Local",
+        "meta": {"retrieval_count": 4},
+    }]
+
+
+@pytest.mark.asyncio
+async def test_a_user_node_falls_back_to_the_raw_sub_when_no_row_ever_resolved_a_name():
+    # Pre-#499 behaviour, still correct for a row nothing could ever name —
+    # recorded before this column existed, or a token with neither claim.
+    out = await shared_store.knowledge_graph(_pool(
+        sources=[{"id": "s1", "title": "A", "source_type": "web", "collection_id": "c1", "chunk_count": 1}],
+        retrieval_edges=[
+            {"requester_id": "kc-sub-abcdef123", "requester_type": "user", "source_id": "s1",
+             "chunk_hits": 4, "requester_display_name": None},
+        ],
+    ), limit=100)
+
+    user_nodes = [n for n in out["nodes"] if n["type"] == "user"]
+    assert user_nodes[0]["label"] == "kc-sub-abcdef123"
+
+
+@pytest.mark.asyncio
+async def test_a_user_node_label_upgrades_from_the_fallback_once_a_named_row_is_seen():
+    # This page's rows are grouped per (requester, source) — an earlier row
+    # for the SAME requester (a different source) may have no name and set
+    # the fallback label first. A later row on the same page that DOES have
+    # one must upgrade the node in place, not leave it stuck on the sub.
+    out = await shared_store.knowledge_graph(_pool(
+        sources=[
+            {"id": "s1", "title": "A", "source_type": "web", "collection_id": "c1", "chunk_count": 1},
+            {"id": "s2", "title": "B", "source_type": "web", "collection_id": "c1", "chunk_count": 1},
+        ],
+        retrieval_edges=[
+            {"requester_id": "u1", "requester_type": "user", "source_id": "s1",
+             "chunk_hits": 1, "requester_display_name": None},
+            {"requester_id": "u1", "requester_type": "user", "source_id": "s2",
+             "chunk_hits": 1, "requester_display_name": "Now Named"},
+        ],
+    ), limit=100)
+
+    user_nodes = [n for n in out["nodes"] if n["type"] == "user"]
+    assert len(user_nodes) == 1
+    assert user_nodes[0]["label"] == "Now Named"
+    # And the retrieval_count still accumulated across both rows — the name
+    # upgrade must not have reset or replaced the node.
+    assert user_nodes[0]["meta"]["retrieval_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_an_agent_node_never_takes_a_display_name_even_if_the_row_somehow_carried_one():
+    # Defensive: requester_type='agent' rows never have a real name to give
+    # (agentbox has no Keycloak identity) and record_retrieval's own signature
+    # keeps agent callers from ever passing one — but if a row's
+    # requester_display_name were non-NULL regardless, an agent node must
+    # still render its agent_id slug, never that value. Agents were never
+    # the GUID problem #499 names; nothing about this fix should touch them.
+    out = await shared_store.knowledge_graph(_pool(
+        sources=[{"id": "s1", "title": "A", "source_type": "web", "collection_id": "c1", "chunk_count": 1}],
+        retrieval_edges=[
+            {"requester_id": "scout", "requester_type": "agent", "source_id": "s1",
+             "chunk_hits": 2, "requester_display_name": "Should Never Appear"},
+        ],
+    ), limit=100)
+
+    agent_nodes = [n for n in out["nodes"] if n["id"] == "agent-scout"]
+    assert agent_nodes[0]["label"] == "scout"
+
+
 @pytest.mark.asyncio
 async def test_a_retrieval_derived_agent_merges_with_its_knowledge_entries_node():
     # requester_type='agent' reuses the SAME id scheme knowledge_entries nodes

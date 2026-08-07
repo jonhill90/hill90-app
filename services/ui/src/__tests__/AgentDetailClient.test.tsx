@@ -1133,4 +1133,64 @@ describe('AgentDetailClient', () => {
       expect(screen.queryByTestId('agent-detail-error')).not.toBeInTheDocument()
     })
   })
+
+  // app#499: the same raw-GUID rendering fixed in the knowledge graph, in
+  // this table's own "Created ... by" line. Truncated sub for anyone else
+  // was the old, wrong behavior — a resolved created_by_name must now
+  // render in full.
+  describe('the "Created ... by" line (app#499)', () => {
+    it('shows the resolved creator name in full, not a truncated sub', async () => {
+      mockFetchDefaults({
+        ...MOCK_AGENT,
+        created_by: 'kc-sub-95f7362e-8918-485f-aba2-0e7684270003',
+        created_by_name: 'Dev Local',
+      } as any)
+
+      render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+      })
+      expect(screen.getByText(/Created .* by Dev Local/)).toBeInTheDocument()
+      expect(screen.queryByText(/kc-sub-9/)).not.toBeInTheDocument()
+    })
+
+    it('falls back to the truncated sub when no name could ever be resolved for this row', async () => {
+      mockFetchDefaults({
+        ...MOCK_AGENT,
+        created_by: 'kc-sub-95f7362e-8918-485f-aba2-0e7684270003',
+        created_by_name: null,
+      } as any)
+
+      render(<AgentDetailClient agentId="uuid-1" session={ADMIN_SESSION as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+      })
+      expect(screen.getByText(/Created .* by kc-sub-9…/)).toBeInTheDocument()
+    })
+
+    it("shows the viewer's OWN session name for their own agent, unaffected by created_by_name", async () => {
+      // The self-viewing branch (session.user.sub === agent.created_by) reads
+      // the VIEWER's own session name, not created_by_name off the agent
+      // row — that branch is unrelated to this fix and must stay so.
+      mockFetchDefaults({
+        ...MOCK_AGENT,
+        created_by: 'viewer-sub',
+        created_by_name: 'Should Not Appear',
+      } as any)
+      const sessionAsCreator = {
+        user: { name: 'Viewer', email: 'viewer@hill90.com', roles: ['admin'], sub: 'viewer-sub' },
+        expires: '2026-12-31',
+      }
+
+      render(<AgentDetailClient agentId="uuid-1" session={sessionAsCreator as any} />)
+
+      await waitFor(() => {
+        expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+      })
+      expect(screen.getByText(/Created .* by Viewer/)).toBeInTheDocument()
+      expect(screen.queryByText(/Should Not Appear/)).not.toBeInTheDocument()
+    })
+  })
 })
