@@ -453,9 +453,9 @@ async def entries_graph(
         else:
             dangling_edges += 1
 
-    for l in links:
-        source_id = str(l["source_id"])
-        target_id = str(l["target_id"]) if l["target_id"] is not None else None
+    for link in links:
+        source_id = str(link["source_id"])
+        target_id = str(link["target_id"]) if link["target_id"] is not None else None
         # Three ways this can fail to resolve, all counted as dangling rather
         # than silently dropped: the source entry didn't make this page, the
         # link's target_path doesn't match any active entry at all (a
