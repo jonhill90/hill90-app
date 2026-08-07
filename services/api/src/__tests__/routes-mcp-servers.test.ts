@@ -155,6 +155,23 @@ describe('MCP Servers routes', () => {
       expect(res.body.error).toContain('transport');
     });
 
+    // Review follow-up (app#449): '' used to be silently coerced to
+    // 'stdio' by `transport || 'stdio'`, since the pre-fix validator
+    // exempted every falsy value including ''. Now that '' is explicitly
+    // invalid input rather than "not provided", it must 400 here too —
+    // POST and PUT agreeing on the same contract is the whole point of
+    // sharing invalidTransportError between them.
+    it("app#449 (review follow-up): rejects transport: '' as invalid input rather than defaulting to stdio", async () => {
+      const res = await request(app)
+        .post('/mcp-servers')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: 'Test', transport: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('transport');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
     it('non-admin cannot create platform server', async () => {
       const res = await request(app)
         .post('/mcp-servers')
@@ -197,6 +214,95 @@ describe('MCP Servers routes', () => {
         .send({ name: 'Updated' });
 
       expect(res.status).toBe(404);
+    });
+
+    // app#449: POST validates transport against an enum; PUT wrote it
+    // straight into COALESCE with no check at all. A garbage transport
+    // could never be CREATED but could always be reached by editing an
+    // existing row — the create path's own guard meant nothing once a row
+    // existed.
+    it('rejects invalid transport, matching POST — and writes nothing', async () => {
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ transport: 'grpc' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('transport');
+      // THE ASSERTION THAT MATTERS: a 400 that still reaches the UPDATE
+      // query is the same defect wearing a different status code.
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    // Found in review of the fix above, not by a new sweep: an earlier
+    // version of invalidTransportError treated '' as falsy and exempted it
+    // from validation the same as undefined/null — but PUT's SQL is
+    // `transport = COALESCE($3, transport)`, and COALESCE only falls back
+    // to the existing value on SQL NULL. '' is not NULL, so `transport: ''`
+    // would have been WRITTEN, walking straight past the enum check this
+    // very PR added. POST's `transport || 'stdio'` masked the identical gap
+    // on create (it coerces '' to 'stdio' rather than writing it), which is
+    // exactly why this asymmetry survived a test-first change: nothing
+    // exercised '' specifically until now.
+    it("app#449 (review follow-up): rejects transport: '' as invalid input, not silently coalesced — and writes nothing", async () => {
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ transport: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('transport');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    it('accepts a valid transport change', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ ...MOCK_SERVER, transport: 'sse' }] });
+
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ transport: 'sse' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.transport).toBe('sse');
+    });
+
+    // app#599: POST requires name non-empty; PUT had no validator for it,
+    // and it's passed raw into COALESCE (no `|| null` conversion), so an
+    // explicit '' would have been WRITTEN — the exact input POST already
+    // refuses.
+    it("rejects name: '' — matching POST — and writes nothing", async () => {
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('name');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    // Cross-review of #594/#601 found these two PRs disagreeing on
+    // explicit JSON null: transport treated it as "not provided" (COALESCE
+    // keeps the column unchanged), name treated it as invalid provided
+    // input (400). Settled on #594's already-argued position — null and
+    // undefined both mean "not provided", matching COALESCE's own
+    // behavior for a bound SQL NULL — and this proves name now agrees.
+    it('accepts name: null as "not provided" (no-op), matching transport', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ ...MOCK_SERVER, description: 'Updated desc' }] });
+
+      const res = await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: null, description: 'Updated desc' });
+
+      expect(res.status).toBe(200);
+      // THE ASSERTION THAT MATTERS: null was bound as the actual query
+      // parameter for name, not silently substituted with anything else —
+      // COALESCE(NULL, name) is what makes this a genuine no-op at the SQL
+      // layer, not just an app-level skip.
+      const updateCall = mockQuery.mock.calls[0];
+      expect(updateCall[1][0]).toBeNull();
     });
   });
 
@@ -304,6 +410,30 @@ describe('MCP Servers routes', () => {
       // stored credential.
       const [, paramsNoConfig] = mockQuery.mock.calls[1];
       const encryptedParams = paramsNoConfig.filter((p: unknown) => p === null || Buffer.isBuffer(p));
+      expect(encryptedParams.filter((p: unknown) => Buffer.isBuffer(p))).toHaveLength(0);
+    });
+
+    // THE ASSERTION THAT MATTERS (#594 review, blocking): an explicit JSON
+    // `connection_config: null` used to pass the old `!== undefined` gate,
+    // encryptConfig(null) produced a real Buffer, and COALESCE saw a
+    // non-NULL value — silently overwriting whatever credential was
+    // already stored (a command's --token arg, an env block — the entire
+    // reason app#369 encrypts this column) with an encryption of `{}`.
+    // Same "not provided" contract this file already applies to name and
+    // transport, now proven for connection_config specifically rather than
+    // assumed from the pattern holding elsewhere.
+    it('PUT connection_config: null is treated as "not provided" — does NOT overwrite the stored credential', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [MOCK_SERVER] });
+
+      await request(app)
+        .put('/mcp-servers/mcp-1')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: 'Renamed only', connection_config: null });
+
+      const [, params] = mockQuery.mock.calls[0];
+      const encryptedParams = params.filter((p: unknown) => p === null || Buffer.isBuffer(p));
+      // If this regresses, the failure is a Buffer showing up here — the
+      // encryption of `{}` that would have overwritten the real ciphertext.
       expect(encryptedParams.filter((p: unknown) => Buffer.isBuffer(p))).toHaveLength(0);
     });
 

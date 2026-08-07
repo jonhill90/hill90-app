@@ -24,6 +24,31 @@ function addPlatformFlag(row: any): any {
   return { ...row, is_platform: row.created_by === null };
 }
 
+// app#451: POST's single-model connection check branches on whether the
+// model being written is a platform model (created_by IS NULL) or a user
+// model (created_by = caller's sub) — a platform model may only point at a
+// platform-owned connection, a user model only at the caller's own. PUT's
+// equivalent check always queried `created_by = caller's sub`, with no
+// platform branch at all, so an admin editing an EXISTING platform model's
+// connection_id could never satisfy it — a platform connection's
+// created_by is NULL, never equal to any caller's sub, admin included.
+// Fails closed (a legitimate edit incorrectly refused), never open: this
+// can only fail to match a row it should have matched, never match one it
+// shouldn't — the query is always scoped to `ownerSub`, which for a
+// non-admin is unconditionally their own. One shared check, used by both
+// routes, so create and update cannot describe two different ownership
+// rules for the identical field again.
+async function singleModelConnectionOwned(
+  pool: any, connectionId: string, ownerSub: string, isPlatformModel: boolean
+): Promise<boolean> {
+  const query = isPlatformModel
+    ? 'SELECT id FROM provider_connections WHERE id = $1 AND created_by IS NULL'
+    : 'SELECT id FROM provider_connections WHERE id = $1 AND created_by = $2';
+  const params = isPlatformModel ? [connectionId] : [connectionId, ownerSub];
+  const result = await pool.query(query, params);
+  return result.rows.length > 0;
+}
+
 interface RouteEntry {
   key: string;
   connection_id: string;
@@ -204,18 +229,7 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     // Verify connection ownership — platform models must use platform connections
-    let connQuery: string;
-    let connParams: any[];
-    if (createdBy === null) {
-      // Platform model: connection must also be platform-owned
-      connQuery = 'SELECT id FROM provider_connections WHERE id = $1 AND created_by IS NULL';
-      connParams = [connection_id];
-    } else {
-      connQuery = 'SELECT id FROM provider_connections WHERE id = $1 AND created_by = $2';
-      connParams = [connection_id, user.sub];
-    }
-    const conn = await pool.query(connQuery, connParams);
-    if (conn.rows.length === 0) {
+    if (!(await singleModelConnectionOwned(pool, connection_id, user.sub, createdBy === null))) {
       res.status(400).json({ error: 'Connection not found or not owned by you' });
       return;
     }
@@ -310,13 +324,14 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
   }
 
-  // If changing connection on a single model, verify ownership of new connection
+  // If changing connection on a single model, verify ownership of new
+  // connection — branching on whether THIS EXISTING row is a platform
+  // model (created_by IS NULL) exactly like POST does at create time.
+  // created_by cannot itself change via this route, so the existing row's
+  // value is the right and only source for that question here.
   if (connection_id !== undefined && newType === 'single') {
-    const conn = await pool.query(
-      'SELECT id FROM provider_connections WHERE id = $1 AND created_by = $2',
-      [connection_id, user.sub]
-    );
-    if (conn.rows.length === 0) {
+    const isPlatformModel = existing.rows[0].created_by === null;
+    if (!(await singleModelConnectionOwned(pool, connection_id, user.sub, isPlatformModel))) {
       res.status(400).json({ error: 'Connection not found or not owned by you' });
       return;
     }
