@@ -60,6 +60,35 @@ async def list_agents(request: Request) -> list[dict[str, Any]]:
     return [_serialize(dict(r)) for r in rows]
 
 
+@router.get("/entries/graph")
+async def entries_graph(
+    request: Request,
+    agent_ids: str | None = Query(
+        None,
+        description="app#501: comma-separated agent_ids to scope to. Omitted "
+        "means no filter — the api sends this only when its own scoping "
+        "resolved to 'sees everything' (admin), never as a default.",
+    ),
+    limit: int = Query(200, ge=1, le=1000, description="Max agents/entries per page"),
+) -> dict[str, Any]:
+    """Nodes/edges/totals for the private-memory graph (app#501).
+
+    This endpoint TRUSTS the agent_ids it is given, exactly as this file's
+    own module docstring already states policy for its siblings: "The
+    knowledge service trusts the API service to pass the correct agent_id
+    filters." The owner/authority decision — whose memories a given caller
+    may see — is made once, by the api's own getAllowedAgentIds, before this
+    is ever called.
+    """
+    _verify_service_token(request)
+    pool = request.app.state.pool
+
+    parsed_agent_ids = (
+        [a for a in agent_ids.split(",") if a] if agent_ids is not None else None
+    )
+    return await knowledge_store.entries_graph(pool, limit, agent_ids=parsed_agent_ids)
+
+
 @router.get("/entries")
 async def list_entries(
     request: Request,

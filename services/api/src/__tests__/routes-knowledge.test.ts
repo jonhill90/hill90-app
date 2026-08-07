@@ -23,11 +23,13 @@ const mockListAgents = jest.fn();
 const mockListEntries = jest.fn();
 const mockReadEntry = jest.fn();
 const mockSearchEntries = jest.fn();
+const mockGetEntriesGraph = jest.fn();
 jest.mock('../services/akm-proxy', () => ({
   listAgents: (...args: unknown[]) => mockListAgents(...args),
   listEntries: (...args: unknown[]) => mockListEntries(...args),
   readEntry: (...args: unknown[]) => mockReadEntry(...args),
   searchEntries: (...args: unknown[]) => mockSearchEntries(...args),
+  getEntriesGraph: (...args: unknown[]) => mockGetEntriesGraph(...args),
 }));
 
 const app = createApp({
@@ -430,5 +432,108 @@ describe('Knowledge proxy routes — search', () => {
       .get('/knowledge/search?q=test&agent_id=not-mine')
       .set('Authorization', `Bearer ${userToken}`);
     expect(res.status).toBe(403);
+  });
+});
+
+// app#501: the private-memory graph. AUTHORITY is the point of this suite —
+// "viewing your own agents' memories" (needs no new privilege, ships now)
+// vs. "an admin can view anyone's private memories" (a different, bigger
+// capability this PR deliberately does NOT build) is exactly what these
+// tests pin: an admin token reaches the no-filter path, a user token never
+// does, and a user who owns nothing gets an empty graph without ever
+// calling the knowledge service at all.
+describe('Knowledge proxy routes — private-memory graph (app#501)', () => {
+  beforeEach(() => {
+    mockQuery.mockReset();
+    mockGetEntriesGraph.mockReset();
+    process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+  });
+
+  afterEach(() => {
+    delete process.env.DATABASE_URL;
+  });
+
+  it('GET /knowledge/graph returns 401 without auth', async () => {
+    const res = await request(app).get('/knowledge/graph');
+    expect(res.status).toBe(401);
+  });
+
+  it('admin gets agent_ids=null (no filter) — the ADMIN capability, not the default', async () => {
+    mockGetEntriesGraph.mockResolvedValueOnce({
+      status: 200,
+      data: { nodes: [], edges: [], total: { agents: 0, entries: 0 }, shown: { agents: 0, entries: 0 }, dangling_edges: 0, truncated: false },
+    });
+
+    const res = await request(app)
+      .get('/knowledge/graph')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(mockGetEntriesGraph).toHaveBeenCalledWith(null, 500);
+  });
+
+  it('a non-admin user is ALWAYS scoped to their own agent_ids — never null, even with only one agent', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ agent_id: 'my-agent' }] });
+    mockGetEntriesGraph.mockResolvedValueOnce({
+      status: 200,
+      data: { nodes: [], edges: [], total: { agents: 1, entries: 0 }, shown: { agents: 1, entries: 0 }, dangling_edges: 0, truncated: false },
+    });
+
+    const res = await request(app)
+      .get('/knowledge/graph')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(mockGetEntriesGraph).toHaveBeenCalledWith(['my-agent'], 500);
+  });
+
+  it('a user who owns ZERO agents gets an empty graph WITHOUT calling the knowledge service — the empty-list-vs-null authorization boundary', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get('/knowledge/graph')
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      nodes: [], edges: [],
+      total: { agents: 0, entries: 0 }, shown: { agents: 0, entries: 0 },
+      dangling_edges: 0, truncated: false,
+    });
+    expect(mockGetEntriesGraph).not.toHaveBeenCalled();
+  });
+
+  it('forwards limit to the knowledge service', async () => {
+    mockGetEntriesGraph.mockResolvedValueOnce({
+      status: 200,
+      data: { nodes: [], edges: [], total: { agents: 0, entries: 0 }, shown: { agents: 0, entries: 0 }, dangling_edges: 0, truncated: false },
+    });
+
+    await request(app)
+      .get('/knowledge/graph?limit=50')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(mockGetEntriesGraph).toHaveBeenCalledWith(null, 50);
+  });
+
+  it('rejects an out-of-range limit rather than silently clamping it', async () => {
+    const res = await request(app)
+      .get('/knowledge/graph?limit=5000')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(400);
+    expect(mockGetEntriesGraph).not.toHaveBeenCalled();
+  });
+
+  it('returns 502 when the knowledge service is down', async () => {
+    mockGetEntriesGraph.mockResolvedValueOnce({
+      status: 502,
+      data: { error: 'Knowledge service unavailable' },
+    });
+
+    const res = await request(app)
+      .get('/knowledge/graph')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(502);
   });
 });

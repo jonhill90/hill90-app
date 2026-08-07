@@ -2203,6 +2203,33 @@ paths:
         "403":
           description: Requires user role
 
+  /knowledge/graph:
+    get:
+      summary: Private-memory knowledge graph — nodes and edges for visualization (app#501)
+      description: >
+        The same visualisation as /shared-knowledge/graph, over each agent's own
+        non-shared memory (knowledge_entries) instead. Owner-scoped: a non-admin
+        caller sees only their own agents' memories, an admin sees all. `agent`
+        and `entry` nodes; `contains` edges are agent-owns-entry, `links` edges
+        are resolved [[wikilink]] cross-references between entries
+        (knowledge_links — unpopulated in this build, so this edge type
+        currently never appears in a real response).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          description: Max agents/entries per page
+      responses:
+        "200":
+          description: Graph data with agent and entry nodes
+        "401":
+          description: Not authenticated
+        "403":
+          description: Requires user role
+
   /knowledge/entries:
     get:
       summary: List knowledge entries

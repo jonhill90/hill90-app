@@ -34,7 +34,8 @@ from typing import Any
 
 import pytest
 
-from app.services import shared_store
+from app.services import knowledge_store, shared_store
+from app.services.knowledge_store import ENTRY_GRAPH_NODE_TYPES, EntryGraphNodeType
 from app.services.shared_store import GRAPH_NODE_TYPES, GraphNodeType
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -53,8 +54,18 @@ def test_the_manifest_exists_where_the_contract_says_it_does():
     )
 
 
-def test_declared_constant_agrees_with_the_manifest():
-    assert GRAPH_NODE_TYPES == _manifest_types()
+def test_declared_constants_together_agree_with_the_manifest():
+    """app#501: this used to assert GRAPH_NODE_TYPES == manifest -- true when
+    shared_store.py's knowledge_graph() was the manifest's only producer. A
+    second producer (knowledge_store.py's entries_graph(), the private-memory
+    graph) now shares the same renderer and the same manifest, so the
+    manifest is the UNION of what either can emit, never one producer's own
+    declared set alone. Each producer's OWN set is still checked as a strict
+    subset below (test_declared_constant_has_no_duplicate_or_stray_members
+    and its entries_graph twin) -- neither producer is allowed to claim a
+    type the other owns exclusively, only the union has to equal the whole.
+    """
+    assert (GRAPH_NODE_TYPES | ENTRY_GRAPH_NODE_TYPES) == _manifest_types()
 
 
 def test_declared_constant_has_no_duplicate_or_stray_members():
@@ -144,3 +155,53 @@ def test_CONTROL_a_type_outside_the_declared_set_would_fail_the_subset_assertion
     regressed_emitted_types = GRAPH_NODE_TYPES | {"phantom"}
     with pytest.raises(AssertionError):
         assert regressed_emitted_types <= GRAPH_NODE_TYPES
+
+
+# ---------------------------------------------------------------------------
+# app#501: the SECOND producer's own half of this contract. knowledge_store.py
+# uses pool.fetch/pool.fetchrow DIRECTLY (this file's own established
+# convention — see list_entries/search_entries above it), not pool.acquire()
+# the way shared_store.py does, so this needs its own stub rather than
+# reusing _Pool/_Conn above, which only implements .acquire().
+# ---------------------------------------------------------------------------
+
+
+class _DirectPool:
+    def __init__(self, answers: list[list[dict[str, Any]]], totals: dict[str, Any]):
+        self._answers = list(answers)
+        self._totals = totals
+
+    async def fetch(self, sql: str, *a: Any) -> list[dict[str, Any]]:
+        return self._answers.pop(0)
+
+    async def fetchrow(self, sql: str, *a: Any) -> dict[str, Any]:
+        return self._totals
+
+
+def test_entry_graph_declared_constant_has_no_duplicate_or_stray_members():
+    declared = {EntryGraphNodeType.AGENT, EntryGraphNodeType.ENTRY}
+    assert declared == ENTRY_GRAPH_NODE_TYPES
+
+
+@pytest.mark.asyncio
+async def test_every_type_entries_graph_can_actually_emit_is_in_its_declared_constant():
+    # agents query, entries query, links query (empty — knowledge_links has
+    # no writer, see entries_graph's own docstring), then fetchrow totals.
+    pool = _DirectPool(
+        answers=[
+            [{"agent_id": "scout", "entry_count": 1, "last_updated": None}],
+            [{"id": "e1", "agent_id": "scout", "path": "notes/x.md", "title": "X",
+              "entry_type": "note", "tags": [], "status": "active",
+              "created_at": None, "updated_at": None}],
+            [],
+        ],
+        totals={"agents_with_entries": 1, "entries": 1},
+    )
+    out = await knowledge_store.entries_graph(pool, limit=100)
+
+    emitted_types = {n["type"] for n in out["nodes"]}
+    assert emitted_types == ENTRY_GRAPH_NODE_TYPES, (
+        "every declared type should be exercised by this fixture, and nothing "
+        "the function emits should fall outside the declared set"
+    )
+    assert emitted_types <= ENTRY_GRAPH_NODE_TYPES  # the assertion that actually matters, stated on its own
