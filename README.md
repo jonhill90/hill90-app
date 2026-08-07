@@ -36,6 +36,15 @@ chat.
 | [`services/cli`](services/cli) | — | Terminal client. No deploy wiring |
 | [`services/discord-bot`](services/discord-bot) | — | Multi-channel chat bridge. No deploy wiring |
 
+Product and spec, describing what is built and used today rather than what is
+intended — every claim dated and cited to a test, a commit, or a live check:
+
+- [docs/product/PRD.md](docs/product/PRD.md) — what this app is, who uses it,
+  what is proven versus aspirational
+- [docs/product/SPEC.md](docs/product/SPEC.md) — service boundaries, the
+  contracts proven between them, and known drift between documents in this
+  repository (including this file's own dated sections below)
+
 Architecture, in the depth it was actually written:
 
 - [docs/architecture/agent-harness.md](docs/architecture/agent-harness.md) — the

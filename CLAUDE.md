@@ -13,6 +13,13 @@ shared VPS, and locally against the same compose files.
 
 ## Where to look
 
+- [`docs/product/PRD.md`](docs/product/PRD.md) and
+  [`docs/product/SPEC.md`](docs/product/SPEC.md) (app#503) — what this app is, who
+  actually uses it, and what is proven versus aspirational, every claim dated and
+  cited to a test, a commit, or a live check rather than asserted. Read SPEC.md §4
+  before trusting any dated claim elsewhere in this repo, including in this file —
+  it names a live contradiction between this file and README.md that neither
+  document currently resolves.
 - [`README.md`](README.md) — what it is, how to run it locally, and the
   **dated** production status table. That table is the single home for facts
   with a shelf life; this file deliberately does not repeat them.
