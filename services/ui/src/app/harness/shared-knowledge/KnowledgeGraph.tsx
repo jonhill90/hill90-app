@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSession } from 'next-auth/react'
 import { GitBranch } from 'lucide-react'
 import {
@@ -145,6 +145,11 @@ export const TYPE_COLORS: Record<string, string> = {
   // since a user node is structurally the thing holding disconnected
   // collections together, not a peer of source/agent.
   user: '#c026d3',
+  // app#501: the private-memory graph's second node type (agent is shared
+  // with — and coloured identically to — the shared graph's own 'agent',
+  // deliberately: it is the same kind of thing, an agent identity, in both
+  // graphs). Teal reads as its own family, distinct from source's blue.
+  entry: '#14b8a6',
 }
 export const TYPE_BASE_RADIUS: Record<string, number> = {
   collection: 16,
@@ -153,6 +158,9 @@ export const TYPE_BASE_RADIUS: Record<string, number> = {
   // Bigger than a source at rest — retrieval_count (see radiusOf) does the
   // rest of the hub-prominence work per-node, on top of this floor.
   user: 12,
+  // Same rest size as `source` — an entry is a leaf node in this graph the
+  // same way a source is a leaf in the shared one.
+  entry: 7,
 }
 // Types are producer-defined and this file cannot know about the next one
 // in advance (that is the whole lesson of this file's own history — #354,
@@ -190,7 +198,7 @@ export function baseRadiusForType(type: string): number {
 // Preferred legend order for the types this component was actually
 // designed around; anything else present in the data is appended after,
 // alphabetically, rather than being silently omitted.
-const KNOWN_TYPE_ORDER = ['collection', 'source', 'agent', 'user']
+const KNOWN_TYPE_ORDER = ['collection', 'source', 'agent', 'user', 'entry']
 export function legendTypes(nodes: GraphNode[]): string[] {
   const present = new Set(nodes.map(n => n.type))
   const known = KNOWN_TYPE_ORDER.filter(t => present.has(t))
@@ -241,10 +249,46 @@ interface GraphData {
   truncated?: boolean
 }
 
+// app#501: the corpus-summary header line and the truncation notice below it
+// are the one piece of this file that is genuinely domain-specific text
+// ("N collections · M sources · K agents" only means something for the
+// SHARED graph) — everything else (physics, drawing, click/drag, legend,
+// node styling) is generic over whatever nodes/edges/total/shown a caller's
+// endpoint returns. Rather than fork the component for a second header
+// string, the header is a render prop with the shared graph's own existing
+// text as the default, so this file's behaviour for shared-knowledge
+// callers is byte-for-byte unchanged with no prop supplied at all.
+export interface CorpusSummary {
+  counts: ReactNode
+  /** null when the graph is not truncated, or `shown`/`total` are absent. */
+  truncationNotice: ReactNode | null
+}
+function defaultCorpusSummary(data: GraphData): CorpusSummary {
+  const counts = corpusCounts(data)
+  return {
+    counts: (
+      <>{counts.collections ?? 0} collections · {counts.sources ?? 0} sources · {counts.agents_with_knowledge ?? 0} agents</>
+    ),
+    truncationNotice: (data.truncated && data.shown) ? (
+      <>
+        graph shows {data.shown.collections} of {counts.collections} collections
+        {' '}and {data.shown.sources} of {counts.sources} sources
+      </>
+    ) : null,
+  }
+}
+
 interface KnowledgeGraphProps {
   // Optional: KnowledgeGraph works standalone (e.g. under test) with clicks
   // simply doing nothing if this isn't supplied.
   onNavigate?: (target: GraphNavigationTarget) => void
+  // app#501: which graph to draw. Defaults to the shared-knowledge graph
+  // this file has always pointed at — a caller wanting a different corpus
+  // (the private-memory graph, app#501) passes its own endpoint plus a
+  // matching renderCorpusSummary; the canvas/physics/interaction code below
+  // neither knows nor cares which one it's drawing.
+  endpoint?: string
+  renderCorpusSummary?: (data: GraphData) => CorpusSummary
 }
 
 // A click must be distinguishable from the drag this canvas already
@@ -271,7 +315,11 @@ export function isClickNotDrag(dxPx: number, dyPx: number, elapsedMs: number): b
     && elapsedMs <= CLICK_MAX_DURATION_MS
 }
 
-export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {}) {
+export default function KnowledgeGraph({
+  onNavigate,
+  endpoint = '/api/shared-knowledge/graph',
+  renderCorpusSummary = defaultCorpusSummary,
+}: KnowledgeGraphProps = {}) {
   const [data, setData] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(true)
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
@@ -290,11 +338,11 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
   useEffect(() => { onNavigateRef.current = onNavigate }, [onNavigate])
 
   useEffect(() => {
-    fetch('/api/shared-knowledge/graph')
+    fetch(endpoint)
       .then(r => r.ok ? r.json() : null)
       .then(d => { setData(d); setLoading(false) })
       .catch(() => setLoading(false))
-  }, [])
+  }, [endpoint])
 
   useEffect(() => {
     if (!data || !canvasRef.current) return
@@ -816,7 +864,7 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
   if (loading) return <div className="flex justify-center py-12"><div className="h-6 w-6 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" /></div>
   if (!data) return <p className="text-mountain-500 text-center py-8">Failed to load graph</p>
 
-  const counts = corpusCounts(data)
+  const summary = renderCorpusSummary(data)
 
   // app#383: the user-node panel. Derived entirely from `data`, already in
   // memory — no new fetch. Nothing existing shows "what did this requester
@@ -841,15 +889,14 @@ export default function KnowledgeGraph({ onNavigate }: KnowledgeGraphProps = {})
         <div className="flex items-center gap-2">
           <GitBranch className="w-4 h-4 text-mountain-400" />
           <span className="text-sm text-mountain-300" data-testid="graph-counts">
-            {counts.collections ?? 0} collections · {counts.sources ?? 0} sources · {counts.agents_with_knowledge ?? 0} agents
+            {summary.counts}
           </span>
-          {data.truncated && data.shown && (
+          {summary.truncationNotice && (
             <span
               className="text-xs text-amber-400/90 border border-amber-700/50 bg-amber-900/20 rounded px-1.5 py-0.5"
               data-testid="graph-truncated-notice"
             >
-              graph shows {data.shown.collections} of {counts.collections} collections
-              {' '}and {data.shown.sources} of {counts.sources} sources
+              {summary.truncationNotice}
             </span>
           )}
         </div>

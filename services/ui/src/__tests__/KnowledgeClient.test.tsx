@@ -7,6 +7,15 @@ import '@testing-library/jest-dom/vitest'
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
 
+// app#501: the Graph tab mounts KnowledgeGraph.tsx, which reads the session
+// (to resolve a `user` node's own sub to "You" — irrelevant here, this
+// graph has no `user` nodes at all, but the hook is called unconditionally)
+// and throws without a SessionProvider unless mocked. Same fixed value
+// KnowledgeGraphContract.test.tsx already uses for the same reason.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({ data: { user: { sub: 'no-such-sub-matches-a-fixture' } }, status: 'authenticated' }),
+}))
+
 import KnowledgeClient from '@/app/harness/knowledge/KnowledgeClient'
 
 const MOCK_AGENTS = [
@@ -69,6 +78,16 @@ const MOCK_SEARCH_RESULTS = {
   score_type: 'ts_rank',
 }
 
+// app#501: a well-formed empty envelope, not `{}` — KnowledgeGraph.tsx does
+// `data.nodes.map(...)` unconditionally once `data` is non-null, so an
+// unmatched-URL fallback of `{}` would throw the moment any test actually
+// opens the Graph tab. Overridable per-test via a second mockFetch call.
+const MOCK_EMPTY_MEMORY_GRAPH = {
+  nodes: [], edges: [],
+  total: { agents: 0, entries: 0 }, shown: { agents: 0, entries: 0 },
+  dangling_edges: 0, truncated: false,
+}
+
 function mockFetchDefaults() {
   mockFetch.mockImplementation((url: string) => {
     if (url === '/api/knowledge/agents') {
@@ -85,6 +104,9 @@ function mockFetchDefaults() {
     }
     if (typeof url === 'string' && url.startsWith('/api/knowledge/search')) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_SEARCH_RESULTS) })
+    }
+    if (url === '/api/knowledge/graph') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_EMPTY_MEMORY_GRAPH) })
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
   })
@@ -288,5 +310,120 @@ describe('KnowledgeClient', () => {
     })
     expect(screen.getByText('Could not load entries — try refreshing the page')).toBeInTheDocument()
     expect(screen.queryByText('No entries found')).not.toBeInTheDocument()
+  })
+})
+
+// app#501: "I want a knowledge graph for the memories for the agent. The
+// non-shared ones, but I can view." Reuses KnowledgeGraph.tsx wholesale —
+// these tests are about THIS harness wiring it to /api/knowledge/graph with
+// its own corpus-summary text, not re-proving the renderer itself (that's
+// KnowledgeGraphContract.test.tsx's job).
+describe('KnowledgeClient — private-memory graph tab (app#501)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockFetchDefaults()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('defaults to the Browse tab — the agent list is visible with no click', async () => {
+    render(<KnowledgeClient />)
+    await waitFor(() => {
+      expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    })
+  })
+
+  it('switching to the Graph tab fetches /api/knowledge/graph and mounts the canvas', async () => {
+    render(<KnowledgeClient />)
+    await waitFor(() => {
+      expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Graph'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('knowledge-graph-canvas')).toBeInTheDocument()
+    })
+    expect(mockFetch).toHaveBeenCalledWith('/api/knowledge/graph')
+  })
+
+  it('the private-memory graph header says "agents"/"entries", never "collections"/"sources" — the shared graph\'s own words, wrong for this corpus', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/knowledge/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_KNOWLEDGE_AGENTS) })
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      if (url === '/api/knowledge/graph') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            nodes: [], edges: [],
+            total: { agents: 3, entries: 12 }, shown: { agents: 3, entries: 12 },
+            dangling_edges: 0, truncated: false,
+          }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<KnowledgeClient />)
+    await waitFor(() => {
+      expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Graph'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-counts')).toBeInTheDocument()
+    })
+    const counts = screen.getByTestId('graph-counts')
+    expect(counts).toHaveTextContent('3 agents')
+    expect(counts).toHaveTextContent('12 entries')
+    expect(counts).not.toHaveTextContent('collections')
+    expect(counts).not.toHaveTextContent('sources')
+  })
+
+  it('the truncation notice, when present, also uses "agents"/"entries"', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/knowledge/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_KNOWLEDGE_AGENTS) })
+      if (url === '/api/agents') return Promise.resolve({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      if (url === '/api/knowledge/graph') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            nodes: [], edges: [],
+            total: { agents: 5, entries: 50 }, shown: { agents: 2, entries: 20 },
+            dangling_edges: 0, truncated: true,
+          }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+
+    render(<KnowledgeClient />)
+    await waitFor(() => {
+      expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Graph'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('graph-truncated-notice')).toBeInTheDocument()
+    })
+    const notice = screen.getByTestId('graph-truncated-notice')
+    expect(notice).toHaveTextContent('2 of 5 agents')
+    expect(notice).toHaveTextContent('20 of 50 entries')
+  })
+
+  it('switching back to Browse after Graph still shows the agent list, not a blank page', async () => {
+    render(<KnowledgeClient />)
+    await waitFor(() => {
+      expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Graph'))
+    await waitFor(() => {
+      expect(screen.getByTestId('knowledge-graph-canvas')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Browse'))
+    expect(screen.getByText('ResearchBot')).toBeInTheDocument()
+    expect(screen.queryByTestId('knowledge-graph-canvas')).not.toBeInTheDocument()
   })
 })

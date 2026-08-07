@@ -3,6 +3,31 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { fetchKnowledgePage, describePage } from '@/utils/knowledge-page'
 import { RefreshCw } from 'lucide-react'
+import KnowledgeGraph from '@/app/harness/shared-knowledge/KnowledgeGraph'
+
+// app#501: "I want a knowledge graph for the memories for the agent. The
+// non-shared ones, but I can view." Reuses KnowledgeGraph.tsx wholesale
+// (physics, drawing, legend, click/drag, node-type styling) against a
+// different endpoint — /api/knowledge/graph, owner-scoped the same way
+// every other route in this harness already is (GET /api/knowledge/agents,
+// /entries, /search). The only thing that genuinely differs between this
+// graph and the shared one is what the header line even calls the corpus
+// ("agents"/"entries", not "collections"/"sources"/"agents"), which is why
+// KnowledgeGraph.tsx's header text is a render prop rather than this file
+// forking the component to get different words.
+function renderMemoryCorpusSummary(data: {
+  total?: Record<string, number>
+  shown?: Record<string, number>
+  truncated?: boolean
+}) {
+  const total = data.total ?? {}
+  return {
+    counts: <>{total.agents ?? 0} agents · {total.entries ?? 0} entries</>,
+    truncationNotice: (data.truncated && data.shown) ? (
+      <>graph shows {data.shown.agents} of {total.agents} agents and {data.shown.entries} of {total.entries} entries</>
+    ) : null,
+  }
+}
 
 interface KnowledgeAgent {
   agent_id: string
@@ -75,7 +100,10 @@ function typeBadgeColor(type: string): string {
   }
 }
 
+type MainTab = 'browse' | 'graph'
+
 export default function KnowledgeClient() {
+  const [activeTab, setActiveTab] = useState<MainTab>('browse')
   const [knowledgeAgents, setKnowledgeAgents] = useState<KnowledgeAgent[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
   const [entries, setEntries] = useState<KnowledgeEntry[]>([])
@@ -250,6 +278,42 @@ export default function KnowledgeClient() {
         </p>
       </div>
 
+      {/* Tabs */}
+      <div className="flex gap-1 mb-6 border-b border-navy-700">
+        <button
+          onClick={() => setActiveTab('browse')}
+          className={`px-4 py-2 text-sm font-medium transition-colors cursor-pointer ${
+            activeTab === 'browse'
+              ? 'text-brand-400 border-b-2 border-brand-500'
+              : 'text-mountain-400 hover:text-white'
+          }`}
+        >
+          Browse
+        </button>
+        <button
+          onClick={() => setActiveTab('graph')}
+          className={`px-4 py-2 text-sm font-medium transition-colors cursor-pointer ${
+            activeTab === 'graph'
+              ? 'text-brand-400 border-b-2 border-brand-500'
+              : 'text-mountain-400 hover:text-white'
+          }`}
+        >
+          Graph
+        </button>
+      </div>
+
+      {/* app#501: the private-memory graph — each agent's own, non-shared
+          memory, owner-scoped the same way every other tab in this file
+          already is (GET /api/knowledge/graph). */}
+      {activeTab === 'graph' && (
+        <KnowledgeGraph
+          endpoint="/api/knowledge/graph"
+          renderCorpusSummary={renderMemoryCorpusSummary}
+        />
+      )}
+
+      {activeTab === 'browse' && (
+      <>
       {/* Search bar */}
       <div className="rounded-lg border border-navy-700 bg-navy-800 p-4 mb-6">
         <div className="flex items-center gap-3">
@@ -554,6 +618,8 @@ export default function KnowledgeClient() {
             )}
           </div>
         </div>
+      )}
+      </>
       )}
     </>
   )

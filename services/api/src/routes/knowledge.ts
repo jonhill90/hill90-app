@@ -14,7 +14,7 @@ import { requireRole } from '../middleware/role';
 import { scopeToOwner } from '../helpers/scope';
 import { getPool } from '../db/pool';
 import * as akmProxy from '../services/akm-proxy';
-import { parsePageParams } from '../helpers/page-params';
+import { parsePageParams, DEFAULT_PAGE } from '../helpers/page-params';
 
 const router = Router();
 
@@ -64,6 +64,57 @@ router.get('/agents', requireRole('user'), async (req: Request, res: Response) =
   } catch (err) {
     console.error('[knowledge] List agents error:', err);
     res.status(500).json({ error: 'Failed to list knowledge agents' });
+  }
+});
+
+// app#501: the private-memory graph — the same visualisation shared
+// knowledge already has (KnowledgeGraph.tsx), over each agent's own
+// non-shared memory (knowledge_entries) instead.
+//
+// AUTHORITY, decided rather than assumed (the issue's own explicit ask):
+// "non-shared, but I can view" is two different capabilities — viewing
+// YOUR OWN agents' memories needs no new privilege at all (getAllowedAgentIds
+// already gates every other route in this file the identical way); viewing
+// ANY OTHER user's private memories would be a genuinely new admin
+// capability, not a side effect of the admin role already existing on this
+// route. This ships owner-scoped: an admin sees every agent (scopeToOwner's
+// existing '1=1' bypass, the same one every other route here already gets
+// for free), a non-admin sees only their own — nobody gains new visibility
+// into someone else's data that they did not already have via every other
+// /knowledge/* route in this file.
+router.get('/graph', requireRole('user'), async (req: Request, res: Response) => {
+  try {
+    const page = parsePageParams(req);
+    if ('error' in page) {
+      res.status(400).json({ error: page.error });
+      return;
+    }
+
+    const allowed = await getAllowedAgentIds(req);
+    // A non-admin caller who owns zero agents must see an EMPTY graph, not
+    // every agent's memories — and `allowed` here is `[]`, not `null`, so
+    // this is not the admin path by accident. Short-circuited here rather
+    // than forwarded as `agent_ids=` to the knowledge service: proxyGet
+    // (akm-proxy.ts) strips empty-string param values before building the
+    // query string, which would silently turn an explicit "see nothing"
+    // into an unfiltered "see everything" the moment it crossed that
+    // boundary — a real authorization bug, not a cosmetic one. Answering
+    // directly here means that stripping behavior never gets a chance to
+    // matter.
+    if (allowed !== null && allowed.length === 0) {
+      res.json({
+        nodes: [], edges: [],
+        total: { agents: 0, entries: 0 }, shown: { agents: 0, entries: 0 },
+        dangling_edges: 0, truncated: false,
+      });
+      return;
+    }
+
+    const result = await akmProxy.getEntriesGraph(allowed, page.limit ?? DEFAULT_PAGE);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('[knowledge] Graph error:', err);
+    res.status(502).json({ error: 'Knowledge service unreachable' });
   }
 });
 

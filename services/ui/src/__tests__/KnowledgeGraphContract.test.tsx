@@ -301,3 +301,41 @@ describe('KnowledgeGraph — a producer-added node type (#380)', () => {
     expect(legendTypes([mysteryNode])).toContain('widget')
   })
 })
+
+// app#501: the private-memory graph's own node type — a SECOND producer
+// (knowledge_store.py's entries_graph()) into the same renderer this file
+// already proves agrees with docs/contracts/graph-node-types.json
+// (KnowledgeGraphNodeTypes.test.tsx). `entry` gets its own explicit colour
+// (not the hash fallback) the same way `user` did in #380 — the fallback is
+// the safety net for the type NOBODY registered yet, not the intended
+// treatment for one this PR knows about in advance.
+describe('KnowledgeGraph — the private-memory graph\'s own node type (app#501)', () => {
+  it('gives `entry` its own colour, distinct from every other known type', () => {
+    const color = colorForType('entry')
+    expect(color).not.toBe('#6b7280')
+    expect(color).not.toBe(colorForType('collection'))
+    expect(color).not.toBe(colorForType('source'))
+    expect(color).not.toBe(colorForType('agent'))
+    expect(color).not.toBe(colorForType('user'))
+  })
+
+  it('`agent` is the SAME id scheme and colour in both graphs — it is the same kind of thing, an agent identity, not two meanings sharing one type name', () => {
+    // This is the one type BOTH producers emit. Nothing about app#501
+    // should have touched its existing treatment.
+    expect(colorForType('agent')).toBe('#f59e0b')
+    expect(baseRadiusForType('agent')).toBe(11)
+  })
+
+  it('labelFor leaves an `entry` node\'s label untouched — no #499-style sub resolution applies here, it is just a title', () => {
+    const entryNode: GraphNode = { id: 'entry-e1', type: 'entry', label: 'Onboarding Plan' }
+    expect(labelFor(entryNode, 'anything')).toBe('Onboarding Plan')
+  })
+
+  it('includes `entry` in the legend once present, alongside `agent`', () => {
+    const nodes: GraphNode[] = [
+      { id: 'agent-scout', type: 'agent', label: 'scout' },
+      { id: 'entry-e1', type: 'entry', label: 'Onboarding Plan' },
+    ]
+    expect(legendTypes(nodes)).toEqual(expect.arrayContaining(['agent', 'entry']))
+  })
+})

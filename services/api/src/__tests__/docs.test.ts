@@ -179,6 +179,7 @@ const EXPECTED_PATHS = [
   '/container-profiles',
   '/container-profiles/{id}',
   '/knowledge/agents',
+  '/knowledge/graph',
   '/knowledge/entries',
   '/knowledge/entries/{agentId}/{path}',
   '/knowledge/search',
