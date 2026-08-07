@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { auditLog } from '../helpers/audit';
+import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
 
 const router = Router();
 
@@ -56,12 +57,14 @@ router.post('/', requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const { name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata } = req.body;
 
-    if (!name) {
-      res.status(400).json({ error: 'name is required' });
+    const nameError = requiredNonEmptyError(name, 'name');
+    if (nameError) {
+      res.status(400).json({ error: nameError });
       return;
     }
-    if (!docker_image) {
-      res.status(400).json({ error: 'docker_image is required' });
+    const dockerImageError = requiredNonEmptyError(docker_image, 'docker_image');
+    if (dockerImageError) {
+      res.status(400).json({ error: dockerImageError });
       return;
     }
 
@@ -101,6 +104,31 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
 
     const { name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata } = req.body;
 
+    // app#599: POST requires name/docker_image non-empty; PUT had no
+    // validator for either field, and both are passed raw into COALESCE
+    // below (no `|| null` conversion), so an explicit '' would have been
+    // WRITTEN. `docker_image` is the consequential one — an empty value on
+    // an existing profile breaks every future container start for every
+    // agent assigned to it, not merely a blank list entry. Only validated
+    // when actually provided — wasProvided(), not a bare `!== undefined`,
+    // so an explicit JSON `null` is treated the same as an omitted field
+    // (COALESCE's own behavior for a bound SQL NULL), matching #594's
+    // identical decision for transport. See helpers/required-field.ts.
+    if (wasProvided(name)) {
+      const nameError = requiredNonEmptyError(name, 'name');
+      if (nameError) {
+        res.status(400).json({ error: nameError });
+        return;
+      }
+    }
+    if (wasProvided(docker_image)) {
+      const dockerImageError = requiredNonEmptyError(docker_image, 'docker_image');
+      if (dockerImageError) {
+        res.status(400).json({ error: dockerImageError });
+        return;
+      }
+    }
+
     const { rows } = await getPool().query(
       `UPDATE container_profiles SET
          name = COALESCE($2, name),
@@ -113,7 +141,18 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
          updated_at = NOW()
        WHERE id = $1
        RETURNING *`,
-      [req.params.id, name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata !== undefined ? JSON.stringify(metadata) : null]
+      // metadata was `metadata !== undefined ? JSON.stringify(metadata) :
+      // null` — correct for an omitted field, but an explicit `metadata:
+      // null` also passes `!== undefined`, so JSON.stringify(null) bound
+      // the STRING "null" (not SQL NULL) into COALESCE($8, metadata),
+      // which then saw a non-NULL value and WROTE it — wiping the column
+      // instead of leaving it unchanged, the opposite of every other field
+      // in this same handler. Same idiom agents.ts's tools_config already
+      // uses for the identical shape: a truthy check, so null (like
+      // undefined, false, 0, '') falls through to SQL NULL and COALESCE's
+      // own "unchanged" behavior — matching the null-means-not-provided
+      // contract this file's name/docker_image fields now have too.
+      [req.params.id, name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata ? JSON.stringify(metadata) : null]
     );
 
     const profile = rows[0];

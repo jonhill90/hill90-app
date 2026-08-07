@@ -15,8 +15,39 @@ import { requireRole } from '../middleware/role';
 import { reportedStatus, isStatusVerified } from '../services/agent-status-verification';
 import { isAdmin } from '../helpers/elevated-scope';
 import { encryptProviderKey, decryptProviderKey, ProviderKeyDecryptionError } from '../services/provider-key-crypto';
+import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
 
 const router = Router();
+
+// app#449: POST validated this and PUT did not — a transport value that
+// could never be created could still be reached by editing an existing
+// row, silently corrupting a field this same file guards on create. One
+// shared check, used by both routes, so they cannot diverge again.
+//
+// UNDEFINED/NULL MEANS "NOT PROVIDED" — TRUE EMPTY STRING DOES NOT, and the
+// first version of this fix conflated the two. `PUT`'s SQL is
+// `transport = COALESCE($3, transport)`: COALESCE only falls back to the
+// existing value on SQL NULL, and '' is not NULL, so `transport: ''` would
+// have been WRITTEN — walking straight past the enum check below it, since
+// an earlier version of this function treated '' as falsy and exempted it
+// same as undefined/null. Confirmed directly rather than assumed:
+// `SELECT COALESCE('', 'stdio')` returns '', not 'stdio'. Same shape as
+// app#580's schedule_cron fix a few files over in this same sweep — an
+// explicitly-sent empty string is PROVIDED input, not an omission, and
+// since `transport` is a NOT NULL column there is no meaningful "clear the
+// field" operation for PUT to honour anyway. So: '' is INVALID input,
+// rejected by both routes, not "no change" — POST's own `transport ||
+// 'stdio'` default now only ever fires for a truly OMITTED transport
+// (undefined), since an explicit '' is caught here first, before that line
+// is ever reached.
+const VALID_TRANSPORTS = ['stdio', 'sse', 'http'];
+function invalidTransportError(transport: unknown): string | null {
+  if (!wasProvided(transport)) return null;
+  if (!VALID_TRANSPORTS.includes(transport as string)) {
+    return `transport must be one of: ${VALID_TRANSPORTS.join(', ')}`;
+  }
+  return null;
+}
 
 // app#369: connection_config can carry a credential — a command's --token
 // arg, an env block — and used to be stored as plain JSONB, returned
@@ -88,14 +119,15 @@ router.post('/', requireRole('user'), async (req: Request, res: Response) => {
     const user = (req as any).user;
     const { name, description, transport, connection_config, is_platform } = req.body;
 
-    if (!name) {
-      res.status(400).json({ error: 'name is required' });
+    const nameError = requiredNonEmptyError(name, 'name');
+    if (nameError) {
+      res.status(400).json({ error: nameError });
       return;
     }
 
-    const validTransports = ['stdio', 'sse', 'http'];
-    if (transport && !validTransports.includes(transport)) {
-      res.status(400).json({ error: `transport must be one of: ${validTransports.join(', ')}` });
+    const transportError = invalidTransportError(transport);
+    if (transportError) {
+      res.status(400).json({ error: transportError });
       return;
     }
 
@@ -192,14 +224,47 @@ router.put('/:id', requireRole('user'), async (req: Request, res: Response) => {
     const admin = isAdmin(req);
     const { name, description, transport, connection_config } = req.body;
 
+    // app#599: POST requires name non-empty; PUT had no validator for it,
+    // and it's passed raw into COALESCE below (no `|| null` conversion), so
+    // an explicit '' would have been WRITTEN — the exact input POST already
+    // refuses. Only validated when actually provided — wasProvided(), not
+    // a bare `!== undefined`, so an explicit JSON `null` is treated the
+    // same as an omitted field (COALESCE's own behavior for a bound SQL
+    // NULL), matching #594's identical decision for transport in this same
+    // file. See helpers/required-field.ts.
+    if (wasProvided(name)) {
+      const nameError = requiredNonEmptyError(name, 'name');
+      if (nameError) {
+        res.status(400).json({ error: nameError });
+        return;
+      }
+    }
+
+    const transportError = invalidTransportError(transport);
+    if (transportError) {
+      res.status(400).json({ error: transportError });
+      return;
+    }
+
     // Only re-encrypt when a new config was actually sent — COALESCE keeps
     // the existing ciphertext otherwise, the same "not provided means
     // unchanged" contract every other field here already has. There is no
     // decrypt-then-compare shortcut: the caller must send the whole config
     // to change any part of it, exactly like provider_connections' api_key.
+    //
+    // wasProvided(), not a bare `!== undefined` — this is the same bug the
+    // comment above already describes and the rest of this file already
+    // avoids (see `name`'s check a few lines up). An explicit
+    // `connection_config: null` used to pass the old `!== undefined` gate,
+    // encryptConfig(null) produced a real Buffer, and COALESCE saw a
+    // non-NULL value — so a client's own stored credential (a command's
+    // --token arg, an env block; the entire reason app#369 encrypted this
+    // column) was silently overwritten with an encryption of `{}`. Caught
+    // in review as the metadata bug's twin, on a credential field instead
+    // of a config option.
     let newEncrypted: Buffer | null = null;
     let newNonce: Buffer | null = null;
-    if (connection_config !== undefined) {
+    if (wasProvided(connection_config)) {
       const enc = encryptConfig(connection_config);
       newEncrypted = enc.encrypted;
       newNonce = enc.nonce;

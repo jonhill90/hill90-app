@@ -257,6 +257,88 @@ describe('Container Profiles routes', () => {
     expect(res.body.error).toMatch(/not found/i);
   });
 
+  // app#599: POST requires name/docker_image non-empty; PUT had no
+  // validator for either, and both are passed raw into COALESCE (no
+  // `|| null` conversion), so an explicit '' would have been WRITTEN —
+  // docker_image is the consequential one, since an empty value on an
+  // existing profile breaks every future container start for every agent
+  // assigned to it.
+  it("app#599: PUT rejects docker_image: '' — matching POST — and writes nothing", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [customProfile] }); // SELECT existing
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ docker_image: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('docker_image');
+    // THE ASSERTION THAT MATTERS: a 400 that still reaches the UPDATE is
+    // the same defect one query later — only the existence SELECT above
+    // should have run.
+    expect(mockQuery.mock.calls.length).toBe(1);
+  });
+
+  it("app#599: PUT rejects name: '' — matching POST — and writes nothing beyond the existence check", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [customProfile] }); // SELECT existing
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('name');
+    expect(mockQuery.mock.calls.length).toBe(1);
+  });
+
+  // Cross-review of #594/#601: null and undefined both mean "not
+  // provided", matching #594's already-argued position for transport and
+  // COALESCE's own behavior for a bound SQL NULL.
+  it('accepts docker_image: null as "not provided" (no-op)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [customProfile] }) // SELECT existing
+      .mockResolvedValueOnce({ rows: [{ ...customProfile, description: 'Updated' }] }); // UPDATE RETURNING
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ docker_image: null, description: 'Updated' });
+
+    expect(res.status).toBe(200);
+    const updateCall = mockQuery.mock.calls[1];
+    // docker_image is bound param index 3 (after req.params.id, name,
+    // description) in this route's UPDATE ... COALESCE($2, name),
+    // COALESCE($3, description), COALESCE($4, docker_image) ordering.
+    expect(updateCall[1][3]).toBeNull();
+  });
+
+  // Found in review: metadata's own PUT binding was `metadata !== undefined
+  // ? JSON.stringify(metadata) : null` — undefined correctly nulls, but an
+  // explicit `metadata: null` passes `!== undefined`, so
+  // JSON.stringify(null) produces the STRING "null" (confirmed directly:
+  // the bound param was the 4-character string "null", not SQL NULL).
+  // COALESCE($8, metadata) then sees a non-NULL value and WRITES it,
+  // wiping the column instead of leaving it unchanged — the opposite of
+  // every other field in this same request handler after the null-parity
+  // fix above. Real data loss on profiles like `browser`, whose metadata
+  // holds shm_size/extra_env that a Playwright container needs.
+  it('rejects the data-loss shape: metadata: null must be a no-op, not write JSON null', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [customProfile] }) // SELECT existing
+      .mockResolvedValueOnce({ rows: [{ ...customProfile, description: 'Updated' }] }); // UPDATE RETURNING
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ metadata: null, description: 'Updated' });
+
+    expect(res.status).toBe(200);
+    const updateCall = mockQuery.mock.calls[1];
+    // metadata is bound param index 7.
+    expect(updateCall[1][7]).toBeNull();
+  });
+
   // CP-16: PUT /container-profiles/:id non-admin returns 403
   it('PUT /container-profiles/:id non-admin returns 403', async () => {
     const res = await request(app)

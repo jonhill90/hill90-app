@@ -159,6 +159,46 @@ describe('Workflows routes', () => {
       expect(res.body.error).toContain('required');
     });
 
+    // app#599: name is required truthy — this is the case the combined
+    // "name, agent_id, schedule_cron, and prompt are required" fast-path
+    // above cannot reach, since name/agent_id/schedule_cron are all
+    // present here and only name itself is empty.
+    it("app#599: rejects name: '' — and writes nothing", async () => {
+      const res = await request(app)
+        .post('/workflows')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: '', agent_id: 'agent-uuid', schedule_cron: '0 9 * * *', prompt: 'test' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('name');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    it("app#599: rejects prompt: '' — and writes nothing", async () => {
+      const res = await request(app)
+        .post('/workflows')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: 'Test', agent_id: 'agent-uuid', schedule_cron: '0 9 * * *', prompt: '' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('prompt');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    it('app#599: rejects an unrecognized output_type — and writes nothing', async () => {
+      const res = await request(app)
+        .post('/workflows')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({
+          name: 'Test', agent_id: 'agent-uuid', schedule_cron: '0 9 * * *', prompt: 'test',
+          output_type: 'webhook_callback',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('output_type');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
     it('validates cron expression', async () => {
       const res = await request(app)
         .post('/workflows')
