@@ -43,6 +43,7 @@ function makeToken(sub: string, roles: string[]) {
 }
 
 const userToken = makeToken('regular-user', ['user']);
+const adminToken = makeToken('admin-user', ['admin', 'user']);
 
 function validRoutingConfig(overrides?: Partial<any>) {
   return {
@@ -169,6 +170,50 @@ describe('User Models Router CRUD', () => {
     expect(res.body.error).toContain('not owned by you');
   });
 
+  // app#595. validateRouteConnectionOwnership had no platform branch — every
+  // route's connection_id was checked against `created_by = ownerSub`
+  // unconditionally, so a platform router model's routes (created_by IS
+  // NULL, connections also created_by IS NULL) could never satisfy the
+  // check, admin included. Reproduction: an admin creating a genuine
+  // platform router model whose routes reference platform connections must
+  // succeed, not 400 with "not owned by you".
+  it('app#595: POST admin creates a platform router model whose routes reference platform connections', async () => {
+    // Route connection ownership check — must query created_by IS NULL, not
+    // created_by = admin's own sub.
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'conn-1' }, { id: 'conn-2' }] });
+    // Platform collision
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    // Insert
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'model-platform-router', name: 'Platform Router', connection_id: null,
+        litellm_model: null, description: '', is_active: true,
+        model_type: 'router', detected_type: null, capabilities: null,
+        routing_config: validRoutingConfig(), icon_emoji: null, icon_url: null,
+        created_by: null, created_at: '2026-01-01', updated_at: '2026-01-01',
+      }],
+    });
+
+    const res = await request(app)
+      .post('/user-models')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        name: 'Platform Router',
+        model_type: 'router',
+        platform: true,
+        routing_config: validRoutingConfig(),
+      });
+
+    expect(res.status).toBe(201);
+    // THE ASSERTION THAT MATTERS: the connection-ownership query took the
+    // platform branch (created_by IS NULL, no owner param) — not a query
+    // still scoped to the admin's own sub, which is exactly what made this
+    // 400 before the fix.
+    const connCall = mockQuery.mock.calls[0];
+    expect(connCall[0]).toContain('created_by IS NULL');
+    expect(connCall[1]).toEqual(['conn-1', 'conn-2']);
+  });
+
   // A5: POST router with connection_id/litellm_model set
   it('A5: POST router with connection_id/litellm_model set', async () => {
     const res = await request(app)
@@ -259,6 +304,37 @@ describe('User Models Router CRUD', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.model_type).toBe('single');
+  });
+
+  // app#595, the PUT twin of the POST reproduction above. isPlatformModel
+  // must come from the EXISTING row (created_by cannot change via this
+  // route) — an admin editing an existing platform router model's
+  // routing_config to reference platform connections must succeed.
+  it('app#595: PUT admin edits an existing platform router model to reference platform connections', async () => {
+    // Ownership check: admin, editing a PLATFORM router model (created_by IS NULL).
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'model-platform-router', model_type: 'router', created_by: null }] });
+    // Route connection ownership check — must take the platform branch.
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'conn-1' }, { id: 'conn-2' }] });
+    // Update
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'model-platform-router', name: 'Platform Router', connection_id: null,
+        litellm_model: null, description: '', is_active: true,
+        model_type: 'router', detected_type: null, capabilities: null,
+        routing_config: validRoutingConfig(), icon_emoji: null, icon_url: null,
+        created_by: null, created_at: '2026-01-01', updated_at: '2026-01-01',
+      }],
+    });
+
+    const res = await request(app)
+      .put('/user-models/model-platform-router')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ routing_config: validRoutingConfig() });
+
+    expect(res.status).toBe(200);
+    const connCall = mockQuery.mock.calls[1];
+    expect(connCall[0]).toContain('created_by IS NULL');
+    expect(connCall[1]).toEqual(['conn-1', 'conn-2']);
   });
 
   // A9: POST router invalid strategy
