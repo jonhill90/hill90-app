@@ -21,6 +21,24 @@ The product is source code and infrastructure in this one repository. There is n
 
 **Not a real user population today:** `hill90admin` and `testuser01` exist for testing distinct role behavior (admin-vs-user gating) and for automated/manual verification work respectively — not as evidence of adoption beyond the operator.
 
+## Visibility and ownership as implemented
+
+This is a **code-level current-state matrix**, not a product-policy proposal or a claim
+that every path has been exercised live. A human principal is the Keycloak `sub`; API
+roles come from the `hill90-ui` client, with `admin` implying `user`
+(`services/api/src/middleware/role.ts`).
+
+| Surface | Non-admin current access | Admin current access | Evidence / boundary |
+|---|---|---|---|
+| Shared-knowledge collections and their sources | A collection defaults to `private`; a caller can read its own collection or one marked `shared`. Create, update, and delete are owner-scoped. | The route's admin scope is unfiltered. | **Code:** `services/api/src/routes/shared-knowledge.ts` uses `created_by`, `visibility`, and `scopeToOwner`. List, graph, and stats calls pass the non-admin's `sub` upstream. This reports the API boundary; it does not claim a live data-store observation. |
+| Agent knowledge entries and graph | Limited to agents created by that human; a caller with no owned agents receives an empty graph. | Unfiltered across agents. | **Code:** `services/api/src/routes/knowledge.ts` derives allowed agent IDs with `scopeToOwner`; [agent-harness.md](../architecture/agent-harness.md#knowledge-scoping) records the matching agent-level boundary. |
+| Agent identity at the knowledge-service boundary | Not a human Keycloak identity: the API issues the agent's short-lived Ed25519 JWT and its `sub` identifies the agent. | The human API proxy, rather than an agent JWT, reaches the admin endpoints. | **Code + dated architecture record:** `services/api/src/workload-claims.ts`; [agent-harness.md](../architecture/agent-harness.md#knowledge-scoping). The present V1/V2 claim shape is separately qualified in SPEC §2. |
+| Retrieval requester identity, names, invitations, and chat history | **Not settled by this matrix.** | **Not settled by this matrix.** | It does not choose how a requester should be identified in shared results (the concern recorded in app#460), whether person-facing names replace subject identifiers (app#499), an invite/role-management policy (app#500), a future private-memory visibility rule (app#501), or chat visibility after a real conversation exists (app#502). Current route behavior above is not a substitute for any of those product decisions. |
+
+In particular, `private` here means the present API access check, not a promise that an
+administrator can never access the material; the current admin path is unfiltered. No
+claim is made about a separate, future privacy model beyond what those routes enforce.
+
 ## What is actually built and used (verified)
 
 Ordered from most to least exercised, each claim cited.
@@ -37,14 +55,14 @@ Ordered from most to least exercised, each claim cited.
 - **The full agent lifecycle beyond creation** — starting a container, dispatching real model inference through the router, an agent replying via the callback boundary above, in one unbroken chain, initiated by a real signed-in human through the UI — **has not been exercised end to end and is not claimed to be.** Each individual link has been proven separately (agent creation: above; the callback boundary: above; agentbox's own runtime behavior: above and in `services/agentbox`'s own test suite) but the full chain, human-initiated, has not.
 - **Invitations and role assignment from an admin UI** (app#500) is under active, incremental construction. As of this document, only a read-only user list exists (app#611, not yet merged) — no write path, no invitation flow. The design note on app#500 additionally found that the realm's SMTP configuration, a prerequisite for any invitation email, has a blank password field in the checked-in realm export; whether Keycloak can actually send mail today is an **open, unverified question**, not assumed to work.
 - **`services/cli` and `services/discord-bot`** exist in the repository with no deploy wiring (`README.md`, "What it is" table) — they are not part of the deployed product today, however complete their own code may be.
-- **Consolidation of the app's remaining infrastructure onto the platform** — the Keycloak-realm and Postgres halves are done (2026-07-31, per CLAUDE.md); MinIO consolidation is, per the same source, an **open, undecided question**, not a completed step. `README.md`'s own "Consolidation" section describing this as partly-pending is itself dated 2026-07-29 and predates both completions — read CLAUDE.md, not that section, for the current state. This is itself an example of the drift this document is trying not to repeat; see [SPEC.md §4](SPEC.md#4-known-documentation-drift).
+- **Consolidation of the app's infrastructure onto the platform** — the Keycloak-realm and Postgres halves are done, and production object-storage configuration is complete: API deployment configuration targets `minio` and receives `MINIO_TENANT_*` credentials, while `scripts/deploy.sh` refuses the retired `minio` stack. This proves configuration and the guard, not a new live storage check. The dated operational handoff records the exact production credential identity as `tenant-hill90-app`; see [SPEC.md §0](SPEC.md#0-ground-truth). Local development deliberately still runs `app-minio`; whether it should instead consume platform MinIO remains a narrowly scoped open question. `README.md`'s own "Consolidation" section describing this as partly-pending is itself dated 2026-07-29 and predates the production cutover — read the current deploy code and dated record, not that section, for the current state. This is itself an example of the drift this document is trying not to repeat; see [SPEC.md §4](SPEC.md#4-known-documentation-drift).
 
 ## Non-goals
 
 Stated because they have been asked and settled, not because they are self-evident:
 
 - **Not a multi-tenant SaaS product.** One operator, no external customer accounts, no billing surface.
-- **Not its own identity provider, database, or object store in production.** These are deliberately consumed from the Hill90 platform; standing up a competing instance of any of them is a regression, not a feature (see the retired `app-postgres`, `app-auth.hill90.com` Keycloak, and the open MinIO question in SPEC.md §0).
+- **Not its own identity provider, database, or object store in production.** These are deliberately consumed from the Hill90 platform; standing up a competing instance of any of them is a regression, not a feature (see the retired `app-postgres`, `app-auth.hill90.com` Keycloak, and `app-minio` production stack in SPEC.md §0).
 - **Not proven reliable at scale or under real conversational load.** With `chat_threads` at zero, there is no load to have survived, and no claim of reliability under load is made here.
 
 ## Success measure, stated honestly
