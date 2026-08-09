@@ -84,7 +84,12 @@ describe('the Next.js runtime guard in src/instrumentation.ts', () => {
     const r = run(`
       process.env.NEXT_RUNTIME = 'edge';
       import('./src/instrumentation').then(async (mod) => {
-        await mod.register();
+        // Node 20's tsx -e wraps this TypeScript module as CommonJS under
+        // default; newer Node versions also expose the named export. Exercise
+        // the actual register hook under either loader shape.
+        const register = mod.register ?? mod.default?.register;
+        if (typeof register !== 'function') throw new TypeError('instrumentation.register is not a function');
+        await register();
         // If register() had tried process.on() under 'edge' where it shouldn't
         // even be reached, that's still a real process.on call in Node here (this
         // harness has a real process object) — so the actual assertion is that
@@ -101,7 +106,9 @@ describe('the Next.js runtime guard in src/instrumentation.ts', () => {
     const r = run(`
       process.env.NEXT_RUNTIME = 'nodejs';
       import('./src/instrumentation').then(async (mod) => {
-        await mod.register();
+        const register = mod.register ?? mod.default?.register;
+        if (typeof register !== 'function') throw new TypeError('instrumentation.register is not a function');
+        await register();
         void (async () => { throw new Error('leaked under nodejs runtime') })();
       });
     `);
