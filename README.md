@@ -5,9 +5,9 @@ the [Hill90](https://github.com/jonhill90/Hill90) platform, consuming its
 identity, database and object storage. [hill90.com](https://hill90.com) serves the UI on a Let's Encrypt
 certificate. Production has **five deploy units** (`ui`, `api`, `ai`,
 `knowledge`, `mcp`); the tenant has seven running containers. **Verified
-2026-08-09 from the architecture live `docker ps` record:** 16 platform plus
-7 tenant containers were running, none was unhealthy, and every container with
-a health check reported healthy. This is a health measurement, not proof that
+2026-08-09 03:53:04 UTC by a read-only production `docker ps` census:** 16 platform
+plus 7 tenant containers were running, none was unhealthy, and every container
+with a health check reported healthy. This is a health measurement, not proof that
 production matches `main`: [deploy-drift issue
 #621](https://github.com/jonhill90/hill90-app/issues/621) remains open. See
 [Production](#production).
@@ -311,8 +311,8 @@ current platform baseline.
 **Deployed is not the same as current.** The historical note below described
 the 2026-07-29 state. The current deploy-drift alarm still reports running
 container revisions behind `main`; [issue #621](https://github.com/jonhill90/hill90-app/issues/621)
-is open, with its latest recorded alarm dated 2026-08-09. Do not infer that a
-merged change is deployed from its presence on `main`.
+is open, with its latest recorded alarm from [2026-08-09 02:27:42 UTC](https://github.com/jonhill90/hill90-app/actions/runs/31290366923).
+Do not infer that a merged change is deployed from its presence on `main`.
 
 Do not read the table as a roadmap. It is the state of the host at the timestamp
 above, and it goes stale — re-check before relying on it.
@@ -327,11 +327,13 @@ equivalent step in the deploy path. Once the volume held `public.pem` and
 
 ### Signing in — current state and historical diagnosis
 
-**Current state:** the UI signs in through Hill90's Keycloak at
-`auth.hill90.com`, realm `platform`, using the `hill90-ui` client. A real
-authorization-code sign-in completed on 2026-07-31, and Keycloak login events
-have been enabled since then. `app-auth.hill90.com` and the former `hill90`
-realm are retired in production.
+**Current configured path:** the UI signs in through Hill90's Keycloak at
+`auth.hill90.com`, realm `platform`, using the `hill90-ui` client. The production
+cutover record verifies a real authorization-code sign-in, platform event storage,
+and retirement of `app-auth.hill90.com` and the former `hill90` realm; see the dated
+[handoff evidence](docs/decisions/HANDOFF-2026-07-31.md#what-the-app-consumes-now).
+The platform record dates the completed sign-in to `2026-07-30 02:07 UTC` and the
+retired realm plus enabled event storage to `2026-07-31 06:21 UTC`.
 
 The following is the dated 2026-07-29/30 diagnosis, retained as historical
 evidence rather than a statement of current production behavior:
@@ -362,8 +364,11 @@ for why that is a known gap rather than an oversight.
 **The platform provides identity, data and storage; this app consumes them.**
 Every decision below follows from that.
 
-Production consumes Hill90's shared identity, data and object-storage
-services. It does not run an application Keycloak, Postgres, or MinIO service.
+The production compose and deploy configuration consumes Hill90's shared identity,
+data and object-storage services; it does not define an application Keycloak,
+Postgres, or MinIO deploy unit. The cutover was also proven through real traffic,
+not inferred from configuration: see the dated identity, database, and object-storage
+[handoff checks](docs/decisions/HANDOFF-2026-07-31.md#proven-by-traffic-not-by-configuration).
 
 - **Keycloak — DONE.** One Keycloak and the existing `platform` realm at
   `auth.hill90.com`; the former app Keycloak and `hill90` realm are retired.
