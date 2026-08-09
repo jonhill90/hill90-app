@@ -11,21 +11,36 @@ import express from 'express';
 import request from 'supertest';
 
 const artifacts = path.join(process.cwd(), 'test-artifacts');
+const ORDINARY_DISCOVERY_TIMEOUT_MS = 10_000;
 
 const enabled = process.env.PROBE_400 === '1' && process.env.PROBE_TIMEOUT === '1';
 const describeWhenEnabled = enabled ? describe : describe.skip;
 
+function listOrdinaryTests(spawn = spawnSync) {
+  const listed = spawn(
+    process.execPath,
+    [path.join(process.cwd(), 'node_modules/jest/bin/jest.js'), '--listTests'],
+    { cwd: process.cwd(), encoding: 'utf8', timeout: ORDINARY_DISCOVERY_TIMEOUT_MS },
+  );
+
+  if (listed.error) throw listed.error;
+  if (listed.status !== 0) throw new Error(`ordinary discovery exited ${listed.status}`);
+  return String(listed.stdout || '');
+}
+
 describeWhenEnabled('app#605 probe positive controls', () => {
   it('keeps the timeout fixture out of the ordinary Jest test list', () => {
     const fixture = path.join(process.cwd(), 'test-fixtures/app605-timeout.fixture.js');
-    const listed = spawnSync(
-      process.execPath,
-      [path.join(process.cwd(), 'node_modules/jest/bin/jest.js'), '--listTests'],
-      { cwd: process.cwd(), encoding: 'utf8' },
-    );
+    const timedOut = jest.fn((_command: string, _args: string[], _options: { timeout?: number }) => ({
+      status: 0,
+      stdout: '',
+      error: Object.assign(new Error('ordinary discovery timed out'), { code: 'ETIMEDOUT' }),
+    }));
 
-    expect(listed.status).toBe(0);
-    expect(listed.stdout).not.toContain(fixture);
+    expect(() => listOrdinaryTests(timedOut as unknown as typeof spawnSync)).toThrow('ordinary discovery timed out');
+    expect(timedOut.mock.calls[0][2]).toEqual(expect.objectContaining({ timeout: 10_000 }));
+
+    expect(listOrdinaryTests()).not.toContain(fixture);
   });
 
   it('captures a genuine Express 400 response', async () => {
