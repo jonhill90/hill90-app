@@ -3,6 +3,7 @@ import { getPool } from '../db/pool';
 import { requireRole } from '../middleware/role';
 import { auditLog } from '../helpers/audit';
 import { requiredNonEmptyError, wasProvided } from '../helpers/required-field';
+import { cpusValidationError, memLimitValidationError, pidsLimitValidationError } from '../helpers/agent-resource-limits';
 
 const router = Router();
 
@@ -15,6 +16,18 @@ function dbHealthCheck(_req: Request, res: Response, next: () => void) {
 }
 
 router.use(dbHealthCheck);
+
+function profileResourceDefaultsError(
+  defaultCpus: unknown,
+  defaultMemLimit: unknown,
+  defaultPidsLimit: unknown
+): string | null {
+  return (
+    cpusValidationError(defaultCpus, 'default_cpus') ||
+    memLimitValidationError(defaultMemLimit, 'default_mem_limit') ||
+    pidsLimitValidationError(defaultPidsLimit, 'default_pids_limit')
+  );
+}
 
 // List container profiles (read-only, user role)
 router.get('/', requireRole('user'), async (_req: Request, res: Response) => {
@@ -67,12 +80,21 @@ router.post('/', requireRole('admin'), async (req: Request, res: Response) => {
       res.status(400).json({ error: dockerImageError });
       return;
     }
+    const resourceDefaultsError = profileResourceDefaultsError(
+      default_cpus ?? '1.0',
+      default_mem_limit ?? '1g',
+      default_pids_limit ?? 200
+    );
+    if (resourceDefaultsError) {
+      res.status(400).json({ error: resourceDefaultsError });
+      return;
+    }
 
     const { rows } = await getPool().query(
       `INSERT INTO container_profiles (name, description, docker_image, default_cpus, default_mem_limit, default_pids_limit, metadata, is_platform)
        VALUES ($1, $2, $3, $4, $5, $6, $7, false)
        RETURNING *`,
-      [name, description || '', docker_image, default_cpus || '1.0', default_mem_limit || '1g', default_pids_limit || 200, JSON.stringify(metadata || {})]
+      [name, description || '', docker_image, default_cpus ?? '1.0', default_mem_limit ?? '1g', default_pids_limit ?? 200, JSON.stringify(metadata || {})]
     );
 
     const profile = rows[0];
@@ -125,6 +147,27 @@ router.put('/:id', requireRole('admin'), async (req: Request, res: Response) => 
       const dockerImageError = requiredNonEmptyError(docker_image, 'docker_image');
       if (dockerImageError) {
         res.status(400).json({ error: dockerImageError });
+        return;
+      }
+    }
+    if (wasProvided(default_cpus)) {
+      const defaultCpusError = cpusValidationError(default_cpus, 'default_cpus');
+      if (defaultCpusError) {
+        res.status(400).json({ error: defaultCpusError });
+        return;
+      }
+    }
+    if (wasProvided(default_mem_limit)) {
+      const defaultMemLimitError = memLimitValidationError(default_mem_limit, 'default_mem_limit');
+      if (defaultMemLimitError) {
+        res.status(400).json({ error: defaultMemLimitError });
+        return;
+      }
+    }
+    if (wasProvided(default_pids_limit)) {
+      const defaultPidsLimitError = pidsLimitValidationError(default_pids_limit, 'default_pids_limit');
+      if (defaultPidsLimitError) {
+        res.status(400).json({ error: defaultPidsLimitError });
         return;
       }
     }

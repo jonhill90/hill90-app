@@ -120,13 +120,10 @@ async function start() {
 
   // app#593: MAX_AGENT_CPUS/MAX_AGENT_MEM_BYTES/MAX_AGENT_PIDS_LIMIT
   // (routes/agents.ts) must stay >= every container_profiles row's own
-  // default_cpus/default_mem_limit/default_pids_limit. POST
-  // /container-profiles (admin-only) validates none of those three columns
-  // today, so an admin CAN create a profile that already violates this —
-  // safe-fail, same severity as the avatar-bucket check above, because a
-  // violation here means one specific profile is unusable once its
-  // defaults are wired into agent creation, not that this whole service is
-  // unverified the way a failed migration or a bad encryption key would be.
+  // default_cpus/default_mem_limit/default_pids_limit. Profile routes reject
+  // new invalid values; this safe-fail check still detects legacy or
+  // out-of-band rows. Selected defaults are independently rejected before
+  // an agent INSERT, so this is diagnostic rather than the only guard.
   try {
     const { rows: profiles } = await getPool().query(
       'SELECT name, default_cpus, default_mem_limit, default_pids_limit FROM container_profiles'
@@ -210,6 +207,4 @@ async function start() {
 installUnhandledRejectionBackstop();
 
 dieOnStartupFailure(start());
-
-
 

@@ -47,3 +47,46 @@
 export const MAX_AGENT_CPUS = 4;
 export const MAX_AGENT_MEM_BYTES = 16761118720;
 export const MAX_AGENT_PIDS_LIMIT = 300;
+
+export function cpusValidationError(cpus: unknown, label = 'cpus'): string | null {
+  if (typeof cpus !== 'string') return `${label} must be a string`;
+  const match = cpus.match(/^(\d+(?:\.\d+)?)$/);
+  const value = match ? parseFloat(match[1]) : NaN;
+  if (!Number.isFinite(value) || value <= 0) {
+    return `${label} must be a positive number (e.g. "1.0")`;
+  }
+  if (value > MAX_AGENT_CPUS) {
+    return `${label} must not exceed ${MAX_AGENT_CPUS} (the VPS has ${MAX_AGENT_CPUS} CPUs — Docker itself refuses more at container-start)`;
+  }
+  return null;
+}
+
+export function memLimitValidationError(memLimit: unknown, label = 'mem_limit'): string | null {
+  if (typeof memLimit !== 'string') return `${label} must be a string`;
+  const match = memLimit.match(/^(\d+(?:\.\d+)?)\s*([kmg]?)b?$/i);
+  if (!match) return `${label} must be a number with an optional k/m/g unit (e.g. "1g")`;
+  const value = parseFloat(match[1]);
+  const unit = (match[2] || '').toLowerCase();
+  const multiplier = unit === 'k' ? 1024 : unit === 'm' ? 1024 * 1024 : unit === 'g' ? 1024 * 1024 * 1024 : 1;
+  const bytes = value * multiplier;
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return `${label} must be a positive amount of memory`;
+  }
+  if (bytes > MAX_AGENT_MEM_BYTES) {
+    return `${label} must not exceed ${MAX_AGENT_MEM_BYTES} bytes (the VPS's total RAM — Docker accepts a larger value and enforces nothing)`;
+  }
+  return null;
+}
+
+export function pidsLimitValidationError(pidsLimit: unknown, label = 'pids_limit'): string | null {
+  if (typeof pidsLimit !== 'number' || !Number.isInteger(pidsLimit)) {
+    return `${label} must be an integer`;
+  }
+  if (pidsLimit <= 0) {
+    return `${label} must be a positive integer (negative values, including -1, mean "unlimited" to Docker)`;
+  }
+  if (pidsLimit > MAX_AGENT_PIDS_LIMIT) {
+    return `${label} must not exceed ${MAX_AGENT_PIDS_LIMIT} (the highest default_pids_limit among current container_profiles rows)`;
+  }
+  return null;
+}

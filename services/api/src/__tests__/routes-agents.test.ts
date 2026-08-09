@@ -296,12 +296,9 @@ describe('Agent CRUD routes', () => {
 
   // containerProfileCeilingViolations (app#593, follow-up): MAX_AGENT_* must
   // stay >= every container_profiles row's own default_cpus/
-  // default_mem_limit/default_pids_limit, always — POST /container-profiles
-  // (admin-only) validates none of those three columns, so an admin CAN
-  // create a profile that already violates the platform's own ceiling. Left
-  // unchecked, that surfaces later as "agent creation rejected" once a
-  // profile's defaults are wired into agent creation, with the real cause
-  // sitting in a container_profiles row two tables from the symptom.
+  // default_mem_limit/default_pids_limit, always. Profile routes reject new
+  // invalid values; this startup-oriented helper still diagnoses legacy or
+  // out-of-band rows, while selected-use validation rejects before INSERT.
   describe('containerProfileCeilingViolations', () => {
     // The real, live rows (container_profiles migrations 032/039), Verified
     // 2026-08-06 against production Postgres — not an invented fixture.
@@ -924,7 +921,14 @@ describe('Agent container profile wiring', () => {
   // RA-1: POST /agents with valid container_profile_id persists it
   it('POST /agents with valid container_profile_id persists it', async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'profile-uuid' }] }) // SELECT container_profiles (validation)
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'profile-uuid',
+          default_cpus: '1.0',
+          default_mem_limit: '1g',
+          default_pids_limit: 200,
+        }],
+      }) // SELECT container_profiles (validation + defaults)
       .mockResolvedValueOnce({
         rows: [{ id: 'uuid-1', agent_id: 'test-agent', name: 'Test', status: 'stopped',
                  container_profile_id: 'profile-uuid', created_by: 'regular-user' }],
@@ -944,6 +948,181 @@ describe('Agent container profile wiring', () => {
     expect(insertCall).toBeTruthy();
     expect(insertCall![0]).toContain('container_profile_id');
     expect(insertCall![1]).toContain('profile-uuid');
+  });
+
+  it('POST /agents uses selected profile resource defaults when overrides are omitted', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'browser-profile-uuid',
+          default_cpus: '2.0',
+          default_mem_limit: '2g',
+          default_pids_limit: 300,
+        }],
+      }) // SELECT container_profiles (validation + defaults)
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', name: 'Test', status: 'stopped',
+                 container_profile_id: 'browser-profile-uuid', created_by: 'regular-user' }],
+      }) // INSERT agent
+      .mockResolvedValueOnce({ rows: [] }); // SELECT skills for response
+
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', container_profile_id: 'browser-profile-uuid' });
+
+    expect(res.status).toBe(201);
+    const insertCall = mockQuery.mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string' && call[0].includes('INSERT INTO agents')
+    );
+    expect(insertCall![1].slice(4, 7)).toEqual(['2.0', '2g', 300]);
+  });
+
+  it('POST /agents/import uses selected profile resource defaults when overrides are omitted', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'browser-profile-uuid',
+          default_cpus: '2.0',
+          default_mem_limit: '2g',
+          default_pids_limit: 300,
+        }],
+      }) // SELECT container_profiles (validation + defaults)
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'imported-agent', name: 'Imported', status: 'stopped',
+                 container_profile_id: 'browser-profile-uuid', created_by: 'regular-user' }],
+      }) // INSERT agent
+      .mockResolvedValueOnce({ rows: [] }); // SELECT skills for response
+
+    const res = await request(app)
+      .post('/agents/import')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'imported-agent', name: 'Imported', container_profile_id: 'browser-profile-uuid' });
+
+    expect(res.status).toBe(201);
+    const insertCall = mockQuery.mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string' && call[0].includes('INSERT INTO agents')
+    );
+    expect(insertCall![1].slice(4, 7)).toEqual(['2.0', '2g', 300]);
+  });
+
+  it('POST /agents rejects an over-ceiling selected profile default before INSERT', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'legacy-profile-uuid',
+        default_cpus: '2.0',
+        default_mem_limit: '2g',
+        default_pids_limit: 301,
+      }],
+    });
+
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'test-agent', name: 'Test', container_profile_id: 'legacy-profile-uuid' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('default_pids_limit');
+    expect(mockQuery.mock.calls).toHaveLength(1);
+  });
+
+  it('POST /agents/import rejects an invalid selected profile default before INSERT', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'legacy-profile-uuid',
+        default_cpus: 'invalid',
+        default_mem_limit: '2g',
+        default_pids_limit: 300,
+      }],
+    });
+
+    const res = await request(app)
+      .post('/agents/import')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id: 'imported-agent', name: 'Imported', container_profile_id: 'legacy-profile-uuid' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('default_cpus');
+    expect(mockQuery.mock.calls).toHaveLength(1);
+  });
+
+  it('POST /agents/import preserves explicit resource overrides over selected profile defaults', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'browser-profile-uuid',
+          default_cpus: '2.0',
+          default_mem_limit: '2g',
+          default_pids_limit: 300,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'imported-agent', name: 'Imported', status: 'stopped',
+                 container_profile_id: 'browser-profile-uuid', created_by: 'regular-user' }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .post('/agents/import')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({
+        agent_id: 'imported-agent', name: 'Imported', container_profile_id: 'browser-profile-uuid',
+        cpus: '1.5', mem_limit: '1536m', pids_limit: 250,
+      });
+
+    expect(res.status).toBe(201);
+    const insertCall = mockQuery.mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string' && call[0].includes('INSERT INTO agents')
+    );
+    expect(insertCall![1].slice(4, 7)).toEqual(['1.5', '1536m', 250]);
+  });
+
+  it.each([
+    ['POST /agents', '/agents', 'test-agent', { cpus: '' }],
+    ['POST /agents', '/agents', 'test-agent', { mem_limit: '' }],
+    ['POST /agents', '/agents', 'test-agent', { pids_limit: 0 }],
+    ['POST /agents/import', '/agents/import', 'imported-agent', { cpus: '' }],
+    ['POST /agents/import', '/agents/import', 'imported-agent', { mem_limit: '' }],
+    ['POST /agents/import', '/agents/import', 'imported-agent', { pids_limit: 0 }],
+  ])('%s rejects an explicit falsey resource value instead of replacing it with defaults', async (_label, endpoint, agent_id, resource) => {
+    const res = await request(app)
+      .post(endpoint)
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ agent_id, name: 'Test', ...resource });
+
+    expect(res.status).toBe(400);
+    expect(mockQuery.mock.calls).toHaveLength(0);
+  });
+
+  it('POST /agents preserves explicit resource overrides over selected profile defaults', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'browser-profile-uuid',
+          default_cpus: '2.0',
+          default_mem_limit: '2g',
+          default_pids_limit: 300,
+        }],
+      }) // SELECT container_profiles (validation + defaults)
+      .mockResolvedValueOnce({
+        rows: [{ id: 'uuid-1', agent_id: 'test-agent', name: 'Test', status: 'stopped',
+                 container_profile_id: 'browser-profile-uuid', created_by: 'regular-user' }],
+      }) // INSERT agent
+      .mockResolvedValueOnce({ rows: [] }); // SELECT skills for response
+
+    const res = await request(app)
+      .post('/agents')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({
+        agent_id: 'test-agent', name: 'Test', container_profile_id: 'browser-profile-uuid',
+        cpus: '1.5', mem_limit: '1536m', pids_limit: 250,
+      });
+
+    expect(res.status).toBe(201);
+    const insertCall = mockQuery.mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string' && call[0].includes('INSERT INTO agents')
+    );
+    expect(insertCall![1].slice(4, 7)).toEqual(['1.5', '1536m', 250]);
   });
 
   // RA-2: POST /agents with nonexistent container_profile_id returns 400
@@ -1040,6 +1219,24 @@ describe('Agent container profile wiring', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/pids_limit must be a positive integer/);
+  });
+
+  it.each([
+    ['cpus', ''],
+    ['mem_limit', ''],
+    ['pids_limit', 0],
+  ])('PUT /agents/:id rejects explicit falsey %s instead of treating it as omitted', async (field, value) => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'uuid-1', agent_id: 'test', status: 'stopped', created_by: 'regular-user', model_policy_id: null }],
+    }); // SELECT existing agent
+
+    const res = await request(app)
+      .put('/agents/uuid-1')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ [field]: value });
+
+    expect(res.status).toBe(400);
+    expect(mockQuery.mock.calls).toHaveLength(1);
   });
 
   // THE ASSERTION THAT MATTERS (app#212 family — sibling drift sweep).
