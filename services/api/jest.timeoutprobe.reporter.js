@@ -39,20 +39,12 @@ class TimeoutProbeReporter {
     );
     if (!timeoutMessage) return;
 
-    // Capped, not the full stack trace jest attaches (frames through
-    // jest-circus/jest-runtime internals that name nothing about THIS
-    // failure) — same discipline as jest.probe400.js's BODY_CAP. The first
-    // ~300 chars already contain jest's own fixed "Exceeded timeout of Nms"
-    // sentence in full; that is the diagnostic content, not the frames below it.
-    const MESSAGE_CAP = 500;
-
     this._rec({
       kind: 'test-timeout',
       test: testCaseResult.fullName || testCaseResult.title,
       // AssertionResult.duration is jest's own measured elapsed time for
       // this test case — not a value this probe computed itself.
       elapsedMs: typeof testCaseResult.duration === 'number' ? testCaseResult.duration : null,
-      message: timeoutMessage.slice(0, MESSAGE_CAP),
     });
   }
 }
