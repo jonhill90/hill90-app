@@ -57,6 +57,11 @@ jobs:
       # ~15.27s mean without, ~15.26s mean with — noise, not a tradeoff being
       # made silently.
       AUTH_401_PROBE: '1'
+      # app#605: these probes are deliberately enabled beside the established
+      # 401 probe. Both write under services/api/test-artifacts/, which the
+      # always() artifact step below already uploads as a directory.
+      PROBE_400: '1'
+      PROBE_TIMEOUT: '1'
     defaults:
       run:
         working-directory: services/api
