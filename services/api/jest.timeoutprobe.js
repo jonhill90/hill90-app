@@ -62,17 +62,15 @@ function wrapRequest(mod){
     const req=orig.apply(this,args);
     const id=++seq;
     // Node's http.request supports (options[, cb]) or (url[, options][, cb]).
-    // Best-effort extraction — this is diagnostic metadata, never load-bearing
-    // for the actual request, so a shape this doesn't recognize just records
-    // less detail rather than throwing.
-    let method='GET', reqPath='';
+    // Keep just the method: a URL or options.path can contain query credentials,
+    // and these records are retained as CI artifacts.
+    let method='GET';
     try{
       const firstArgIsUrl=typeof args[0]==='string' || args[0] instanceof URL;
       const opts=firstArgIsUrl ? (args[1] && typeof args[1]==='object' ? args[1] : {}) : (args[0]||{});
       method=opts.method || req.method || 'GET';
-      reqPath=opts.path || opts.pathname || (firstArgIsUrl ? String(args[0]) : '') || '';
     }catch(e){}
-    const entry={id, method, path: reqPath, startedAt: Date.now(), test: tn()};
+    const entry={id, method, startedAt: Date.now(), test: tn()};
     inFlight.set(id, entry);
     const clear=()=>{ inFlight.delete(id); };
     try{
@@ -103,7 +101,7 @@ afterEach(() => {
   if(inFlight.size===0) return;
   const now=Date.now();
   const pendingRequests=Array.from(inFlight.values()).map((e)=>({
-    method:e.method, path:e.path, elapsedMs: now-e.startedAt,
+    method:e.method, elapsedMs: now-e.startedAt,
   }));
   rec({
     kind:'requests-open-at-teardown',
