@@ -3,7 +3,13 @@
 An AI agent platform that runs locally in Docker and in production as a tenant of
 the [Hill90](https://github.com/jonhill90/Hill90) platform, consuming its
 identity, database and object storage. [hill90.com](https://hill90.com) serves the UI on a Let's Encrypt
-certificate. **All eight stacks are deployed and healthy.** See
+certificate. Production has **five deploy units** (`ui`, `api`, `ai`,
+`knowledge`, `mcp`); the tenant has seven running containers. **Verified
+2026-08-09 03:53:04 UTC by a read-only production `docker ps` census:** 16 platform
+plus 7 tenant containers were running, none was unhealthy, and every container
+with a health check reported healthy. This is a health measurement, not proof that
+production matches `main`: [deploy-drift issue
+#621](https://github.com/jonhill90/hill90-app/issues/621) remains open. See
 [Production](#production).
 
 ```bash
@@ -27,7 +33,7 @@ chat.
 
 | Service | Stack | Role |
 |---|---|---|
-| [`services/api`](services/api) | Express / TypeScript | Control plane — agent lifecycle, Ed25519 JWT signing, provider connections, model policies, chat, usage. 65 migrations under `src/db/migrations/` |
+| [`services/api`](services/api) | Express / TypeScript | Control plane — agent lifecycle, Ed25519 JWT signing, provider connections, model policies, chat, usage. 76 migration files under `src/db/migrations/`, through numbered migration 072 |
 | [`services/ai`](services/ai) | FastAPI / Python 3.12 | Model router — policy-gated inference, BYOK, delegated scopes, fronts LiteLLM. Internal-only (`traefik.enable=false`) |
 | [`services/knowledge`](services/knowledge) | FastAPI / Python 3.12 | Agent Knowledge Manager — persistent memory, full-text search, journaling, context assembly. Internal-only. 12 migrations |
 | [`services/agentbox`](services/agentbox) | Starlette / uvicorn | Sandboxed agent runtime — non-root `agentuser`, resource limits, network isolation, policy-gated shell and filesystem |
@@ -291,16 +297,22 @@ gh workflow run "Manual Deploy App (Prod)" -f service=ui -f dry_run=true
 `confirm_public_deploy`. `dry_run` runs every guard — secrets, tenancy contract,
 host paths — and stops before deploying anything.
 
+### Historical first-deploy record — 2026-07-29
+
 **Verified against the host 2026-07-29 07:34 UTC** — 23 containers running, 0
-unhealthy, of which 13 are Hill90's platform baseline and 10 are this app.
+unhealthy, of which 13 were Hill90's platform baseline and 10 were this app.
+Those counts are historical evidence of the yank-out-era deployment, not the
+current platform baseline.
 
 | Stack | State |
 |---|---|
-| `db`, `auth`, `api`, `ui`, `knowledge`, `ai`, `mcp`, `minio` | deployed, healthy |
+| `db`, `auth`, `api`, `ui`, `knowledge`, `ai`, `mcp`, `minio` | deployed, healthy at that historical timestamp |
 
-**Deployed is not the same as current.** Several changes are merged to `main` and
-**not yet deployed** — as of 2026-07-29 07:34 UTC that includes #22, #25, #26 and
-#28. The running containers still carry the previous configuration.
+**Deployed is not the same as current.** The historical note below described
+the 2026-07-29 state. The current deploy-drift alarm still reports running
+container revisions behind `main`; [issue #621](https://github.com/jonhill90/hill90-app/issues/621)
+is open, with its latest recorded alarm from [2026-08-09 02:27:42 UTC](https://github.com/jonhill90/hill90-app/actions/runs/31290366923).
+Do not infer that a merged change is deployed from its presence on `main`.
 
 Do not read the table as a roadmap. It is the state of the host at the timestamp
 above, and it goes stale — re-check before relying on it.
@@ -313,7 +325,18 @@ signing keys are generated locally by `scripts/local.sh` and there was no
 equivalent step in the deploy path. Once the volume held `public.pem` and
 `model-router-public.pem`, both recovered with no further change.
 
-### Signing in — client authentication works; sign-in unproven
+### Signing in — current state and historical diagnosis
+
+**Current configured path:** the UI signs in through Hill90's Keycloak at
+`auth.hill90.com`, realm `platform`, using the `hill90-ui` client. The production
+cutover record verifies a real authorization-code sign-in, platform event storage,
+and retirement of `app-auth.hill90.com` and the former `hill90` realm; see the dated
+[handoff evidence](docs/decisions/HANDOFF-2026-07-31.md#what-the-app-consumes-now).
+The platform record dates the completed sign-in to `2026-07-30 02:07 UTC` and the
+retired realm plus enabled event storage to `2026-07-31 06:21 UTC`.
+
+The following is the dated 2026-07-29/30 diagnosis, retained as historical
+evidence rather than a statement of current production behavior:
 
 > **The `hill90-ui` client secret is repaired** (~23:50 UTC 2026-07-29). Keycloak
 > and the store agree — both 64 characters, matching hash, verified 00:15 UTC
@@ -328,49 +351,55 @@ equivalent step in the deploy path. Once the volume held `public.pem` and
 > grant simply not permitted. The wrong one says *Invalid client or Invalid client
 > credentials*. Read the body, not the status.
 
-[hill90.com](https://hill90.com) → **Sign in** redirects to
+[hill90.com](https://hill90.com) → **Sign in** redirected to
 `app-auth.hill90.com`, the app's own Keycloak, using PKCE and the `hill90-ui`
-client. Accounts are created by the operator in the `hill90` realm with
+client. Accounts were created by the operator in the `hill90` realm with
 temporary passwords that must be changed at first login. No credentials are
 published here, and none are seeded — see
 [CLAUDE.md](CLAUDE.md)
 for why that is a known gap rather than an oversight.
 
-### Consolidation — decided, not yet done
+### Consolidation — completed
 
 **The platform provides identity, data and storage; this app consumes them.**
 Every decision below follows from that.
 
-Production currently runs both Hill90's platform services and the app's own:
-Hill90 holds realm `platform` on `auth.hill90.com`, the app holds realm `hill90`
-on `app-auth.hill90.com`, and each has its own Postgres with separate volumes.
-That is the current state, not the target.
+The production compose and deploy configuration consumes Hill90's shared identity,
+data and object-storage services; it does not define an application Keycloak,
+Postgres, or MinIO deploy unit. The cutover was also proven through real traffic,
+not inferred from configuration: see the dated identity, database, and object-storage
+[handoff checks](docs/decisions/HANDOFF-2026-07-31.md#proven-by-traffic-not-by-configuration).
 
-- **Keycloak — decided.** One Keycloak, one realm, the **existing `platform`**.
-  No new `hill90` realm. You do not create a second directory for one
-  organisation; infra-versus-app is role and client assignment inside it.
+- **Keycloak — DONE.** One Keycloak and the existing `platform` realm at
+  `auth.hill90.com`; the former app Keycloak and `hill90` realm are retired.
+  Authorization is by `hill90-ui` client roles.
 - **Postgres — DONE, 2026-07-31.** `app-postgres` is retired: container removed,
-  volume `prod_app-postgres-data` deliberately kept, all four services on the
-  platform instance as the tenant role `hill90_app`. The complication turned out to
+  volume `prod_app-postgres-data` deliberately kept, and all three tenant databases
+  are on the platform instance under the role `hill90_app`. The complication turned out to
   be solvable rather than blocking — the platform grew a NOSUPERUSER tenant role with
   per-database grants, so the "platform-only databases" health check was never the
   obstacle it looked like. See
   [retiring-app-postgres.md](docs/decisions/retiring-app-postgres.md).
-- **MinIO — open**, and reversed: only `app-minio` exists, there is **no platform
-  MinIO**, so the question is whether storage moves *up*.
+- **MinIO — DONE.** Production uses Hill90's platform MinIO. `app-minio` was
+  stopped and retained with its volume after the cutover; deleting that retained
+  data remains a deliberate decision. The local MinIO compose path remains
+  deliberate and is not a production service.
 
-This is **greenfield configuration, not a migration** — the app first reached the
-VPS on 2026-07-29 and has no accumulated state. The realm export and database
-backup are a safety net, not steps in a process.
+The 2026-07-31 cutover was **greenfield configuration, not a migration** — the
+app had reached the VPS two days earlier and held migration-created catalogue and
+bookkeeping data, but nothing worth preserving. The realm export and database
+backup were safety nets, not migration steps. That statement describes the
+cutover; it is not a claim that today's databases are empty.
 
-The tenancy is detachable, and this has been **tested rather than assumed**. On
-2026-07-29 the app was torn down to a single container and redeployed: Hill90
-returned to exactly its 13-container baseline with all four shared networks
-intact, the app came back to 10 healthy containers, `hill90.com` answered 200,
-the login form was reachable, and both user accounts survived in the database.
-The yank-out test passed. Note the limit: accounts surviving is a data claim, and
-the login form rendering is a routing claim — neither means a user can sign in.
-See [Signing in](#signing-in--client-authentication-works-sign-in-unproven).
+The tenancy is detachable, and this has been **tested rather than assumed**. The
+following 2026-07-29 measurement is historical: the app was torn down to a
+single container and redeployed; Hill90 returned to exactly its then
+13-container baseline with all four shared networks intact, and the app came
+back to 10 healthy containers. `hill90.com` answered 200, the login form was
+reachable, and both user accounts survived in the database. The yank-out test
+passed. Its limit remains important: accounts surviving is a data claim, and
+the login form rendering is a routing claim — neither established a completed
+sign-in at that time. See [Signing in](#signing-in--current-state-and-historical-diagnosis).
 
 ### Backups
 
