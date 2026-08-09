@@ -80,7 +80,7 @@ describe('the UI had no unhandledRejection backstop at all — this is the gap, 
 });
 
 describe('the Next.js runtime guard in src/instrumentation.ts', () => {
-  it('registers the backstop only under NEXT_RUNTIME=nodejs, not edge', async () => {
+  it('Edge adds zero unhandledRejection listeners', async () => {
     const r = run(`
       process.env.NEXT_RUNTIME = 'edge';
       import('./src/instrumentation').then(async (mod) => {
@@ -89,31 +89,32 @@ describe('the Next.js runtime guard in src/instrumentation.ts', () => {
         // the actual register hook under either loader shape.
         const register = mod.register ?? mod.default?.register;
         if (typeof register !== 'function') throw new TypeError('instrumentation.register is not a function');
+        const before = process.listeners('unhandledRejection').length;
         await register();
-        // If register() had tried process.on() under 'edge' where it shouldn't
-        // even be reached, that's still a real process.on call in Node here (this
-        // harness has a real process object) — so the actual assertion is that
-        // NO import of the backstop module happened, proven by it not being able
-        // to throw from inside install (it never got a chance to run at all).
-        console.log('REGISTER RETURNED WITHOUT INSTALLING');
+        const added = process.listeners('unhandledRejection').length - before;
+        console.log('EDGE_UNHANDLED_REJECTION_LISTENERS_ADDED=' + added);
       });
     `);
-    expect(r.stdout).toContain('REGISTER RETURNED WITHOUT INSTALLING');
+    expect(r.stdout).toContain('EDGE_UNHANDLED_REJECTION_LISTENERS_ADDED=0');
     expect(r.code).toBe(0);
   });
 
-  it('installs the backstop under NEXT_RUNTIME=nodejs — same live behavior as calling it directly', () => {
+  it('Node adds the intended listener and retains fatal behavior', () => {
     const r = run(`
       process.env.NEXT_RUNTIME = 'nodejs';
       import('./src/instrumentation').then(async (mod) => {
         const register = mod.register ?? mod.default?.register;
         if (typeof register !== 'function') throw new TypeError('instrumentation.register is not a function');
+        const before = process.listeners('unhandledRejection').length;
         await register();
+        const added = process.listeners('unhandledRejection').length - before;
+        console.error('NODE_UNHANDLED_REJECTION_LISTENERS_ADDED=' + added);
         void (async () => { throw new Error('leaked under nodejs runtime') })();
       });
     `);
 
     expect(r.code).toBe(1);
+    expect(r.stderr).toContain('NODE_UNHANDLED_REJECTION_LISTENERS_ADDED=1');
     expect(r.stderr).toMatch(/\[fatal\] unhandled promise rejection/);
     expect(r.stderr).toMatch(/leaked under nodejs runtime/);
   });
