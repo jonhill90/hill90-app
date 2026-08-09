@@ -16,7 +16,7 @@ Every load-bearing claim below is tagged with how it was established: **(test)**
 
 ## 0. Ground truth
 
-**The governing architectural fact (code + CLAUDE.md, 2026-07-31): the app is a tenant, not a platform.** In production it does not run its own identity provider, database, or object store — it consumes Hill90's Keycloak (realm `platform`), Hill90's PostgreSQL (as tenant role `hill90_app`, `NOSUPERUSER`), and, per CLAUDE.md, has an **open, undecided** question about whether it will also consume Hill90's MinIO or keep running its own (`app-minio`). Do not treat MinIO consolidation as done — it explicitly is not, per CLAUDE.md's own correction of an earlier, wrong "reversed" framing.
+**The governing architectural fact (code + deployment configuration, re-checked 2026-08-08): the app is a tenant, not a platform.** Production deployment configuration does not run its own identity provider, database, or object store. For object storage specifically, the API compose file supplies `MINIO_ENDPOINT` (default `http://minio:9000`) and injects `MINIO_TENANT_ACCESS_KEY` / `MINIO_TENANT_SECRET_KEY`; `scripts/deploy.sh` refuses the retired `minio` stack. Those are **code/configuration facts**, not proof of a live storage operation. The exact production credential identity and scope — `tenant-hill90-app` — are instead a **doc, dated 2026-07-31** operational claim in [HANDOFF-2026-07-31.md](../decisions/HANDOFF-2026-07-31.md); this document does not infer them from variable names or compose comments. Local development deliberately still runs `app-minio`.
 
 **Retired, do not resurrect (doc, dated 2026-07-31, CLAUDE.md):** `app-postgres` (container removed, volume `prod_app-postgres-data` deliberately kept as a safety net) and the app's own Keycloak realm `hill90` at `app-auth.hill90.com` (now 404s).
 
@@ -49,6 +49,8 @@ Every load-bearing claim below is tagged with how it was established: **(test)**
 
 **Human → API, via Keycloak (code: `docs/architecture/trust-boundaries.md`, current as far as re-checked below).** Authorization is by Keycloak **client role** on `hill90-ui` (`admin`/`user`), not realm role — the platform realm's own `admin`/`user` realm roles mean something else entirely (Grafana Admin, OpenBao) and must not be conflated with this app's roles. `middleware/role.ts`'s `ROLE_IMPLIES` map encodes `admin ⊃ user` as a one-level, test-pinned hierarchy (`role-hierarchy.test.ts`) — not a general RBAC graph.
 
+**API user-token verification limitation (code, `services/api/src/middleware/auth.ts`, re-checked 2026-08-08):** `jwt.verify` is passed the configured issuer and `RS256` algorithm constraint, but no `audience` option. Therefore the current API user-token verification does not apply an audience constraint. This is a statement of present behavior only; this document does not decide whether it should change.
+
 **Agent → internal services, via API-issued Ed25519 JWT, never Keycloak (code: `trust-boundaries.md`, `workload-claims.ts`).** Agents have no Keycloak representation by deliberate decision ("Option C" in that document) — the API service is the sole identity authority for agent principals, issuing short-lived (1-hour TTL), revocable, `WorkloadClaims`-shaped tokens whose scope is the intersection of the owning human's current Keycloak roles and the agent's assigned skill scopes, computed once at issuance. **Re-verified 2026-08-07 (live/code): the `WORKLOAD_PRINCIPAL_V2` migration this document describes is still gated behind an environment flag that is unset — and therefore `false` — in both `deploy/compose/prod/docker-compose.api.yml` and `compose/local.yml`.** The "migration window" trust-boundaries.md describes is not underway anywhere this app actually runs; V1 (slug-based `sub`) is the only behavior in effect today.
 
 **The chat callback boundary (test, `chat-callback-contract.test.ts`, app#608, 2026-08-06).** `POST /internal/chat/callback` is proven against a real Postgres: correct-token happy path persists a message and advances the SSE cursor; a second callback for an already-terminal message is a no-op (the guarded `UPDATE` only matches `pending`/`thinking`); and all four ways an attacker-controlled token can be wrong are individually proven rejected with `401` and a verified-untouched row — absent header, same-length-wrong token, different-length-wrong token, malformed `Bearer` prefix. A fifth case, no token configured server-side at all, is `503`, not `401`.
@@ -71,7 +73,7 @@ Every load-bearing claim below is tagged with how it was established: **(test)**
 | A full agent lifecycle — human signs in, creates agent, agent replies via chat — has completed end to end | **Not proven. Not claimed.** | `chat_threads` = 0, live, 2026-08-07 |
 | A human has ever signed in to production | **Asserted, dated, not re-verified here** | CLAUDE.md, 2026-07-31 |
 | `WORKLOAD_PRINCIPAL_V2` migration is underway | **False as of this document** | flag unset in both compose files, checked 2026-08-07 |
-| MinIO consolidation onto the platform is done | **False — open, undecided** | CLAUDE.md's own correction of an earlier wrong claim |
+| Production object storage is configured for platform MinIO | **Code/configuration, not live-verified here** | API compose defaults `MINIO_ENDPOINT` to `http://minio:9000` and injects `MINIO_TENANT_*`; `scripts/deploy.sh` refuses retired `minio`. The exact `tenant-hill90-app` identity/scope is a separate dated handoff claim. |
 | Eight stacks are deployed | **Contradicted within this repo** | README says eight; CLAUDE.md says five, dated 2026-08-04 |
 | Invitation email works | **Unverified — real, open dependency** | app#500 design note: realm SMTP password is blank in the checked-in export |
 
@@ -88,6 +90,6 @@ This section exists because Hill90#797 and this document's own opening argument 
 ## 5. Open questions, not resolved by this document
 
 - Whether Keycloak's realm SMTP configuration can actually deliver an execute-actions email — structurally configured, password blank in the checked-in export, never confirmed to send (app#500).
-- Whether MinIO consolidates onto the platform or stays app-owned (CLAUDE.md, open).
+- Whether local development should move from its deliberate `app-minio` to platform MinIO. Production consolidation is settled; this is only a local-parity decision ([local-parity-with-platform-services.md](../decisions/local-parity-with-platform-services.md)).
 - Which of README's stack-count claims is current, and whether README should be corrected or whether CLAUDE.md's dated table should be treated as the sole source of truth for that fact going forward.
 - Whether the `WORKLOAD_PRINCIPAL_V2` migration is still intended, abandoned, or simply not yet scheduled — the flag exists in code, is documented as an active migration in `trust-boundaries.md`, and is enabled nowhere.
