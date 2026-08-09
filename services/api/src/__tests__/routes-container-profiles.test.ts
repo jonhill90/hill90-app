@@ -199,6 +199,22 @@ describe('Container Profiles routes', () => {
     expect(res.body.error).toMatch(/docker_image/i);
   });
 
+  it.each([
+    ['default_cpus', '5.0'],
+    ['default_mem_limit', '9999g'],
+    ['default_pids_limit', 301],
+    ['default_pids_limit', 0],
+  ])('POST /container-profiles rejects invalid %s before INSERT', async (field, value) => {
+    const res = await request(app)
+      .post('/container-profiles')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'gpu-enabled', docker_image: 'hill90/agentbox-gpu:latest', [field]: value });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(field);
+    expect(mockQuery.mock.calls).toHaveLength(0);
+  });
+
   // CP-9: POST /container-profiles duplicate name returns 409
   it('POST /container-profiles duplicate name returns 409', async () => {
     const err: any = new Error('duplicate');
@@ -255,6 +271,24 @@ describe('Container Profiles routes', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.error).toMatch(/not found/i);
+  });
+
+  it.each([
+    ['default_cpus', 'invalid'],
+    ['default_mem_limit', '9999g'],
+    ['default_pids_limit', 301],
+    ['default_pids_limit', 0],
+  ])('PUT /container-profiles/:id rejects invalid %s before UPDATE', async (field, value) => {
+    mockQuery.mockResolvedValueOnce({ rows: [customProfile] }); // SELECT existing
+
+    const res = await request(app)
+      .put(`/container-profiles/${PROFILE_UUID}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ [field]: value });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(field);
+    expect(mockQuery.mock.calls).toHaveLength(1);
   });
 
   // app#599: POST requires name/docker_image non-empty; PUT had no
